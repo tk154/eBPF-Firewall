@@ -120,9 +120,9 @@ static bool parse_conntrack_line(char* ct_line, struct conntrack_key* key, connt
     }
 
     // For Debugging purposes
-    printf("Protocol: %hhu\n", key->protocol);
+    /*printf("Protocol: %hhu\n", key->protocol);
     printf("Source - IP: %s, Port: %hu\n", src_ip_str, key->src_port);
-    printf("Destination - IP: %s, Port: %hu\n\n", dst_ip_str, key->dest_port);
+    printf("Destination - IP: %s, Port: %hu\n\n", dst_ip_str, key->dest_port);*/
 
     // Convert src and dst IP string to binary form
     inet_pton(AF_INET, src_ip_str, &key->src_ip);
