@@ -13,19 +13,18 @@
 #include "../../common.h"
 
 
-#define CONNTRACK_BASE_MATCH \
-    "ipv4 %*d %*s %hhu"
+// Match IPv4, %n for no. of parsed characters
+#define CONNTRACK_IPV4_MATCH \
+    "ipv4 %*d %*s %hhu %*d %n"
 
+// %s for the connection state
 #define CONNTRACK_TCP_MATCH \
-    "ipv4 %*d %*s %*u %*d %s " \
-    "src=%s dst=%s sport=%hu dport=%hu"
+    "%s src=%s dst=%s sport=%hu dport=%hu"
 
 #define CONNTRACK_UDP_MATCH \
-    "ipv4 %*d %*s %*u %*d " \
     "src=%s dst=%s sport=%hu dport=%hu"
 
 #define CONNTRACK_ICMP_MATCH \
-    "ipv4 %*d %*s %*u %*d " \
     "src=%s dst=%s"
 
 
@@ -84,9 +83,15 @@ static unsigned int tcp_state_str2int(char* state) {
  * @returns true, if the given conntrack line was parsed successfully, false otherwise
  * **/
 static bool parse_conntrack_line(char* ct_line, struct conntrack_key* key, conntrack_state* state) {
+    // Store the number of parsed characters by sscanf
+    unsigned int parsed_chars;
+
     // Try to retrieve the IPv4 Protocol
-    if (sscanf(ct_line, CONNTRACK_BASE_MATCH, &key->protocol) != 1)
+    if (sscanf(ct_line, CONNTRACK_IPV4_MATCH, &key->protocol, &parsed_chars) != 1)
         return false;
+
+    // Move the pointer after the already parsed characters
+    ct_line += parsed_chars;
 
     // To store the IP strings
     char src_ip_str[INET_ADDRSTRLEN];
