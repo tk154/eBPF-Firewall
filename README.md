@@ -24,7 +24,7 @@ make
 </pre>
 <br>
 
-Compile the user-space program. It will be located at <code>user/output/fw</code>.
+Compile the user-space program. It will be located at <code>user/output/fw</code>. The <code>libbpf</code> library is needed for the compilation.
 <pre>
 cd user
 make
