@@ -36,7 +36,7 @@ struct bpf_object_program* bpf_load_program(const char* prog_path, enum bpf_prog
     // Try to open the BPF object file, return on error
     bpf->obj = bpf_object__open_file(prog_path, NULL);
     if (!bpf->obj) {
-        fprintf(stderr, "Error opening BPF object file: %s (Code -%d).\n", strerror(errno), errno);
+        fprintf(stderr, "Error opening BPF object file: %s (-%d).\n", strerror(errno), errno);
         goto error;
     }
 
@@ -50,7 +50,7 @@ struct bpf_object_program* bpf_load_program(const char* prog_path, enum bpf_prog
 
     // Try to load the BPF object into the kernel, return on error
     if (bpf_object__load(bpf->obj) != 0) {
-        fprintf(stderr, "Error loading BPF program into kernel: %s (Code -%d).\n", strerror(errno), errno);
+        fprintf(stderr, "Error loading BPF program into kernel: %s (-%d).\n", strerror(errno), errno);
         goto bpf_object__close;
     }
 
@@ -77,7 +77,7 @@ int bpf_if_attach_program(struct bpf_program* prog, char* ifname) {
     // Get the interface index from the interface name
     unsigned int ifindex = if_nametoindex(ifname);
     if (ifindex == 0) {
-        fprintf(stderr, "Error %d finding network interface %s: %s\n", errno, ifname, strerror(errno));
+        fprintf(stderr, "Error finding network interface %s: %s (-%d).\n", ifname, strerror(errno), errno);
         return errno;
     }
     
@@ -86,7 +86,7 @@ int bpf_if_attach_program(struct bpf_program* prog, char* ifname) {
         case BPF_PROG_TYPE_XDP:
             // Attach the program to the XDP hook
             if (bpf_xdp_attach(ifindex, bpf_program__fd(prog), XDP_ATTACH_FLAGS, NULL) != 0) {
-                fprintf(stderr, "Error %d attaching XDP program: %s\n", errno, strerror(errno));
+                fprintf(stderr, "Error attaching XDP program: %s (-%d).\n", strerror(errno), errno);
                 return errno;
             }
         break;
@@ -101,13 +101,13 @@ int bpf_if_attach_program(struct bpf_program* prog, char* ifname) {
             if (rc == -EEXIST)
                 fprintf(stderr, "TC hook already exists on %s. You can ignore the kernel error message.\n\n", ifname);
             else if (rc != 0) {
-                fprintf(stderr, "Error %d creating TC hook: %s\n", errno, strerror(errno));
+                fprintf(stderr, "Error creating TC hook: %s (-%d).\n", strerror(errno), errno);
                 return errno;
             }
 
             // Attach the TC prgram to the created hook
             if (bpf_tc_attach(&hook, &opts) != 0) {
-                fprintf(stderr, "Error %d attaching TC program on %s: %s\n", errno, ifname, strerror(errno));
+                fprintf(stderr, "Error attaching TC program on %s: %s (-%d).\n", ifname, strerror(errno), errno);
                 hook.attach_point |= BPF_TC_EGRESS;
                 bpf_tc_hook_destroy(&hook);
 
@@ -128,7 +128,7 @@ void bpf_if_detach_program(struct bpf_program* prog, char* ifname) {
     // Get the interface index from the interface name
     unsigned int ifindex = if_nametoindex(ifname);
     if (ifindex == 0) {
-        fprintf(stderr, "Error %d finding network interface %s: %s\n", errno, ifname, strerror(errno));
+        fprintf(stderr, "Error finding network interface %s: %s (-%d).\n", ifname, strerror(errno), errno);
         return;
     }
 
@@ -189,7 +189,7 @@ int bpf_attach_program(struct bpf_program* prog) {
     // Retrieve the name and index of all network interfaces
     struct if_nameindex* ifaces = if_nameindex();
     if (ifaces == NULL) {
-        fprintf(stderr, "Error %d retrieving network interfaces: %s\n", errno, strerror(errno));
+        fprintf(stderr, "Error retrieving network interfaces: %s (-%d).\n", strerror(errno), errno);
         return errno;
     }
 
@@ -211,6 +211,7 @@ int bpf_attach_program(struct bpf_program* prog) {
 
     // Retrieved interfaces are dynamically allocated, so they must be freed
     if_freenameindex(ifaces);
+    
     return rc;
 }
 
@@ -218,7 +219,7 @@ int bpf_detach_program(struct bpf_program* prog) {
     // Retrieve the name and index of all network interfaces
     struct if_nameindex* ifaces = if_nameindex();
     if (ifaces == NULL) {
-        fprintf(stderr, "Error %d retrieving network interfaces: %s\n", errno, strerror(errno));
+        fprintf(stderr, "Error retrieving network interfaces: %s (-%d).\n", strerror(errno), errno);
         return errno;
     }
 
@@ -229,5 +230,6 @@ int bpf_detach_program(struct bpf_program* prog) {
 
     // Retrieved interfaces are dynamically allocated, so they must be freed
     if_freenameindex(ifaces);
+
     return 0;
 }
