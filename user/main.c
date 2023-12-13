@@ -16,13 +16,26 @@
 #include "conntrack/conntrack.h"
 
 
+// Wether to exit the main loop and the program
+bool exitLoop = false;
+
 /**
- * Dummy interrupt signal handler
+ * Interrupt signal handler
  * @param sig Occured signal
 **/
-void interrupt_handler(int sig) {}
+void interrupt_handler(int sig) {
+    // On SIGINT, the main loop should exit
+    exitLoop = true;
+}
 
-bool check_cmd_args(int argc, char* argv[], enum bpf_prog_type* prog_type) {
+/**
+ * Checks if the given arguments are valid and determines the BPF hook
+ * @param argc The number of given arguments
+ * @param argv The given arguments
+ * @returns The bpf_prog_type for the given hook, -1 if the hook or BPF program path is missing
+ * or the hook is not xdp or tc
+ * **/
+int check_cmd_args(int argc, char* argv[], enum bpf_prog_type* prog_type) {
     // Check if the hook is provided in the command line
     if (argc < 2) {
         fputs("Missing hook argument: Must be either xdp or tc.\n", stderr);
@@ -58,35 +71,48 @@ int main(int argc, char* argv[]) {
     char* prog_hook = argv[1];
     char* prog_path = argv[2];
 
+    char** ifnames = &argv[3];
+    unsigned int if_count = argc - 3;
+
     // Load the BPF object (including program and maps) into the kernel
     puts("Loading BPF program into kernel ...");
     struct bpf_object_program* bpf = bpf_load_program(prog_path, prog_type);
-    if (bpf == NULL)
+    if (!bpf)
         return EXIT_FAILURE;
 
     // Read the conntrack info and save it inside the BPF conntrack map
-    int rc = read_and_save_conntrack(bpf->obj);
+    int rc = conntrack_init(bpf->obj);
     if (rc != 0)
-        goto bpf_detach_program;
+        goto bpf_unload_program;
 
-    // Attach the program to all non-virtual interfaces
     printf("Attaching BPF program to %s hook ...\n", prog_hook);
-    rc = bpf_attach_program(bpf->prog);
-    if (rc != 0)
-        goto bpf_detach_program;
 
-    // Catch CTRL+C with the dummy handler
+    // Attach the program to the specified interface names
+    rc = if_count == 0 ? bpf_attach_program(bpf->prog) : bpf_ifs_attach_program(bpf->prog, ifnames, if_count);
+    if (rc != 0)
+        goto conntrack_destroy;
+
+    // Catch CTRL+C with the handler to exit the main loop
     struct sigaction act;
     act.sa_handler = interrupt_handler;
     sigaction(SIGINT, &act, NULL);
 
     puts("Successfully loaded BPF program. Press CTRL+C to unload.");
-    pause();
+
+    while (!exitLoop) {
+        // Update the conntrack info
+        update_conntrack(bpf->obj);
+        sleep(2);
+    }
+
     puts("\nUnloading ...");
 
 bpf_detach_program:
-    // Detach the program from all interfaces
-    bpf_detach_program(bpf->prog);
+    // Detach the program from the specified interface names
+    if_count == 0 ? bpf_detach_program(bpf->prog) : bpf_ifs_detach_program(bpf->prog, ifnames, if_count);
+
+conntrack_destroy:
+    conntrack_destroy();
 
 bpf_unload_program:
     // Unload the BPF object from the kernel
