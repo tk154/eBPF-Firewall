@@ -8,43 +8,63 @@
 #define MAP_TO_STRING(map) STRINGIZE(map)           // Used to get the map name as a string (used for user space programs)
 
 
-#define CONNTRACK_MAP         		conntrack_map
-#define CONNTRACK_MAP_NAME    		MAP_TO_STRING(CONNTRACK_MAP)
+#define CONN_MAP         		conn_map
+#define CONN_MAP_NAME    		MAP_TO_STRING(CONN_MAP)
 
-struct conntrack_key {
+
+struct conn_key {
+	//__u8 src_mac[ETH_ALEN];
+	//__u8 dest_mac[ETH_ALEN];
+    //__u32 ifindex;
 	__be32 src_ip;
 	__be32 dest_ip;
 	__be16 src_port;
 	__be16 dest_port;
+	//__u16 vlan_id;
 	__u8 protocol;
 };
 
-typedef __u8 conntrack_state;
 
+struct conntrack_entry {
+	__u64 packets;
+	__u64 bytes;
+	__u8 state;
+};
 
-#define NAT_MAP         		nat_map
-#define NAT_MAP_NAME    		MAP_TO_STRING(NAT_MAP)
-
-struct nat_key {
-	__u8 src_mac[ETH_ALEN];
-	__u8 dest_mac[ETH_ALEN];
-    __u32 ifindex;
+/*struct nat_entry {
+	//__u8 src_mac[ETH_ALEN];
+	//__u8 dest_mac[ETH_ALEN];
 	__be32 src_ip;
 	__be32 dest_ip;
 	__be16 src_port;
 	__be16 dest_port;
-	__u16 vlan_id;
-	__u8 protocol;
+	__u8 rewrite_flag;
+};*/
+
+struct conn_value {
+	//struct conn_key c_key;
+	struct conntrack_entry ct_entry;
+	//struct nat_entry n_entry;
+	//__u8 target;
 };
 
-struct nat_value {
-	__u8 src_mac[ETH_ALEN];
-	__u8 dest_mac[ETH_ALEN];
-	__be32 src_ip;
-	__be32 dest_ip;
-	__be16 src_port;
-	__be16 dest_port;
+enum {
+	CONN_NEW = 0,
+	CONN_ESTABLISHED,
+	CONN_FIN
 };
+
+/*enum {
+	REWRITE_SRC_IP    = 1,
+	REWRITE_DEST_IP   = 2,
+	REWRITE_SRC_PORT  = 4,
+	REWRITE_DEST_PORT = 8,
+};
+
+enum {
+	TARGET_ACCEPT = 0,
+	TARGET_DROP
+};*/
 
 
 #endif
