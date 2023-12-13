@@ -2,7 +2,7 @@ ifdef OPENWRT_DIR
 include OpenWrt.mk
 endif
 
-LDLIBS := -lbpf -lelf -lz
+LDLIBS := -lbpf -lelf -lz -lnetfilter_conntrack -lnfnetlink -lmnl
 
 OUT_DIR := output
 OUT_BIN := $(OUT_DIR)/fw
