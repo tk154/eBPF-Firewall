@@ -41,17 +41,31 @@ struct conntrack_entry {
 	__u8 rewrite_flag;
 };*/
 
+struct next_hop {
+	__u32 ifindex;
+	__u8  smac[ETH_ALEN];
+	__u8  dmac[ETH_ALEN];
+	__u8  action;
+};
+
 struct conn_value {
 	//struct conn_key c_key;
 	struct conntrack_entry ct_entry;
+	struct next_hop next_h;
 	//struct nat_entry n_entry;
 	//__u8 target;
 };
 
 enum {
-	CONN_NEW = 0,
+	CONN_NEW,
 	CONN_ESTABLISHED,
 	CONN_FIN
+};
+
+enum {
+	ACTION_PASS = 1,
+	ACTION_DROP,
+	ACTION_REDIRECT
 };
 
 /*enum {
