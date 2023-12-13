@@ -21,7 +21,7 @@ $(OBJ_DIR)/tc_%.o: $(SRC_DIR)/%.c | $(OBJ_DIR)
 	$(CLANG) $(CFLAGS) $(TC_ARGS) -c $< -o $@
 
 $(OBJ_DIR):
-	@mkdir $(OBJ_DIR)
+	@mkdir -p $(OBJ_DIR)
 
 xdp: $(XDP_OBJ_FILES)
 
