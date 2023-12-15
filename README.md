@@ -24,6 +24,11 @@ The kernel/BPF program ...
 
 <br>
 
+The following picture illustrates how the forwarding of TCP packages is handled by the user-space and BPF program:
+<br><br>
+![](https://github.com/tk154/eBPF-Firewall/blob/main/pictures/tcp_conntrack.svg)
+<br><br>
+
 ## Usage
 
 Compile the XDP/TC kernel program. It will be located at <code>kernel/obj/xdp_fw.o</code> and <code>kernel/obj/tc_fw.o</code>.
