@@ -1,6 +1,7 @@
 #include "bpf_loader.h"
 
 #include <errno.h>
+#include <glob.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -12,23 +13,9 @@
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
 
-
 // For now, attach XDP programs in SKB/Generic mode
 #define XDP_ATTACH_FLAGS XDP_FLAGS_SKB_MODE
 
-
-/**
- * Used to check if a network interface is virtual
- * @param ifname Name of the network interface
- * @returns true if it is a virtual interface, false if it is physical
- * **/
-static bool if_is_virtual(char* ifname) {
-    char path[64];
-    snprintf(path, sizeof(path), "/sys/class/net/%s/device", ifname);
-
-    // Check if the device file is present, if not the interface is virtual
-    return access(path, F_OK) != 0;
-}
 
 struct bpf_object_program* bpf_load_program(const char* prog_path, enum bpf_prog_type prog_type) {
     struct bpf_object_program* bpf = (struct bpf_object_program*)malloc(sizeof(struct bpf_object_program));
@@ -183,53 +170,4 @@ void bpf_ifs_detach_program(struct bpf_program* prog, char* ifnames[], unsigned 
     // Iterate to all the given interfaces and detache the program from them
     for (int i = 0; i < ifname_size; i++)
         bpf_if_detach_program(prog, ifnames[i]);
-}
-
-int bpf_attach_program(struct bpf_program* prog) {
-    // Retrieve the name and index of all network interfaces
-    struct if_nameindex* ifaces = if_nameindex();
-    if (ifaces == NULL) {
-        fprintf(stderr, "Error retrieving network interfaces: %s (-%d).\n", strerror(errno), errno);
-        return errno;
-    }
-
-    int rc = 0;
-    for (struct if_nameindex* iface = ifaces; iface->if_index != 0 && iface->if_name != NULL; iface++) {
-        // Check if the device is not a virtual one
-        if (!if_is_virtual(iface->if_name)) {
-            rc = bpf_if_attach_program(prog, iface->if_name);
-
-            if (rc != 0) {
-                // If an error occured while attaching to one interface, detach all the already attached programs
-                while (--iface >= ifaces)
-                    bpf_if_detach_program(prog, iface->if_name);
-
-                break;
-            }
-        }
-    }
-
-    // Retrieved interfaces are dynamically allocated, so they must be freed
-    if_freenameindex(ifaces);
-    
-    return rc;
-}
-
-int bpf_detach_program(struct bpf_program* prog) {
-    // Retrieve the name and index of all network interfaces
-    struct if_nameindex* ifaces = if_nameindex();
-    if (ifaces == NULL) {
-        fprintf(stderr, "Error retrieving network interfaces: %s (-%d).\n", strerror(errno), errno);
-        return errno;
-    }
-
-    for (struct if_nameindex* iface = ifaces; iface->if_index != 0 && iface->if_name != NULL; iface++)
-        // Check if the device is not a virtual one
-        if (!if_is_virtual(iface->if_name))
-            bpf_if_detach_program(prog, iface->if_name);
-
-    // Retrieved interfaces are dynamically allocated, so they must be freed
-    if_freenameindex(ifaces);
-
-    return 0;
 }

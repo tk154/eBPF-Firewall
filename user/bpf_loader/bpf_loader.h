@@ -58,19 +58,5 @@ int bpf_ifs_attach_program(struct bpf_program* prog, char* ifnames[], unsigned i
  * **/
 void bpf_ifs_detach_program(struct bpf_program* prog, char* ifnames[], unsigned int ifname_size);
 
-/**
- * Attach a BPF program to all non-virtual network interfaces
- * @param prog A pointer to the to-be-attached BPF program
- * @returns 0 on success, -1 if the program is not of type XDP or TC, errno for other errors
- * **/
-int bpf_attach_program(struct bpf_program* prog);
-
-/**
- * Detach a BPF program from all non-virtual network interfaces
- * @param prog A pointer to the to-be-detached BPF program
- * @returns 0 on success, errno if the network interfaces couldn't be retrieved
- * **/
-int bpf_detach_program(struct bpf_program* prog);
-
 
 #endif

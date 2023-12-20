@@ -3,7 +3,7 @@
 The user-space program ...
 * Loads the BPF program into the kernel
 * Reads TCP, UDP and ICMP conntrack entries via <code>libnetfilter_conntrack</code> and saves them inside the BPF map <code>conn_map</code>
-* Attaches the BPF program to all non-virtual or per command argument specified interfaces
+* Attaches the BPF program to all specified interfaces
 * Checks every two seconds inside <code>conn_map</code> ...
     * The BPF program has received a package for a new connection. If yes, lookup the conection via <code>libnetfilter_conntrack</code> and if the connection is established (TCP), mark it inside <code>conn_map</code> as such
     * The BPF program has received a package for an already existing connection. If yes, it updates the conntrack entry timeout via <code>libnetfilter_conntrack</code>
@@ -57,15 +57,13 @@ make OPENWRT_DIR=~/openwrt TARGET=aarch64
 </pre>
 <br>
 
-Execute the program:
-* <code>&lt;hook&gt;</code> can be either <code>xdp</code> or <code>tc</code>.
-* If <code>&lt;Network Interfaces&gt;</code> is not specified, the BPF program will be attached to all non-virtual interfaces.
+Execute the program. <code>&lt;hook&gt;</code> can be either <code>xdp</code> or <code>tc</code>.
 <pre>
-./fw &lt;hook&gt; &lt;Path to the XDP/TC program&gt; &lt;Network Interfaces&gt;
+./fw &lt;hook&gt; &lt;Path to the XDP/TC program&gt; &lt;Network Interface(s)&gt;
 
 # For example
-./fw xdp xdp_fw.o
-./fw tc tc_fw.o eth1 eth2
+./fw xdp xdp_fw.o lan1 lan2
+./fw tc tc_fw.o lan1 lan2
 </pre>
 <br>
 

@@ -19,60 +19,62 @@
 // Wether to exit the main loop and the program
 bool exitLoop = false;
 
-/**
- * Interrupt signal handler
- * @param sig Occured signal
-**/
+// Interrupt signal handler
 void interrupt_handler(int sig) {
     // On SIGINT, the main loop should exit
     exitLoop = true;
 }
 
-/**
- * Checks if the given arguments are valid and determines the BPF hook
- * @param argc The number of given arguments
- * @param argv The given arguments
- * @returns The bpf_prog_type for the given hook, -1 if the hook or BPF program path is missing
- * or the hook is not xdp or tc
- * **/
-int check_cmd_args(int argc, char* argv[], enum bpf_prog_type* prog_type) {
+// Checks if the given arguments are valid and determines the BPF hook
+bool check_cmd_args(int argc, char* argv[], enum bpf_prog_type* prog_type,
+                    char** prog_path, char*** ifnames, unsigned int* if_count)
+{
     // Check if the hook is provided in the command line
     if (argc < 2) {
         fputs("Missing hook argument: Must be either xdp or tc.\n", stderr);
         return false;
     }
 
-    // Check if the BPF program path is provided in the command line
+    // Check if the BPF program/object path is provided in the command line
     if (argc < 3) {
-        fputs("Missing BPF program path.\n", stderr);
+        fputs("Missing BPF object path.\n", stderr);
+        return false;
+    }
+
+    // Check if network interface(s) are provided in the command line
+    if (argc < 4) {
+        fputs("Missing network interface(s).\n", stderr);
         return false;
     }
     
+
+    char* prog_hook = argv[1];
+
     // Check the hook argument
-    if (strcmp(argv[1], "xdp") == 0)
+    if (strcmp(prog_hook, "xdp") == 0)
         *prog_type = BPF_PROG_TYPE_XDP;
-    else if (strcmp(argv[1], "tc") == 0)
+    else if (strcmp(prog_hook, "tc") == 0)
         *prog_type = BPF_PROG_TYPE_SCHED_CLS;
     else {
-        fprintf(stderr, "Hook '%s' is not allowed: Must be either xdp or tc.\n", argv[1]);
+        fprintf(stderr, "Hook '%s' is not allowed: Must be either xdp or tc.\n", prog_hook);
         return false;
     }
+
+    *prog_path =  argv[2];
+    *ifnames   = &argv[3];
+    *if_count  = argc - 3;
 
     return true;
 }
 
 int main(int argc, char* argv[]) {
     enum bpf_prog_type prog_type;
+    char *prog_path, **ifnames;
+    unsigned int if_count;
 
     // Check if the arguments are provided correctly
-    if (!check_cmd_args(argc, argv, &prog_type))
+    if (!check_cmd_args(argc, argv, &prog_type, &prog_path, &ifnames, &if_count))
         return EXIT_FAILURE;
-
-    char* prog_hook = argv[1];
-    char* prog_path = argv[2];
-
-    char** ifnames = &argv[3];
-    unsigned int if_count = argc - 3;
 
     // Load the BPF object (including program and maps) into the kernel
     puts("Loading BPF program into kernel ...");
@@ -85,10 +87,10 @@ int main(int argc, char* argv[]) {
     if (rc != 0)
         goto bpf_unload_program;
 
-    printf("Attaching BPF program to %s hook ...\n", prog_hook);
+    printf("Attaching BPF program to network interfaces ...\n");
 
     // Attach the program to the specified interface names
-    rc = if_count == 0 ? bpf_attach_program(bpf->prog) : bpf_ifs_attach_program(bpf->prog, ifnames, if_count);
+    rc = bpf_ifs_attach_program(bpf->prog, ifnames, if_count);
     if (rc != 0)
         goto conntrack_destroy;
 
@@ -109,7 +111,7 @@ int main(int argc, char* argv[]) {
 
 bpf_detach_program:
     // Detach the program from the specified interface names
-    if_count == 0 ? bpf_detach_program(bpf->prog) : bpf_ifs_detach_program(bpf->prog, ifnames, if_count);
+    bpf_ifs_detach_program(bpf->prog, ifnames, if_count);
 
 conntrack_destroy:
     conntrack_destroy();
