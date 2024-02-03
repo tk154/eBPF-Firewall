@@ -9,7 +9,7 @@
 #include <bpf/bpf_endian.h>
 #include <bpf/bpf_helpers.h>
 
-#define DEBUG 1
+#define BPF_LOG_LEVEL BPF_LOG_LEVEL_INFO
 #include "common_xdp_tc.h"
 #include "../common.h"
 

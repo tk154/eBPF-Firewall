@@ -11,6 +11,8 @@
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
 
+#define FW_LOG_LEVEL FW_LOG_LEVEL_DEBUG
+#include "common.h"
 #include "../common.h"
 #include "bpf_loader/bpf_loader.h"
 #include "conntrack/conntrack.h"
@@ -31,19 +33,19 @@ bool check_cmd_args(int argc, char* argv[], enum bpf_prog_type* prog_type,
 {
     // Check if the hook is provided in the command line
     if (argc < 2) {
-        fputs("Missing hook argument: Must be either xdp or tc.\n", stderr);
+        FW_ERROR("Missing hook argument: Must be either xdp or tc.\n");
         return false;
     }
 
     // Check if the BPF program/object path is provided in the command line
     if (argc < 3) {
-        fputs("Missing BPF object path.\n", stderr);
+        FW_ERROR("Missing BPF object path.\n");
         return false;
     }
 
     // Check if network interface(s) are provided in the command line
     if (argc < 4) {
-        fputs("Missing network interface(s).\n", stderr);
+        FW_ERROR("Missing network interface(s).\n");
         return false;
     }
     
@@ -56,7 +58,7 @@ bool check_cmd_args(int argc, char* argv[], enum bpf_prog_type* prog_type,
     else if (strcmp(prog_hook, "tc") == 0)
         *prog_type = BPF_PROG_TYPE_SCHED_CLS;
     else {
-        fprintf(stderr, "Hook '%s' is not allowed: Must be either xdp or tc.\n", prog_hook);
+        FW_ERROR("Hook '%s' is not allowed: Must be either xdp or tc.\n", prog_hook);
         return false;
     }
 
@@ -77,17 +79,19 @@ int main(int argc, char* argv[]) {
         return EXIT_FAILURE;
 
     // Load the BPF object (including program and maps) into the kernel
-    puts("Loading BPF program into kernel ...");
+    FW_INFO("Loading BPF program into kernel ...\n");
     struct bpf_object_program* bpf = bpf_load_program(prog_path, prog_type);
     if (!bpf)
         return EXIT_FAILURE;
+
+    FW_INFO("Dumping conntrack entries into BPF map ...\n");
 
     // Read the conntrack info and save it inside the BPF conntrack map
     int rc = conntrack_init(bpf->obj);
     if (rc != 0)
         goto bpf_unload_program;
 
-    printf("Attaching BPF program to network interfaces ...\n");
+    FW_INFO("Attaching BPF program to network interfaces ...\n");
 
     // Attach the program to the specified interface names
     rc = bpf_ifs_attach_program(bpf->prog, ifnames, if_count);
@@ -99,21 +103,26 @@ int main(int argc, char* argv[]) {
     act.sa_handler = interrupt_handler;
     sigaction(SIGINT, &act, NULL);
 
-    puts("Successfully loaded BPF program. Press CTRL+C to unload.");
+    FW_INFO("Successfully loaded BPF program. Press CTRL+C to unload.\n");
 
-    while (!exitLoop) {
+    while (1) {
+        sleep(2);
+
+        if (exitLoop)
+            break;
+
         // Update the conntrack info
         update_conntrack(bpf->obj);
-        sleep(2);
     }
 
-    puts("\nUnloading ...");
+    FW_INFO("\nUnloading ...\n");
 
 bpf_detach_program:
     // Detach the program from the specified interface names
     bpf_ifs_detach_program(bpf->prog, ifnames, if_count);
 
 conntrack_destroy:
+    // De-Init conntrack
     conntrack_destroy();
 
 bpf_unload_program:
