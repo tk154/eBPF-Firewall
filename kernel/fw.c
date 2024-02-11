@@ -24,95 +24,114 @@ struct {
 } CONN_MAP SEC(".maps");
 
 
-// Declare the VLAN header struct manually since it is not included in my <linux/if_vlan.h>
+// Declare the VLAN header struct because it's only included in the kernel source header <linux/if_vlan.h>
 struct vlan_hdr {
 	__be16 h_vlan_TCI;					// priority and VLAN ID
 	__be16 h_vlan_encapsulated_proto;	// packet type ID or len
 };
 
 
+/* From include/net/checksum.h */
 /**
- * Helper to swap the src and dest IP and the src and dest port of a connection key
- * @param c_key Pointer to the original connection key
- * @param rev_c_key Pointer where to store the reversed key
+ * Handle overflow while adding the addend to the checksum
+ * @param cksum Pointer to the checksum
+ * @param addend The addend
  * **/
-void reverse_conn_key(struct conn_key *c_key, struct conn_key *rev_c_key) {
-	rev_c_key->src_ip    = c_key->dest_ip;
-	rev_c_key->dest_ip   = c_key->src_ip;
-	rev_c_key->src_port  = c_key->dest_port;
-	rev_c_key->dest_port = c_key->src_port;
-	rev_c_key->protocol  = c_key->protocol;
+__always_inline void cksum_add(__sum16 *cksum, __sum16 addend) {
+	__u16 res = (__u16)*cksum + (__u16)addend;
+	*cksum = (__sum16)(res + (res < (__u16)addend));
+}
+
+/**
+ * Check if NAT must be applied and adjust the addresses and L4 checksum
+ * @param n_entry Pointer to the NAT entry
+ * @param iph Pointer to the IPv4 header
+ * @param sport Pointer to the source port
+ * @param dport Pointer to the destination port
+ * @param cksum Pointer to the L4 checksum
+ * **/
+__always_inline void apply_nat(struct nat_entry *n_entry, struct iphdr *iph, __be16 *sport, __be16 *dport, __sum16 *cksum) {
+	// Check if NAT must be applied
+	if (!n_entry->rewrite_flag)
+		return;
+
+	// Rewrite the source IP
+	if (n_entry->rewrite_flag & REWRITE_SRC_IP)
+		iph->saddr = n_entry->src_ip;
+
+	// Rewrite the destination IP
+	if (n_entry->rewrite_flag & REWRITE_DEST_IP)
+		iph->daddr = n_entry->dest_ip;
+
+	// Rewrite the source port
+	if (sport && n_entry->rewrite_flag & REWRITE_SRC_PORT)
+		*sport = n_entry->src_port;
+
+	// Rewrite the destination port
+	if (dport && n_entry->rewrite_flag & REWRITE_DEST_PORT)
+		*dport = n_entry->dest_port;
+
+	// Adjust the L4 checksum
+	if (cksum)
+		cksum_add(cksum, n_entry->l4_cksum_diff);
 }
 
 /**
  * Use bpf_fib_lookup to decide wether to route the package and where to
  * @param ctx xdp_md for XDP and __sk_buff for TC programs
  * @param iph The IPv4 Header of the package
- * @param next_h Where to store the result, ifindex and MAC addresses
+ * @param c_key Pointer to the connection key
+ * @param c_value Where to store the result, ifindex and MAC addresses
  * **/
-__always_inline void make_routing_decision(struct BPF_CTX *ctx, struct iphdr* iph, struct next_hop* next_h) {
+__always_inline void make_routing_decision(struct BPF_CTX *ctx, struct iphdr *iph, struct conn_key *c_key, struct conn_value *c_value) {
 	// Fill the lookup key
 	struct bpf_fib_lookup fib_params = {};
 	fib_params.family = AF_INET;
 	fib_params.l4_protocol = iph->protocol;
-	fib_params.sport = 0;
-	fib_params.dport = 0;
+	fib_params.sport = c_key->src_port;
+	fib_params.dport = c_value->n_entry.dest_port ? c_value->n_entry.dest_port : c_key->dest_port;
 	fib_params.tot_len = bpf_ntohs(iph->tot_len);
 	fib_params.tos = iph->tos;
 	fib_params.ipv4_src = iph->saddr;
-	fib_params.ipv4_dst = iph->daddr;
+	fib_params.ipv4_dst = c_value->n_entry.dest_ip ? c_value->n_entry.dest_ip : iph->daddr;
 	fib_params.ifindex = ctx->ingress_ifindex;
 
 	// Do a loopkup in the kernel routing table
 	long rc = bpf_fib_lookup(ctx, &fib_params, sizeof(fib_params), 0);
-	BPF_DEBUG("bpf_fib_lookup: %d", rc);
-	BPF_DEBUG("ifindex: %d", fib_params.ifindex);
+	BPF_INFO("bpf_fib_lookup: %d", rc);
 
 	switch (rc) { 
-		case BPF_FIB_LKUP_RET_SUCCESS:      // lookup successful
-			// Adjust the MAC addresses
-			memcpy(next_h->smac, fib_params.smac, ETH_ALEN);
-			memcpy(next_h->dmac, fib_params.dmac, ETH_ALEN);
+		case BPF_FIB_LKUP_RET_SUCCESS:
+			BPF_INFO("ifindex: %d", fib_params.ifindex);
 
-			next_h->ifindex = fib_params.ifindex;
-			next_h->action = ACTION_REDIRECT;
+			// Copy the MAC addresses
+			memcpy(c_value->next_h.src_mac,  fib_params.smac, ETH_ALEN);
+			memcpy(c_value->next_h.dest_mac, fib_params.dmac, ETH_ALEN);
+
+			c_value->next_h.ifindex = fib_params.ifindex;
+			c_value->next_h.action = ACTION_REDIRECT;
 		break;
 
-		case BPF_FIB_LKUP_RET_BLACKHOLE:    // dest is blackholed; can be dropped 
-		case BPF_FIB_LKUP_RET_UNREACHABLE:  // dest is unreachable; can be dropped 
-		case BPF_FIB_LKUP_RET_PROHIBIT:     // dest not allowed; can be dropped 
-			next_h->action = ACTION_DROP;
+		case BPF_FIB_LKUP_RET_BLACKHOLE:  
+		case BPF_FIB_LKUP_RET_UNREACHABLE: 
+		case BPF_FIB_LKUP_RET_PROHIBIT:   
+			c_value->next_h.action = ACTION_DROP;
 		break;
 
-		case BPF_FIB_LKUP_RET_NOT_FWDED:    // packet is not forwarded 
-		case BPF_FIB_LKUP_RET_FWD_DISABLED: // fwding is not enabled on ingress 
-		case BPF_FIB_LKUP_RET_UNSUPP_LWT:   // fwd requires encapsulation 
-		case BPF_FIB_LKUP_RET_NO_NEIGH:     // no neighbor entry for nh
 		case BPF_FIB_LKUP_RET_FRAG_NEEDED:  // fragmentation required to fwd
-			next_h->action = ACTION_PASS;
+			BPF_INFO("tot_len: %u, mtu_result: %u",
+				bpf_ntohs(iph->tot_len), fib_params.mtu_result);
 		break;
+
+		case BPF_FIB_LKUP_RET_NOT_FWDED:   
+		case BPF_FIB_LKUP_RET_FWD_DISABLED:
+		case BPF_FIB_LKUP_RET_UNSUPP_LWT:  
+		case BPF_FIB_LKUP_RET_NO_NEIGH:    
+		default:
+			c_value->next_h.action = ACTION_PASS;
 	}
 }
 
-/**
- * Forwards the data package to the next hop
- * @param ethh The Ethernet Header of the package
- * @param iph The IPv4 Header of the package
- * @param next_h Contains the ifindex and MAC addresses
- * @returns BPF_REDIRECT on success, BPF_DROP (XDP_ABORTED) if there was a error
- * **/
-long redirect_package(struct ethhdr* ethh, struct iphdr* iph, struct next_hop* next_h) {
-	// Decrement the TTL, adjust the checksum
-	iph->ttl--;
-	iph->check += 0x01;
-
-	// Adjust the MAC addresses
-	memcpy(ethh->h_source, next_h->smac, ETH_ALEN);
-	memcpy(ethh->h_dest,   next_h->dmac, ETH_ALEN);
-
-	// Redirect the package
-	return bpf_redirect(next_h->ifindex, 0);
-}
 
 SEC("fw")
 /**
@@ -121,6 +140,8 @@ SEC("fw")
  * @returns The action to be executed on the received package
 **/
 int fw_func(struct BPF_CTX *ctx) {
+	BPF_DEBUG("---------- New Package ----------");
+
 	// Save the first and last Byte of the received package
 	void* data 	   = (void*)(long)ctx->data;
 	void* data_end = (void*)(long)ctx->data_end;
@@ -131,9 +152,9 @@ int fw_func(struct BPF_CTX *ctx) {
 	// Parse the Ethernet header, will drop the package if out-of-bounds
 	parse_header(struct ethhdr, *ethh, p, data_end);
 
-	// Save the packet type ID, default to no VLAN ID
+	// Initialize the connection key
+	struct conn_key c_key = {};
     __be16 h_proto = ethh->h_proto;
-    __u16 vlan_id = 0;
 
 	// Check if there is a VLAN header
     if (h_proto == bpf_htons(ETH_P_8021Q) || h_proto == bpf_htons(ETH_P_8021AD)) {
@@ -141,7 +162,9 @@ int fw_func(struct BPF_CTX *ctx) {
 		parse_header(struct vlan_hdr, *vlan_h, p, data_end);
 
 		// Save the VLAN ID (last 12 Byte)
-        vlan_id = bpf_htons(vlan_h->h_vlan_TCI) & 0x0FFF;
+        c_key.vlan_id = bpf_htons(vlan_h->h_vlan_TCI) & 0x0FFF;
+
+		BPF_DEBUG("VLAN ID: %u", c_key.vlan_id);
 
 		// Save the packet type ID of the next header
 		h_proto = vlan_h->h_vlan_encapsulated_proto;
@@ -151,8 +174,19 @@ int fw_func(struct BPF_CTX *ctx) {
 		// Parse the IPv4 header, will drop the package if out-of-bounds
 		parse_header(struct iphdr, *iph, p, data_end);
 
-		// Save the source and destination port if there is a TCP or UDP header
-		__be16 sport = 0, dport = 0;
+		BPF_DEBUG_IP("Source IP: ", iph->saddr);
+		BPF_DEBUG_IP("Destination IP: ", iph->daddr);
+		BPF_DEBUG("Protocol: %u", iph->protocol);
+
+		c_key.src_ip   = iph->saddr;
+		c_key.dest_ip  = iph->daddr;
+		c_key.l4_proto = iph->protocol;
+
+		// Pointers for possible NAT adjustments
+		__be16  *sport = NULL, *dport = NULL;
+		__sum16 *cksum = NULL;
+
+		// TCP FIN and RST
 		__u8 fin = 0, rst = 0;
 
 		switch (iph->protocol) {
@@ -160,9 +194,18 @@ int fw_func(struct BPF_CTX *ctx) {
 				// Parse the TCP header, will drop the package if out-of-bounds
 				parse_header(struct tcphdr, *tcph, p, data_end);
 
-				sport = tcph->source;
-				dport = tcph->dest;
+				BPF_DEBUG("TCP Source Port: %u", bpf_ntohs(tcph->source));
+				BPF_DEBUG("TCP Destination Port: %u", bpf_ntohs(tcph->dest));
 
+				c_key.src_port  = tcph->source;
+				c_key.dest_port = tcph->dest;
+
+				// For possible NAT adjustmenets
+				sport = &tcph->source;
+				dport = &tcph->dest;
+				cksum = &tcph->check;
+
+				// Save if connection is closed or reset
 				fin = tcph->fin;
 				rst = tcph->rst;
 			break;
@@ -171,38 +214,31 @@ int fw_func(struct BPF_CTX *ctx) {
 				// Parse the UDP header, will drop the package if out-of-bounds
 				parse_header(struct udphdr, *udph, p, data_end);
 
-				sport = udph->source;
-				dport = udph->dest;
+				BPF_DEBUG("UDP Source Port: %u", bpf_ntohs(udph->source));
+				BPF_DEBUG("UDP Destination Port: %u", bpf_ntohs(udph->dest));
+
+				c_key.src_port  = udph->source;
+				c_key.dest_port = udph->dest;
+
+				// For possible NAT adjustmenets
+				sport = &udph->source;
+				dport = &udph->dest;
+				cksum = &udph->check;
 			break;
 
 			case IPPROTO_ICMP:;
 				// Parse the ICMP header, will drop the package if out-of-bounds
 				parse_header(struct icmphdr, *icmph, p, data_end);
 
-				/* Nothing to do here yet */
-				BPF_UNUSED(icmph);
+				// Save the ICMP type and ID
+				c_key.icmp_type = icmph->type;
+				c_key.icmp_id   = icmph->un.echo.id;
 			break;
 
 			default:
 				BPF_DEBUG("Protocol %u not implemented yet.", iph->protocol);
 				return BPF_PASS;
 		}
-
-		// Print some package information
-		BPF_DEBUG("---------- New Package ----------");
-		BPF_DEBUG("VLAN ID: %u", vlan_id);
-		BPF_DEBUG_IP("Source IP: ", iph->saddr);
-		BPF_DEBUG_IP("Destination IP: ", iph->daddr);
-		BPF_DEBUG("Source Port: %u", bpf_htons(sport));
-		BPF_DEBUG("Destination Port: %u", bpf_htons(dport));
-
-		// Fill the conntrack key
-		struct conn_key c_key = {};
-		c_key.src_ip    = iph->saddr;
-		c_key.dest_ip   = iph->daddr;
-		c_key.src_port  = sport;
-		c_key.dest_port = dport;
-		c_key.protocol  = iph->protocol;
 
 		// Check if a conntrack entry exists
 		struct conn_value* c_value = bpf_map_lookup_elem(&CONN_MAP, &c_key);
@@ -214,10 +250,14 @@ int fw_func(struct BPF_CTX *ctx) {
 			return BPF_PASS;
 		}
 
+		// Pass the package to the network stack if the connection is not yet or anymore established
+		if (c_value->ct_entry.state != CONN_ESTABLISHED)
+			return BPF_PASS;
+
 		if (fin) {
 			// Mark the connection as finished
 			c_value->ct_entry.state = CONN_FIN;
-			BPF_DEBUG("Connection will be closed");
+			BPF_INFO("Connection will be closed");
 
 			return BPF_PASS;
 		}
@@ -227,26 +267,22 @@ int fw_func(struct BPF_CTX *ctx) {
 			c_value->ct_entry.state = CONN_FIN;
 
 			// Also mark the connection as finished for the reverse direction, if there is one
-			struct conn_key rev_c_key = {};
-			reverse_conn_key(&c_key, &rev_c_key);
+			reverse_conn_key(&c_key);
 
-			struct conn_value* rev_c_value = bpf_map_lookup_elem(&CONN_MAP, &rev_c_key);
-			if (rev_c_value)
-				rev_c_value->ct_entry.state = CONN_FIN;
+			c_value = bpf_map_lookup_elem(&CONN_MAP, &c_key);
+			if (c_value)
+				c_value->ct_entry.state = CONN_FIN;
 
-			BPF_DEBUG("Connection was reset");
+			BPF_INFO("Connection was reset");
 
 			return BPF_PASS;
 		}
 
-		// Pass the package to the network stack if the connection is not yet or anymore established
-		if (c_value->ct_entry.state != CONN_ESTABLISHED)
-			return BPF_PASS;
-
 		BPF_DEBUG("Connection is established");
 
+		// If a routing decision hasn't been made yet (first package), do it now
 		if (!c_value->next_h.action)
-			make_routing_decision(ctx, iph, &c_value->next_h);
+			make_routing_decision(ctx, iph, &c_key, c_value);
 
 		switch (c_value->next_h.action) {
 			case ACTION_REDIRECT:
@@ -254,20 +290,32 @@ int fw_func(struct BPF_CTX *ctx) {
 				if (iph->ttl <= 1)
 					return BPF_PASS;
 
+				// Decrement the TTL, adjust the checksum
+				iph->ttl--;
+				cksum_add(&iph->check, c_value->l3_cksum_diff);
+
+				// Apply NAT
+				apply_nat(&c_value->n_entry, iph, sport, dport, cksum);
+
 				// Adjust the packet counter
 				c_value->ct_entry.packets++;
 				c_value->ct_entry.bytes += data_end - data;
 
-				BPF_DEBUG("Redirect package");
+				// Adjust the MAC addresses
+				memcpy(ethh->h_source, c_value->next_h.src_mac,  ETH_ALEN);
+				memcpy(ethh->h_dest,   c_value->next_h.dest_mac, ETH_ALEN);
 
-				return redirect_package(ethh, iph, &c_value->next_h);
+				BPF_DEBUG("Redirect package to if%u", c_value->next_h.ifindex);
+
+				// Redirect the package
+				return bpf_redirect(c_value->next_h.ifindex, 0);
 
 			case ACTION_DROP:
 				return BPF_DROP;
 
 			case ACTION_PASS:
-				// BPF_PASS
-				break;
+			default:
+				return BPF_PASS;
 		}
 	}
 
