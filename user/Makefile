@@ -4,8 +4,8 @@ endif
 
 LDLIBS := -lbpf -lelf -lz -lnetfilter_conntrack -lnfnetlink -lmnl
 
-OUT_DIR := output
-OUT_BIN := $(OUT_DIR)/fw
+OUT_DIR := bin/$(TARGET)
+OUT_BIN := $(OUT_DIR)/bpfw
 
 SOURCE_DIRS := bpf_loader conntrack
 
@@ -21,7 +21,7 @@ $(OUT_DIR)/%.o: */%.c | $(OUT_DIR)
 	$(CC) $(CPPFLAGS) -c $< -o $@
 
 $(OUT_DIR):
-	@mkdir $(OUT_DIR)
+	@mkdir -p $(OUT_DIR)
 
 clean:
 	@rm -rf $(OUT_DIR)

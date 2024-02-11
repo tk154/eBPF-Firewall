@@ -38,7 +38,7 @@ make
 </pre>
 <br>
 
-Compile the user-space program. It will be located at <code>user/output/fw</code>.<br>
+Compile the user-space program. It will be located at <code>user/bin/bpfw</code>.<br>
 The <code>libbpf</code> and <code>libnetfilter_conntrack</code> library is needed for the compilation.
 <pre>
 cd user
