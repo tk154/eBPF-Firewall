@@ -1,31 +1,52 @@
-CLANG := clang
+CLANG  := clang
 CFLAGS := -O2 -g -Wall -target bpf
 
 SRC_DIR := .
 OBJ_DIR := obj
 
-SRC_FILES := $(wildcard $(SRC_DIR)/*.c)
+BPF_NAME := bpfw
+SRC_FILE := $(SRC_DIR)/$(BPF_NAME).c
 
-XDP_OBJ_FILES := $(patsubst $(SRC_DIR)/%.c, $(OBJ_DIR)/xdp_%.o, $(SRC_FILES))
-TC_OBJ_FILES  := $(patsubst $(SRC_DIR)/%.c, $(OBJ_DIR)/tc_%.o,  $(SRC_FILES))
+XDP_LE_OBJ_FILE := $(OBJ_DIR)/xdp_le_$(BPF_NAME).o
+TC_LE_OBJ_FILE  := $(OBJ_DIR)/tc_le_$(BPF_NAME).o
+XDP_BE_OBJ_FILE := $(OBJ_DIR)/xdp_be_$(BPF_NAME).o
+TC_BE_OBJ_FILE  := $(OBJ_DIR)/tc_be_$(BPF_NAME).o
 
 XDP_ARGS := -DXDP_PROGRAM
 TC_ARGS  := -DTC_PROGRAM
 
-all: xdp tc
+all: xdp-le tc-le xdp-be tc-be
 
-$(OBJ_DIR)/xdp_%.o: $(SRC_DIR)/%.c | $(OBJ_DIR)
-	$(CLANG) $(CFLAGS) $(XDP_ARGS) -c $< -o $@
+xdp: xdp-le xdp-be
 
-$(OBJ_DIR)/tc_%.o: $(SRC_DIR)/%.c | $(OBJ_DIR)
-	$(CLANG) $(CFLAGS) $(TC_ARGS) -c $< -o $@
+tc: tc-le tc-be
 
-$(OBJ_DIR):
-	@mkdir -p $(OBJ_DIR)
+le: xdp-le tc-le
 
-xdp: $(XDP_OBJ_FILES)
+be: xdp-be tc-be
 
-tc: $(TC_OBJ_FILES)
+xdp-le: $(XDP_LE_OBJ_FILE)
+
+tc-le: $(TC_LE_OBJ_FILE)
+
+xdp-be: $(XDP_BE_OBJ_FILE)
+
+tc-be: $(TC_BE_OBJ_FILE)
 
 clean:
 	@rm -rf $(OBJ_DIR)
+
+$(XDP_LE_OBJ_FILE): $(SRC_FILE) | $(OBJ_DIR)
+	$(CLANG) $(CFLAGS) -mlittle-endian $(XDP_ARGS) -c $< -o $@
+
+$(TC_LE_OBJ_FILE): $(SRC_FILE) | $(OBJ_DIR)
+	$(CLANG) $(CFLAGS) -mlittle-endian $(TC_ARGS) -c $< -o $@
+
+$(XDP_BE_OBJ_FILE): $(SRC_FILE) | $(OBJ_DIR)
+	$(CLANG) $(CFLAGS) -mbig-endian $(XDP_ARGS) -c $< -o $@
+
+$(TC_BE_OBJ_FILE): $(SRC_FILE) | $(OBJ_DIR)
+	$(CLANG) $(CFLAGS) -mbig-endian $(TC_ARGS) -c $< -o $@
+
+$(OBJ_DIR):
+	@mkdir -p $(OBJ_DIR)
