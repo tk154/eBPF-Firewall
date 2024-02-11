@@ -21,8 +21,6 @@ struct conn_key {
 	__be16 src_port;
 	__be16 dest_port;
 	__u16  vlan_id;
-	__be16 icmp_id;
-	__u8   icmp_type;
 	__u8   l4_proto;
 };
 

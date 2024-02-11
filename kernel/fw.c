@@ -3,7 +3,6 @@
 #include <linux/ip.h>
 #include <linux/tcp.h>
 #include <linux/udp.h>
-#include <linux/icmp.h>
 
 #include <arpa/inet.h>
 #include <bpf/bpf_endian.h>
@@ -30,6 +29,20 @@ struct vlan_hdr {
 	__be16 h_vlan_encapsulated_proto;	// packet type ID or len
 };
 
+
+/**
+ * Helper to swap the src and dest IP and the src and dest port of a connection key
+ * @param c_key Pointer to the connection key
+ * **/
+__always_inline void reverse_conn_key(struct conn_key *c_key) {
+	__be32 tmp_ip    = c_key->src_ip;
+	c_key->src_ip    = c_key->dest_ip;
+	c_key->dest_ip   = tmp_ip;
+
+	__be16 tmp_port  = c_key->src_port;
+	c_key->src_port  = c_key->dest_port;
+	c_key->dest_port = tmp_port;
+}
 
 /* From include/net/checksum.h */
 /**
@@ -64,11 +77,11 @@ __always_inline void apply_nat(struct nat_entry *n_entry, struct iphdr *iph, __b
 		iph->daddr = n_entry->dest_ip;
 
 	// Rewrite the source port
-	if (sport && n_entry->rewrite_flag & REWRITE_SRC_PORT)
+	if (n_entry->rewrite_flag & REWRITE_SRC_PORT)
 		*sport = n_entry->src_port;
 
 	// Rewrite the destination port
-	if (dport && n_entry->rewrite_flag & REWRITE_DEST_PORT)
+	if (n_entry->rewrite_flag & REWRITE_DEST_PORT)
 		*dport = n_entry->dest_port;
 
 	// Adjust the L4 checksum
@@ -183,8 +196,8 @@ int fw_func(struct BPF_CTX *ctx) {
 		c_key.l4_proto = iph->protocol;
 
 		// Pointers for possible NAT adjustments
-		__be16  *sport = NULL, *dport = NULL;
-		__sum16 *cksum = NULL;
+		__be16  *sport, *dport;
+		__sum16 *cksum;
 
 		// TCP FIN and RST
 		__u8 fin = 0, rst = 0;
@@ -226,17 +239,7 @@ int fw_func(struct BPF_CTX *ctx) {
 				cksum = &udph->check;
 			break;
 
-			case IPPROTO_ICMP:;
-				// Parse the ICMP header, will drop the package if out-of-bounds
-				parse_header(struct icmphdr, *icmph, p, data_end);
-
-				// Save the ICMP type and ID
-				c_key.icmp_type = icmph->type;
-				c_key.icmp_id   = icmph->un.echo.id;
-			break;
-
 			default:
-				BPF_DEBUG("Protocol %u not implemented yet.", iph->protocol);
 				return BPF_PASS;
 		}
 

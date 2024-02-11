@@ -21,7 +21,6 @@
 #define CONNTRACK_GENERIC_TIMEOUT           600
 #define CONNTRACK_TCP_TIMEOUT_ESTABLISHED   7440
 #define CONNTRACK_UDP_TIMEOUT               60
-#define CONNTRACK_ICMP_TIMEOUT              30
 
 
 // To store the file descriptor of the BPF connections map
@@ -61,10 +60,9 @@ static void update_timeout(struct nf_conntrack *ct, __u8 l4_proto) {
 
     // Determine the timeout for the specific protocol
     switch (l4_proto) {
-        case IPPROTO_TCP:  timeout = CONNTRACK_TCP_TIMEOUT_ESTABLISHED; break;
-        case IPPROTO_UDP:  timeout = CONNTRACK_UDP_TIMEOUT;             break;
-        case IPPROTO_ICMP: timeout = CONNTRACK_ICMP_TIMEOUT;            break;
-        default:           timeout = CONNTRACK_GENERIC_TIMEOUT;
+        case IPPROTO_TCP: timeout = CONNTRACK_TCP_TIMEOUT_ESTABLISHED; break;
+        case IPPROTO_UDP: timeout = CONNTRACK_UDP_TIMEOUT;             break;
+        default:          timeout = CONNTRACK_GENERIC_TIMEOUT;
     }
 
     // Set the new timeout
@@ -75,7 +73,7 @@ static void update_timeout(struct nf_conntrack *ct, __u8 l4_proto) {
  * Helper to swap the src and dest IP and the src and dest port of a connection key
  * @param c_key Pointer to the connection key
  * **/
-void reverse_conn_key(struct conn_key *c_key) {
+static void reverse_conn_key(struct conn_key *c_key) {
 	__be32 tmp_ip    = c_key->src_ip;
 	c_key->src_ip    = c_key->dest_ip;
 	c_key->dest_ip   = tmp_ip;
@@ -128,9 +126,8 @@ static int ct_dump_callback(enum nf_conntrack_msg_type type, struct nf_conntrack
         break;
 
         case IPPROTO_ICMP:
-            c_key.icmp_type = nfct_get_attr_u8 (ct, ATTR_ICMP_TYPE);
-            c_key.icmp_id   = nfct_get_attr_u16(ct, ATTR_ICMP_ID);
-        break;
+            // Ignore ICMP
+            return NFCT_CB_CONTINUE;
 
         default:
             // If the protocol is not TCP, UDP or ICMP
@@ -292,15 +289,10 @@ int update_conntrack(struct bpf_object* obj) {
                 nfct_set_attr_u16(ct, ATTR_PORT_DST, conn.key.dest_port);
             break;
 
-            case IPPROTO_ICMP:
-                nfct_set_attr_u8 (ct, ATTR_ICMP_TYPE, conn.key.icmp_type);
-                nfct_set_attr_u16(ct, ATTR_ICMP_ID, conn.key.icmp_id);
-            break;
-
             default:
                 // If the protocol is not TCP, UDP or ICMP
                 FW_INFO("Protocol %hhu not implemented yet.\n", conn.key.l4_proto);
-                goto loop_continue;
+                goto get_next_key;
         }
 
         // Try to find the connection inside nf_conntrack
@@ -322,7 +314,7 @@ int update_conntrack(struct bpf_object* obj) {
             }
         }
 
-loop_continue:
+get_next_key:
         // Free the conntrack object
         nfct_destroy(ct);
 

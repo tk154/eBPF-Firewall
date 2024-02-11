@@ -55,9 +55,6 @@ void check_nat(struct nf_conntrack *ct, struct conn_key *c_key, struct conn_valu
         csum_replace4(&c_value->n_entry.l4_cksum_diff, old_ip, new_ip);
     }
 
-    if (c_key->l4_proto == IPPROTO_ICMP)
-        return;
-
     // SPAT
     if (nfct_getobjopt(ct, NFCT_GOPT_IS_SPAT)) {
         __be16 old_port, new_port;
