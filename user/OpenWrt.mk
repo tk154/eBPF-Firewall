@@ -5,10 +5,13 @@ endif
 
 GCC_VERSION := 12.3.0
 
-CC := $(wildcard $(OPENWRT_DIR)/staging_dir/toolchain-$(TARGET)*_gcc-$(GCC_VERSION)_musl/bin/$(TARGET)-openwrt-linux-musl-gcc)
-CXX := $(wildcard $(OPENWRT_DIR)/staging_dir/toolchain-$(TARGET)*_gcc-$(GCC_VERSION)_musl/bin/$(TARGET)-openwrt-linux-musl-g++)
-CPPFLAGS += -I$(wildcard $(OPENWRT_DIR)/staging_dir/target-$(TARGET)*_musl/usr/include)
-LDFLAGS += -L$(wildcard $(OPENWRT_DIR)/staging_dir/target-$(TARGET)*_musl/usr/lib)
+TOOLCHAIN_DIR := $(shell set -- $(OPENWRT_DIR)/staging_dir/toolchain-$(TARGET)*_gcc-$(GCC_VERSION)_musl; echo "$$1")
+TARGET_DIR    := $(shell set -- $(OPENWRT_DIR)/staging_dir/target-$(TARGET)*_musl; echo "$$1")
 
-STAGING_DIR = $(wildcard $(OPENWRT_DIR)/staging_dir/toolchain-$(TARGET)*_gcc-$(GCC_VERSION)_musl:$(OPENWRT_DIR)/staging_dir/target-$(TARGET)*_musl/usr)
-export STAGING_DIR
+CC  := $(TOOLCHAIN_DIR)/bin/$(TARGET)-openwrt-linux-musl-gcc
+CXX := $(TOOLCHAIN_DIR)/bin/$(TARGET)-openwrt-linux-musl-g++
+
+CPPFLAGS += -I$(TARGET_DIR)/usr/include
+LDFLAGS  += -L$(TARGET_DIR)/usr/lib
+
+export STAGING_DIR = $(TOOLCHAIN_DIR):$(TARGET_DIR)/usr
