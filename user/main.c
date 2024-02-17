@@ -17,13 +17,15 @@
 #include "bpf_loader/bpf_loader.h"
 #include "conntrack/conntrack.h"
 
+#define BPF_MAP_POLL_SEC 5
+
 
 // Wether to exit the main loop and the program
 bool exitLoop = false;
 
-// Interrupt signal handler
-void interrupt_handler(int sig) {
-    // On SIGINT, the main loop should exit
+// Interrupt and terminate signal handler
+void signal_handler(int sig) {
+    // On SIGINT or SIGTERM, the main loop should exit
     exitLoop = true;
 }
 
@@ -98,22 +100,23 @@ int main(int argc, char* argv[]) {
     if (rc != 0)
         goto conntrack_destroy;
 
-    // Catch CTRL+C with the handler to exit the main loop
+    // Catch CTRL+C and SIGTERM with the handler to exit the main loop
     struct sigaction act;
-    act.sa_handler = interrupt_handler;
+    act.sa_handler = signal_handler;
     sigaction(SIGINT, &act, NULL);
+    sigaction(SIGTERM, &act, NULL);
 
     FW_INFO("Successfully loaded BPF program. Press CTRL+C to unload.\n");
 
-    while (1) {
-        sleep(2);
+    do {
+        sleep(BPF_MAP_POLL_SEC);
 
         if (exitLoop)
             break;
 
         // Update the conntrack info
         update_conntrack(bpf->obj);
-    }
+    } while (!exitLoop);
 
     FW_INFO("\nUnloading ...\n");
 
