@@ -83,6 +83,17 @@ static void reverse_conn_key(struct conn_key *c_key) {
 	c_key->dest_port = tmp_port;
 }
 
+static void log_entry(struct conn_key* c_key, char* prefix) {
+#ifdef FW_LOG_LEVEL_DEBUG
+    char src_ip[INET_ADDRSTRLEN], dest_ip[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &c_key->src_ip, src_ip, sizeof(src_ip));
+    inet_ntop(AF_INET, &c_key->dest_ip, dest_ip, sizeof(dest_ip));
+
+    FW_DEBUG("%s%hhu %s %s %hu %hu\n", prefix, c_key->l4_proto,
+        src_ip, dest_ip, ntohs(c_key->src_port), ntohs(c_key->dest_port));
+#endif
+}
+
 static int check_nat_and_update_bpf_map(struct nf_conntrack *ct, struct conn_key* c_key, struct conn_value* c_value) {
     // Since the TTL is decremented, we must increment the checksum
     // Check for NAT afterward
@@ -135,6 +146,8 @@ static int ct_dump_callback(enum nf_conntrack_msg_type type, struct nf_conntrack
             return NFCT_CB_CONTINUE;
     }
 
+    log_entry(&c_key, "");
+
     if (check_nat_and_update_bpf_map(ct, &c_key, &c_value) != 0)
         return NFCT_CB_FAILURE;
 
@@ -163,6 +176,8 @@ static int ct_get_callback(enum nf_conntrack_msg_type type, struct nf_conntrack 
                 if (state != TCP_CONNTRACK_ESTABLISHED)
                     return NFCT_CB_CONTINUE;
             }
+
+            log_entry(&conn->key, "New: ");
             
             // Mark the connection as established so that the BPF program can take over now
             // Since the TTL is decremented, we must increment the checksum
@@ -195,6 +210,8 @@ static int ct_get_callback(enum nf_conntrack_msg_type type, struct nf_conntrack 
             if (conn->value.ct_entry.packets == 0)
                 return NFCT_CB_CONTINUE;
 
+            log_entry(&conn->key, "Fin: ");
+
             // Update the nf_conntrack package counter
             update_packet_counter(ct, &conn->value.ct_entry);
 
@@ -208,7 +225,7 @@ static int ct_get_callback(enum nf_conntrack_msg_type type, struct nf_conntrack 
 
     // Update the BPF conntrack entry (the packet counter), break out on error
     if (bpf_map_update_elem(map_fd, &conn->key, &conn->value, BPF_EXIST) != 0) {
-        FW_ERROR("Error adding conntrack entry to conntrack map: %s (Code: -%d).\n", strerror(errno), errno);
+        FW_ERROR("Error updating conntrack entry in conntrack map: %s (-%d).\n", strerror(errno), errno);
         return NFCT_CB_STOP;
     }
 
@@ -300,6 +317,7 @@ int update_conntrack(struct bpf_object* obj) {
             /* It could be possible that we have received the package here through the BPF map
              * before it was processed by nf_conntrack, or it has been dropped
              */
+            log_entry(&conn.key, "Del: ");
             
             // If no connection could be found, it is finished or a timeout occured
             // So delete it from the BPF connection map
