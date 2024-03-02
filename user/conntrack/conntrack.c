@@ -2,6 +2,7 @@
 #include "nat.h"
 
 #include <errno.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <arpa/inet.h>
@@ -15,12 +16,6 @@
 #include "../../common.h"
 
 
-// Default timeouts from /proc/sys/net/netfilter
-#define CONNTRACK_GENERIC_TIMEOUT           600
-#define CONNTRACK_TCP_TIMEOUT_ESTABLISHED   7440
-#define CONNTRACK_UDP_TIMEOUT               60
-
-
 // To store the file descriptor of the BPF connections map
 static int map_fd;
 
@@ -31,6 +26,43 @@ static struct nfct_handle *ct_handle;
 struct conn_key   c_key;
 struct conn_value c_value;
 
+// Timeouts from /proc/sys/net/netfilter
+// Note: There are more, for now just basic ones
+__u32 tcp_timeout;
+__u32 udp_timeout;
+
+
+/**
+ * Reads timeout values from /proc/sys/net/netfilter/nf_conntrack_<filename>
+ * @param filename The timeout value to read
+ * @param timeout Where to store the timeout value
+ * @returns 0 on success, errno otherwise
+ * **/
+static int read_timeout(const char *filename, __u32 *timeout) {
+    const char* base_path = "/proc/sys/net/netfilter/nf_conntrack_%s";
+
+    char path[128];
+    snprintf(path, sizeof(path), base_path, filename);
+
+    FILE *file = fopen(path, "r");
+    if (!file) {
+        FW_ERROR("Error opening %s: %s (-%d).\n", path, strerror(errno), errno);
+        return errno;
+    }
+
+    char buffer[16];
+    if (!fgets(buffer, sizeof(buffer), file)) {
+        FW_ERROR("Error reading %s value: %s (-%d).\n", filename, strerror(errno), errno);
+        fclose(file);
+
+        return errno;
+    }
+
+    fclose(file);
+    *timeout = strtol(buffer, NULL, 10);
+
+    return 0;
+}
 
 /**
  * Updates/Refreshes the nf_conntrack timeout
@@ -41,9 +73,8 @@ static void update_timeout(struct nf_conntrack *ct) {
 
     // Determine the timeout for the specific protocol
     switch (c_key.l4_proto) {
-        case IPPROTO_TCP: timeout = CONNTRACK_TCP_TIMEOUT_ESTABLISHED; break;
-        case IPPROTO_UDP: timeout = CONNTRACK_UDP_TIMEOUT;             break;
-        default:          timeout = CONNTRACK_GENERIC_TIMEOUT;
+        case IPPROTO_TCP: timeout = tcp_timeout; break;
+        case IPPROTO_UDP: timeout = udp_timeout; break;
     }
 
     // Set the new timeout
@@ -61,7 +92,7 @@ static void reverse_conn_key() {
 	c_key.dest_port = tmp_port;
 }
 
-static void log_entry(char* prefix) {
+static inline void log_entry(const char* prefix) {
 #ifdef FW_LOG_LEVEL_DEBUG
     char src_ip[INET_ADDRSTRLEN], dest_ip[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &c_key.src_ip, src_ip, sizeof(src_ip));
@@ -94,7 +125,7 @@ static int ct_dump_callback(enum nf_conntrack_msg_type type, struct nf_conntrack
     c_value = (const struct conn_value) {};
 
     c_key.l4_proto = nfct_get_attr_u8(ct, ATTR_L4PROTO);
-    
+
     switch (c_key.l4_proto) {
         case IPPROTO_TCP:
             // Retrieve the current TCP connection state
@@ -118,7 +149,7 @@ static int ct_dump_callback(enum nf_conntrack_msg_type type, struct nf_conntrack
 
     c_key.src_ip  = nfct_get_attr_u32(ct, ATTR_IPV4_SRC);
     c_key.dest_ip = nfct_get_attr_u32(ct, ATTR_IPV4_DST);
-    log_entry("");
+    log_entry("Dump: ");
 
     if (check_nat_and_update_bpf_map(ct) != 0)
         return NFCT_CB_FAILURE;
@@ -200,6 +231,13 @@ int conntrack_init(struct bpf_object* obj) {
     if (map_fd < 0) {
         FW_ERROR("Couldn't find map '%s' in %s.\n", CONN_MAP_NAME, bpf_object__name(obj));
         return -1;
+    }
+
+    // Read TCP and UDP timeout values
+    if (read_timeout("tcp_timeout_established", &tcp_timeout) != 0 ||
+        read_timeout("udp_timeout"            , &udp_timeout) != 0)
+    {
+        return errno;
     }
 
     // Open a new conntrack handle
