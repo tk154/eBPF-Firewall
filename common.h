@@ -1,12 +1,11 @@
-#ifndef COMMON_H
-#define COMMON_H
+#ifndef BPFW_COMMON_H
+#define BPFW_COMMON_H
 
-#include <linux/if_ether.h>
+#include <linux/types.h>
 
 
 #define STRINGIZE(x) #x
 #define MAP_TO_STRING(map) STRINGIZE(map)           // Used to get the map name as a string (used for user space programs)
-
 
 #define CONN_MAP         		conn_map
 #define CONN_MAP_NAME    		MAP_TO_STRING(CONN_MAP)
@@ -25,10 +24,10 @@ struct conn_key {
 };
 
 
-struct conntrack_entry {
-	__u64 packets;
-	__u64 bytes;
-	__u8  state;
+struct next_hop {
+	__u8  src_mac[6];
+	__u8  dest_mac[6];
+	__u32 ifindex;
 };
 
 struct nat_entry {
@@ -37,23 +36,17 @@ struct nat_entry {
 	__be16  src_port;
 	__be16  dest_port;
 	__sum16 l4_cksum_diff;
-	__u8 	rewrite_flag;
-};
-
-struct next_hop {
-	__u32 ifindex;
-	__u8  src_mac[ETH_ALEN];
-	__u8  dest_mac[ETH_ALEN];
-	__u8  action;
+	__u8    rewrite_flag;
 };
 
 struct conn_value {
-	struct conntrack_entry ct_entry;
 	struct next_hop next_h;
 	struct nat_entry n_entry;
 	__sum16 l3_cksum_diff;
-	//__u8 target;
+	__u8 state, action;
+	__u8 update;
 };
+
 
 enum {
 	CONN_NEW = 0,
@@ -73,11 +66,6 @@ enum {
 	REWRITE_SRC_PORT  = 4,
 	REWRITE_DEST_PORT = 8
 };
-
-/*enum {
-	TARGET_ACCEPT = 0,
-	TARGET_DROP
-};*/
 
 
 #endif

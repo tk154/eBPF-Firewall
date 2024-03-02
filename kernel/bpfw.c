@@ -9,7 +9,7 @@
 #include <bpf/bpf_helpers.h>
 
 #define BPF_LOG_LEVEL BPF_LOG_LEVEL_INFO
-#include "common_xdp_tc.h"
+#include "common_kern.h"
 #include "../common.h"
 
 
@@ -85,8 +85,7 @@ __always_inline void apply_nat(struct nat_entry *n_entry, struct iphdr *iph, __b
 		*dport = n_entry->dest_port;
 
 	// Adjust the L4 checksum
-	if (cksum)
-		cksum_add(cksum, n_entry->l4_cksum_diff);
+	cksum_add(cksum, n_entry->l4_cksum_diff);
 }
 
 /**
@@ -122,13 +121,13 @@ __always_inline void make_routing_decision(struct BPF_CTX *ctx, struct iphdr *ip
 			memcpy(c_value->next_h.dest_mac, fib_params.dmac, ETH_ALEN);
 
 			c_value->next_h.ifindex = fib_params.ifindex;
-			c_value->next_h.action = ACTION_REDIRECT;
+			c_value->action = ACTION_REDIRECT;
 		break;
 
 		case BPF_FIB_LKUP_RET_BLACKHOLE:  
 		case BPF_FIB_LKUP_RET_UNREACHABLE: 
 		case BPF_FIB_LKUP_RET_PROHIBIT:   
-			c_value->next_h.action = ACTION_DROP;
+			c_value->action = ACTION_DROP;
 		break;
 
 		case BPF_FIB_LKUP_RET_FRAG_NEEDED:  // fragmentation required to fwd
@@ -141,8 +140,19 @@ __always_inline void make_routing_decision(struct BPF_CTX *ctx, struct iphdr *ip
 		case BPF_FIB_LKUP_RET_UNSUPP_LWT:  
 		case BPF_FIB_LKUP_RET_NO_NEIGH:    
 		default:
-			c_value->next_h.action = ACTION_PASS;
+			c_value->action = ACTION_PASS;
 	}
+}
+
+__always_inline long redirect_package(struct ethhdr *ethh, struct next_hop *next_h) {
+	// Adjust the MAC addresses
+	memcpy(ethh->h_source, next_h->src_mac,  sizeof(ethh->h_source));
+	memcpy(ethh->h_dest,   next_h->dest_mac, sizeof(ethh->h_dest));
+
+	BPF_DEBUG("Redirect package to if%u", next_h->ifindex);
+
+	// Redirect the package
+	return bpf_redirect(next_h->ifindex, 0);
 }
 
 
@@ -254,12 +264,14 @@ int fw_func(struct BPF_CTX *ctx) {
 		}
 
 		// Pass the package to the network stack if the connection is not yet or anymore established
-		if (c_value->ct_entry.state != CONN_ESTABLISHED)
+		if (c_value->state != CONN_ESTABLISHED)
 			return BPF_PASS;
 
 		if (fin) {
 			// Mark the connection as finished
-			c_value->ct_entry.state = CONN_FIN;
+			c_value->state  = CONN_FIN;
+			c_value->update = 1;
+
 			BPF_INFO("Connection will be closed");
 
 			return BPF_PASS;
@@ -267,14 +279,17 @@ int fw_func(struct BPF_CTX *ctx) {
 
 		if (rst) {
 			// Mark the connection as finished
-			c_value->ct_entry.state = CONN_FIN;
+			c_value->state  = CONN_FIN;
+			c_value->update = 1;
 
 			// Also mark the connection as finished for the reverse direction, if there is one
 			reverse_conn_key(&c_key);
 
 			c_value = bpf_map_lookup_elem(&CONN_MAP, &c_key);
-			if (c_value)
-				c_value->ct_entry.state = CONN_FIN;
+			if (c_value) {
+				c_value->state  = CONN_FIN;
+				c_value->update = 1;
+			}
 
 			BPF_INFO("Connection was reset");
 
@@ -284,10 +299,10 @@ int fw_func(struct BPF_CTX *ctx) {
 		BPF_DEBUG("Connection is established");
 
 		// If a routing decision hasn't been made yet (first package), do it now
-		if (!c_value->next_h.action)
+		if (!c_value->action)
 			make_routing_decision(ctx, iph, &c_key, c_value);
 
-		switch (c_value->next_h.action) {
+		switch (c_value->action) {
 			case ACTION_REDIRECT:
 				// Pass the package to the network stack if the TTL expired
 				if (iph->ttl <= 1)
@@ -300,18 +315,11 @@ int fw_func(struct BPF_CTX *ctx) {
 				// Apply NAT
 				apply_nat(&c_value->n_entry, iph, sport, dport, cksum);
 
-				// Adjust the packet counter
-				c_value->ct_entry.packets++;
-				c_value->ct_entry.bytes += data_end - data;
-
-				// Adjust the MAC addresses
-				memcpy(ethh->h_source, c_value->next_h.src_mac,  ETH_ALEN);
-				memcpy(ethh->h_dest,   c_value->next_h.dest_mac, ETH_ALEN);
-
-				BPF_DEBUG("Redirect package to if%u", c_value->next_h.ifindex);
+				// Tell the user-space program to update the conntrack timeout
+				c_value->update = 1;
 
 				// Redirect the package
-				return bpf_redirect(c_value->next_h.ifindex, 0);
+				return redirect_package(ethh, &c_value->next_h);
 
 			case ACTION_DROP:
 				return BPF_DROP;

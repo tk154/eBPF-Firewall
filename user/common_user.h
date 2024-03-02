@@ -1,5 +1,5 @@
-#ifndef USER_COMMON_H
-#define USER_COMMON_H
+#ifndef BPFW_COMMON_USER_H
+#define BPFW_COMMON_USER_H
 
 #include <stdio.h>
 

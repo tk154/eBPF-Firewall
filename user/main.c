@@ -3,7 +3,6 @@
 
 #include <errno.h>
 #include <stdbool.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -12,8 +11,9 @@
 #include <bpf/libbpf.h>
 
 #define FW_LOG_LEVEL FW_LOG_LEVEL_DEBUG
-#include "common.h"
+#include "common_user.h"
 #include "../common.h"
+
 #include "bpf_loader/bpf_loader.h"
 #include "conntrack/conntrack.h"
 
