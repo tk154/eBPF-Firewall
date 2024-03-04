@@ -29,6 +29,16 @@ struct vlan_hdr {
 	__be16 h_vlan_encapsulated_proto;	// packet type ID or len
 };
 
+// tcphdr from <linux/tcp.h> uses the host endianness, instead of the compiler endianness
+struct tcp_flags {
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+	__u8 fin:1, syn:1, rst:1, psh:1, ack:1, urg:1, ece:1, cwr:1;
+#elif __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+	__u8 cwr:1, ece:1, urg:1, ack:1, psh:1, rst:1, syn:1, fin:1;
+#endif
+};
+#define TCP_FLAGS_OFFSET 13
+
 
 /**
  * Helper to swap the src and dest IP and the src and dest port of a connection key
@@ -144,6 +154,12 @@ __always_inline void make_routing_decision(struct BPF_CTX *ctx, struct iphdr *ip
 	}
 }
 
+/**
+ * Rewrite the Ethernet header and redirect the package to the next hop
+ * @param ethh The Ethernet header to rewrite
+ * @param next_h The source and destination MAC and ifindex for the next hop
+ * @returns BPF_REDIRECT on success, BPF_DROP otherwise
+ * **/
 __always_inline long redirect_package(struct ethhdr *ethh, struct next_hop *next_h) {
 	// Adjust the MAC addresses
 	memcpy(ethh->h_source, next_h->src_mac,  sizeof(ethh->h_source));
@@ -209,8 +225,8 @@ int fw_func(struct BPF_CTX *ctx) {
 		__be16  *sport, *dport;
 		__sum16 *cksum;
 
-		// TCP FIN and RST
-		__u8 fin = 0, rst = 0;
+		// TCP Flags
+		struct tcp_flags flags = {};
 
 		switch (iph->protocol) {
 			case IPPROTO_TCP:;
@@ -228,9 +244,8 @@ int fw_func(struct BPF_CTX *ctx) {
 				dport = &tcph->dest;
 				cksum = &tcph->check;
 
-				// Save if connection is closed or reset
-				fin = tcph->fin;
-				rst = tcph->rst;
+				// Save the TCP Flags
+				flags = *(struct tcp_flags*)((void*)tcph + TCP_FLAGS_OFFSET);
 			break;
 
 			case IPPROTO_UDP:;
@@ -267,17 +282,7 @@ int fw_func(struct BPF_CTX *ctx) {
 		if (c_value->state != CONN_ESTABLISHED)
 			return BPF_PASS;
 
-		if (fin) {
-			// Mark the connection as finished
-			c_value->state  = CONN_FIN;
-			c_value->update = 1;
-
-			BPF_INFO("Connection will be closed");
-
-			return BPF_PASS;
-		}
-
-		if (rst) {
+		if (flags.fin || flags.rst) {
 			// Mark the connection as finished
 			c_value->state  = CONN_FIN;
 			c_value->update = 1;
@@ -291,7 +296,10 @@ int fw_func(struct BPF_CTX *ctx) {
 				c_value->update = 1;
 			}
 
-			BPF_INFO("Connection was reset");
+#if BPF_LOG_LEVEL >= BPF_LOG_LEVEL_INFO
+			if (flags.fin) BPF_INFO("FIN");
+			if (flags.rst) BPF_INFO("RST");
+#endif
 
 			return BPF_PASS;
 		}
