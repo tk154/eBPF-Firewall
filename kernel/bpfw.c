@@ -112,7 +112,6 @@ __always_inline void make_routing_decision(struct BPF_CTX *ctx, struct iphdr *ip
 	fib_params.l4_protocol = iph->protocol;
 	fib_params.sport = c_key->src_port;
 	fib_params.dport = c_value->n_entry.dest_port ? c_value->n_entry.dest_port : c_key->dest_port;
-	fib_params.tot_len = bpf_ntohs(iph->tot_len);
 	fib_params.tos = iph->tos;
 	fib_params.ipv4_src = iph->saddr;
 	fib_params.ipv4_dst = c_value->n_entry.dest_ip ? c_value->n_entry.dest_ip : iph->daddr;
@@ -124,7 +123,7 @@ __always_inline void make_routing_decision(struct BPF_CTX *ctx, struct iphdr *ip
 
 	switch (rc) { 
 		case BPF_FIB_LKUP_RET_SUCCESS:
-			BPF_INFO("ifindex: %d", fib_params.ifindex);
+			BPF_INFO("ifindex: %u", fib_params.ifindex);
 
 			// Copy the MAC addresses
 			memcpy(c_value->next_h.src_mac,  fib_params.smac, ETH_ALEN);
@@ -134,21 +133,17 @@ __always_inline void make_routing_decision(struct BPF_CTX *ctx, struct iphdr *ip
 			c_value->action = ACTION_REDIRECT;
 		break;
 
-		case BPF_FIB_LKUP_RET_BLACKHOLE:  
-		case BPF_FIB_LKUP_RET_UNREACHABLE: 
-		case BPF_FIB_LKUP_RET_PROHIBIT:   
+		case BPF_FIB_LKUP_RET_BLACKHOLE:
+		case BPF_FIB_LKUP_RET_UNREACHABLE:
+		case BPF_FIB_LKUP_RET_PROHIBIT:
 			c_value->action = ACTION_DROP;
 		break;
 
-		case BPF_FIB_LKUP_RET_FRAG_NEEDED:  // fragmentation required to fwd
-			BPF_INFO("tot_len: %u, mtu_result: %u",
-				bpf_ntohs(iph->tot_len), fib_params.mtu_result);
-		break;
-
-		case BPF_FIB_LKUP_RET_NOT_FWDED:   
+		case BPF_FIB_LKUP_RET_NOT_FWDED:
 		case BPF_FIB_LKUP_RET_FWD_DISABLED:
-		case BPF_FIB_LKUP_RET_UNSUPP_LWT:  
-		case BPF_FIB_LKUP_RET_NO_NEIGH:    
+		case BPF_FIB_LKUP_RET_UNSUPP_LWT:
+		case BPF_FIB_LKUP_RET_NO_NEIGH:
+		case BPF_FIB_LKUP_RET_FRAG_NEEDED:
 		default:
 			c_value->action = ACTION_PASS;
 	}
@@ -165,7 +160,7 @@ __always_inline long redirect_package(struct ethhdr *ethh, struct next_hop *next
 	memcpy(ethh->h_source, next_h->src_mac,  sizeof(ethh->h_source));
 	memcpy(ethh->h_dest,   next_h->dest_mac, sizeof(ethh->h_dest));
 
-	BPF_DEBUG("Redirect package to if%u", next_h->ifindex);
+	BPF_DEBUG("Redirect package to ifindex %u", next_h->ifindex);
 
 	// Redirect the package
 	return bpf_redirect(next_h->ifindex, 0);
@@ -180,6 +175,7 @@ SEC("fw")
 **/
 int fw_func(struct BPF_CTX *ctx) {
 	BPF_DEBUG("---------- New Package ----------");
+	BPF_DEBUG("ifindex: %u", ctx->ingress_ifindex);
 
 	// Save the first and last Byte of the received package
 	void* data 	   = (void*)(long)ctx->data;
