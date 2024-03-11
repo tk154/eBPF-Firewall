@@ -1,3 +1,5 @@
+#include <stdbool.h>
+
 #include <linux/bpf.h>
 #include <linux/if_ether.h>
 #include <linux/ip.h>
@@ -15,12 +17,12 @@
 
 struct {
 	__uint(type, BPF_MAP_TYPE_LRU_HASH);
-	__type(key, struct conn_key);
-	__type(value, struct conn_value);
+	__type(key, struct flow_key);
+	__type(value, struct flow_value);
 	__uint(max_entries, 1024);
 	//__uint(map_flags, BPF_F_NO_PREALLOC);
 	__uint(pinning, LIBBPF_PIN_BY_NAME);
-} CONN_MAP SEC(".maps");
+} FLOW_MAP SEC(".maps");
 
 
 // Declare the VLAN header struct because it's only included in the kernel source header <linux/if_vlan.h>
@@ -40,18 +42,26 @@ struct tcp_flags {
 #define TCP_FLAGS_OFFSET 13
 
 
-/**
- * Helper to swap the src and dest IP and the src and dest port of a connection key
- * @param c_key Pointer to the connection key
- * **/
-__always_inline void reverse_conn_key(struct conn_key *c_key) {
-	__be32 tmp_ip    = c_key->src_ip;
-	c_key->src_ip    = c_key->dest_ip;
-	c_key->dest_ip   = tmp_ip;
+__always_inline bool tcp_finished(struct flow_key *f_key, struct flow_value *f_value, struct tcp_flags flags) {
+	if (!flags.fin && !flags.rst)
+		return false;
 
-	__be16 tmp_port  = c_key->src_port;
-	c_key->src_port  = c_key->dest_port;
-	c_key->dest_port = tmp_port;
+	// Mark the flow as finished
+	f_value->state = FLOW_FINISHED;
+
+	// Also mark the flow as finished for the reverse direction, if there is one
+	reverse_flow_key(f_key);
+
+	f_value = bpf_map_lookup_elem(&FLOW_MAP, f_key);
+	if (f_value)
+		f_value->state = FLOW_FINISHED;
+
+	#if BPF_LOG_LEVEL >= BPF_LOG_LEVEL_INFO
+		if (flags.fin) BPF_INFO("FIN");
+		if (flags.rst) BPF_INFO("RST");
+	#endif
+
+	return true;
 }
 
 /* From include/net/checksum.h */
@@ -99,57 +109,6 @@ __always_inline void apply_nat(struct nat_entry *n_entry, struct iphdr *iph, __b
 }
 
 /**
- * Use bpf_fib_lookup to decide wether to route the package and where to
- * @param ctx xdp_md for XDP and __sk_buff for TC programs
- * @param iph The IPv4 Header of the package
- * @param c_key Pointer to the connection key
- * @param c_value Where to store the result, ifindex and MAC addresses
- * **/
-__always_inline void make_routing_decision(struct BPF_CTX *ctx, struct iphdr *iph, struct conn_key *c_key, struct conn_value *c_value) {
-	// Fill the lookup key
-	struct bpf_fib_lookup fib_params = {};
-	fib_params.family = AF_INET;
-	fib_params.l4_protocol = iph->protocol;
-	fib_params.sport = c_key->src_port;
-	fib_params.dport = c_value->n_entry.dest_port ? c_value->n_entry.dest_port : c_key->dest_port;
-	fib_params.tos = iph->tos;
-	fib_params.ipv4_src = iph->saddr;
-	fib_params.ipv4_dst = c_value->n_entry.dest_ip ? c_value->n_entry.dest_ip : iph->daddr;
-	fib_params.ifindex = ctx->ingress_ifindex;
-
-	// Do a loopkup in the kernel routing table
-	long rc = bpf_fib_lookup(ctx, &fib_params, sizeof(fib_params), 0);
-	BPF_INFO("bpf_fib_lookup: %d", rc);
-
-	switch (rc) { 
-		case BPF_FIB_LKUP_RET_SUCCESS:
-			BPF_INFO("ifindex: %u", fib_params.ifindex);
-
-			// Copy the MAC addresses
-			memcpy(c_value->next_h.src_mac,  fib_params.smac, ETH_ALEN);
-			memcpy(c_value->next_h.dest_mac, fib_params.dmac, ETH_ALEN);
-
-			c_value->next_h.ifindex = fib_params.ifindex;
-			c_value->action = ACTION_REDIRECT;
-		break;
-
-		case BPF_FIB_LKUP_RET_BLACKHOLE:
-		case BPF_FIB_LKUP_RET_UNREACHABLE:
-		case BPF_FIB_LKUP_RET_PROHIBIT:
-			c_value->action = ACTION_DROP;
-		break;
-
-		case BPF_FIB_LKUP_RET_NOT_FWDED:
-		case BPF_FIB_LKUP_RET_FWD_DISABLED:
-		case BPF_FIB_LKUP_RET_UNSUPP_LWT:
-		case BPF_FIB_LKUP_RET_NO_NEIGH:
-		case BPF_FIB_LKUP_RET_FRAG_NEEDED:
-		default:
-			c_value->action = ACTION_PASS;
-	}
-}
-
-/**
  * Rewrite the Ethernet header and redirect the package to the next hop
  * @param ethh The Ethernet header to rewrite
  * @param next_h The source and destination MAC and ifindex for the next hop
@@ -161,180 +120,161 @@ __always_inline long redirect_package(struct ethhdr *ethh, struct next_hop *next
 	memcpy(ethh->h_dest,   next_h->dest_mac, sizeof(ethh->h_dest));
 
 	BPF_DEBUG("Redirect package to ifindex %u", next_h->ifindex);
+	BPF_DEBUG_MAC("Dst MAC: ", next_h->dest_mac);
 
 	// Redirect the package
 	return bpf_redirect(next_h->ifindex, 0);
 }
 
 
-SEC("fw")
+SEC("bpfw")
 /**
  * Entry point of the BPF program executed when a new package is received on the hook
  * @param ctx The package contents and some metadata. Type is xdp_md for XDP and __sk_buff for TC programs.
  * @returns The action to be executed on the received package
 **/
-int fw_func(struct BPF_CTX *ctx) {
+int fw_func(struct BPFW_CTX *ctx) {
 	BPF_DEBUG("---------- New Package ----------");
 	BPF_DEBUG("ifindex: %u", ctx->ingress_ifindex);
 
-	// Save the first and last Byte of the received package
+	// Save pointer to the first and last Byte of the received package
 	void* data 	   = (void*)(long)ctx->data;
 	void* data_end = (void*)(long)ctx->data_end;
 
-	// A pointer to save the cuurent position inside the package
-	void* p = data;
-
 	// Parse the Ethernet header, will drop the package if out-of-bounds
-	parse_header(struct ethhdr, *ethh, p, data_end);
+	parse_header(struct ethhdr, *ethh, data, data_end);
+
+    BPF_DEBUG_MAC("Src MAC: ", ethh->h_source);
+	BPF_DEBUG_MAC("Dst MAC: ", ethh->h_dest);
 
 	// Initialize the connection key
-	struct conn_key c_key = {};
+	struct flow_key f_key = {};
+	f_key.ifindex = ctx->ingress_ifindex;
+
     __be16 h_proto = ethh->h_proto;
 
 	// Check if there is a VLAN header
     if (h_proto == bpf_htons(ETH_P_8021Q) || h_proto == bpf_htons(ETH_P_8021AD)) {
 		// Parse the VLAN header, will drop the package if out-of-bounds
-		parse_header(struct vlan_hdr, *vlan_h, p, data_end);
+		parse_header(struct vlan_hdr, *vlan_h, data, data_end);
 
 		// Save the VLAN ID (last 12 Byte)
-        c_key.vlan_id = bpf_htons(vlan_h->h_vlan_TCI) & 0x0FFF;
+        f_key.vlan_id = bpf_htons(vlan_h->h_vlan_TCI) & 0x0FFF;
 
-		BPF_DEBUG("VLAN ID: %u", c_key.vlan_id);
+		BPF_DEBUG("VLAN ID: %u", vlan_id);
 
 		// Save the packet type ID of the next header
 		h_proto = vlan_h->h_vlan_encapsulated_proto;
     }
 
-	if (h_proto == bpf_htons(ETH_P_IP)) {
-		// Parse the IPv4 header, will drop the package if out-of-bounds
-		parse_header(struct iphdr, *iph, p, data_end);
-
-		BPF_DEBUG_IP("Source IP: ", iph->saddr);
-		BPF_DEBUG_IP("Destination IP: ", iph->daddr);
-		BPF_DEBUG("Protocol: %u", iph->protocol);
-
-		c_key.src_ip   = iph->saddr;
-		c_key.dest_ip  = iph->daddr;
-		c_key.l4_proto = iph->protocol;
-
-		// Pointers for possible NAT adjustments
-		__be16  *sport, *dport;
-		__sum16 *cksum;
-
-		// TCP Flags
-		struct tcp_flags flags = {};
-
-		switch (iph->protocol) {
-			case IPPROTO_TCP:;
-				// Parse the TCP header, will drop the package if out-of-bounds
-				parse_header(struct tcphdr, *tcph, p, data_end);
-
-				BPF_DEBUG("TCP Source Port: %u", bpf_ntohs(tcph->source));
-				BPF_DEBUG("TCP Destination Port: %u", bpf_ntohs(tcph->dest));
-
-				c_key.src_port  = tcph->source;
-				c_key.dest_port = tcph->dest;
-
-				// For possible NAT adjustmenets
-				sport = &tcph->source;
-				dport = &tcph->dest;
-				cksum = &tcph->check;
-
-				// Save the TCP Flags
-				flags = *(struct tcp_flags*)((void*)tcph + TCP_FLAGS_OFFSET);
-			break;
-
-			case IPPROTO_UDP:;
-				// Parse the UDP header, will drop the package if out-of-bounds
-				parse_header(struct udphdr, *udph, p, data_end);
-
-				BPF_DEBUG("UDP Source Port: %u", bpf_ntohs(udph->source));
-				BPF_DEBUG("UDP Destination Port: %u", bpf_ntohs(udph->dest));
-
-				c_key.src_port  = udph->source;
-				c_key.dest_port = udph->dest;
-
-				// For possible NAT adjustmenets
-				sport = &udph->source;
-				dport = &udph->dest;
-				cksum = &udph->check;
-			break;
-
-			default:
-				return BPF_PASS;
-		}
-
-		// Check if a conntrack entry exists
-		struct conn_value* c_value = bpf_map_lookup_elem(&CONN_MAP, &c_key);
-		if (!c_value) {
-			// If there is none, create a new one
-			struct conn_value c_value = {};
-			bpf_map_update_elem(&CONN_MAP, &c_key, &c_value, BPF_NOEXIST);
-
-			return BPF_PASS;
-		}
-
-		// Pass the package to the network stack if the connection is not yet or anymore established
-		if (c_value->state != CONN_ESTABLISHED)
-			return BPF_PASS;
-
-		if (flags.fin || flags.rst) {
-			// Mark the connection as finished
-			c_value->state  = CONN_FIN;
-			c_value->update = 1;
-
-			// Also mark the connection as finished for the reverse direction, if there is one
-			reverse_conn_key(&c_key);
-
-			c_value = bpf_map_lookup_elem(&CONN_MAP, &c_key);
-			if (c_value) {
-				c_value->state  = CONN_FIN;
-				c_value->update = 1;
-			}
-
-#if BPF_LOG_LEVEL >= BPF_LOG_LEVEL_INFO
-			if (flags.fin) BPF_INFO("FIN");
-			if (flags.rst) BPF_INFO("RST");
-#endif
-
-			return BPF_PASS;
-		}
-
-		BPF_DEBUG("Connection is established");
-
-		// If a routing decision hasn't been made yet (first package), do it now
-		if (!c_value->action)
-			make_routing_decision(ctx, iph, &c_key, c_value);
-
-		switch (c_value->action) {
-			case ACTION_REDIRECT:
-				// Pass the package to the network stack if the TTL expired
-				if (iph->ttl <= 1)
-					return BPF_PASS;
-
-				// Decrement the TTL, adjust the checksum
-				iph->ttl--;
-				cksum_add(&iph->check, c_value->l3_cksum_diff);
-
-				// Apply NAT
-				apply_nat(&c_value->n_entry, iph, sport, dport, cksum);
-
-				// Tell the user-space program to update the conntrack timeout
-				c_value->update = 1;
-
-				// Redirect the package
-				return redirect_package(ethh, &c_value->next_h);
-
-			case ACTION_DROP:
-				return BPF_DROP;
-
-			case ACTION_PASS:
-			default:
-				return BPF_PASS;
-		}
+	if (h_proto != bpf_htons(ETH_P_IP)) {
+		BPF_DEBUG("h_proto: 0x%04x", h_proto);
+		return BPFW_PASS;
 	}
 
-    return BPF_PASS;
+	// Parse the IPv4 header, will drop the package if out-of-bounds
+	parse_header(struct iphdr, *iph, data, data_end);
+
+	BPF_DEBUG_IP("Src IP: ", iph->saddr);
+	BPF_DEBUG_IP("Dst IP: ", iph->daddr);
+
+	f_key.src_ip   = iph->saddr;
+	f_key.dest_ip  = iph->daddr;
+	f_key.l4_proto = iph->protocol;
+
+	// Pointers for possible NAT adjustments
+	__be16  *sport, *dport;
+	__sum16 *cksum;
+
+	// TCP Flags
+	struct tcp_flags flags = {};
+
+	switch (iph->protocol) {
+		case IPPROTO_TCP:;
+			// Parse the TCP header, will drop the package if out-of-bounds
+			parse_header(struct tcphdr, *tcph, data, data_end);
+
+			BPF_DEBUG("TCP Src Port: %u", bpf_ntohs(tcph->source));
+			BPF_DEBUG("TCP Dst Port: %u", bpf_ntohs(tcph->dest));
+
+			f_key.src_port  = tcph->source;
+			f_key.dest_port = tcph->dest;
+
+			// For possible NAT adjustmenets
+			sport = &tcph->source;
+			dport = &tcph->dest;
+			cksum = &tcph->check;
+
+			// Save the TCP Flags
+			flags = *(struct tcp_flags*)((void*)tcph + TCP_FLAGS_OFFSET);
+		break;
+
+		case IPPROTO_UDP:;
+			// Parse the UDP header, will drop the package if out-of-bounds
+			parse_header(struct udphdr, *udph, data, data_end);
+
+			BPF_DEBUG("UDP Src Port: %u", bpf_ntohs(udph->source));
+			BPF_DEBUG("UDP Dst Port: %u", bpf_ntohs(udph->dest));
+
+			f_key.src_port  = udph->source;
+			f_key.dest_port = udph->dest;
+
+			// For possible NAT adjustmenets
+			sport = &udph->source;
+			dport = &udph->dest;
+			cksum = &udph->check;
+		break;
+
+		default:
+			BPF_DEBUG("IP Protocol: %u", iph->protocol);
+			return BPFW_PASS;
+	}
+
+	// Check if a conntrack entry exists
+	struct flow_value* f_value = bpf_map_lookup_elem(&FLOW_MAP, &f_key);
+	if (!f_value) {
+		// If there is none, create a new one
+		struct flow_value f_value = {};
+		bpf_map_update_elem(&FLOW_MAP, &f_key, &f_value, BPF_NOEXIST);
+
+		return BPFW_PASS;
+	}
+
+	// Pass the package to the network stack if the connection is not yet or anymore established
+	if (f_value->state != FLOW_OFFLOADED)
+		return BPFW_PASS;
+
+	BPF_DEBUG("Flow is offloaded");
+
+	switch (f_value->action) {
+		case ACTION_REDIRECT:
+			// Pass the package to the network stack if 
+			// there is a FIN or RST or the TTL expired
+			if (tcp_finished(&f_key, f_value, flags) || iph->ttl <= 1)
+				return BPFW_PASS;
+
+			// Decrement the TTL, adjust the checksum
+			iph->ttl--;
+			cksum_add(&iph->check, f_value->l3_cksum_diff);
+
+			// Apply NAT
+			apply_nat(&f_value->n_entry, iph, sport, dport, cksum);
+
+			// Tell the user-space program to update the conntrack timeout
+			f_value->update = 1;
+
+			// Redirect the package
+			return redirect_package(ethh, &f_value->next_h);
+
+		case ACTION_DROP:
+			BPF_DEBUG("Drop package");
+			return BPFW_DROP;
+
+		case ACTION_PASS:
+		default:
+			BPF_DEBUG("Pass package to network stack");
+			return BPFW_PASS;
+	}
 }
 
 char _license[] SEC("license") = "GPL";

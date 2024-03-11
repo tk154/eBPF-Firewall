@@ -2,19 +2,20 @@
 #define BPFW_COMMON_H
 
 #include <linux/types.h>
+#include <linux/if_ether.h>
 
 
 #define STRINGIZE(x) #x
 #define MAP_TO_STRING(map) STRINGIZE(map)           // Used to get the map name as a string (used for user space programs)
 
-#define CONN_MAP         		conn_map
-#define CONN_MAP_NAME    		MAP_TO_STRING(CONN_MAP)
+#define FLOW_MAP         		flow_map
+#define FLOW_MAP_NAME    		MAP_TO_STRING(FLOW_MAP)
 
 
-struct conn_key {
+struct flow_key {
 	//__u8 src_mac[ETH_ALEN];
 	//__u8 dest_mac[ETH_ALEN];
-    //__u32 ifindex;
+    __u32  ifindex;
 	__be32 src_ip;
 	__be32 dest_ip;
 	__be16 src_port;
@@ -25,8 +26,8 @@ struct conn_key {
 
 
 struct next_hop {
-	__u8  src_mac[6];
-	__u8  dest_mac[6];
+	__u8  src_mac[ETH_ALEN];
+	__u8  dest_mac[ETH_ALEN];
 	__u32 ifindex;
 };
 
@@ -39,7 +40,7 @@ struct nat_entry {
 	__u8    rewrite_flag;
 };
 
-struct conn_value {
+struct flow_value {
 	struct next_hop next_h;
 	struct nat_entry n_entry;
 	__sum16 l3_cksum_diff;
@@ -49,9 +50,9 @@ struct conn_value {
 
 
 enum {
-	CONN_NEW = 0,
-	CONN_ESTABLISHED,
-	CONN_FIN
+	FLOW_NONE = 0,
+	FLOW_OFFLOADED,
+	FLOW_FINISHED
 };
 
 enum {
@@ -66,6 +67,21 @@ enum {
 	REWRITE_SRC_PORT  = 4,
 	REWRITE_DEST_PORT = 8
 };
+
+
+/**
+ * Helper to swap the src and dest IP and the src and dest port of a flow key
+ * @param f_key Pointer to the flow key
+ * **/
+static void reverse_flow_key(struct flow_key *f_key) {
+	__be32 tmp_ip    = f_key->src_ip;
+	f_key->src_ip    = f_key->dest_ip;
+	f_key->dest_ip   = tmp_ip;
+
+	__be16 tmp_port  = f_key->src_port;
+	f_key->src_port  = f_key->dest_port;
+	f_key->dest_port = tmp_port;
+}
 
 
 #endif

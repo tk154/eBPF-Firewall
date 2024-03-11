@@ -9,6 +9,8 @@
 #define FW_LOG_LEVEL_INFO  2
 #define FW_LOG_LEVEL_DEBUG 3
 
+#define FW_LOG_LEVEL FW_LOG_LEVEL_DEBUG
+
 #if FW_LOG_LEVEL >= FW_LOG_LEVEL_ERROR
 #define FW_ERROR(...) fprintf(stderr, __VA_ARGS__)
 #else

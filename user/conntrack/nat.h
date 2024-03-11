@@ -8,10 +8,10 @@
 /**
  * Check if the conntrack line contains NAT information, i.e., the connection has NAT
  * @param ct The conntrack object
- * @param c_key The BPF connection key
- * @param c_value The BPF connection value containing the NAT entries
+ * @param f_key The BPF flow key
+ * @param f_value The BPF flow value containing the NAT entries
  * **/
-void check_nat(struct nf_conntrack *ct, struct conn_key *c_key, struct conn_value *c_value);
+void check_nat(struct nf_conntrack *ct, struct flow_key *f_key, struct flow_value *f_value);
 
 
 #endif

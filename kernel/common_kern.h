@@ -5,20 +5,20 @@
 
 
 #if defined(XDP_PROGRAM)
-#define BPF_CTX         xdp_md              // User accessible metadata for XDP packet hook
+#define BPFW_CTX         xdp_md              // User accessible metadata for XDP packet hook
 
-#define BPF_PASS        XDP_PASS            // Let the package pass to the normal network stack
-#define BPF_DROP        XDP_DROP            // Drop the package
-#define BPF_REDIRECT    XDP_REDIRECT        // Redirect the package to another network interface
+#define BPFW_PASS        XDP_PASS            // Let the package pass to the normal network stack
+#define BPFW_DROP        XDP_DROP            // Drop the package
+#define BPFW_REDIRECT    XDP_REDIRECT        // Redirect the package to another network interface
 
 #elif defined(TC_PROGRAM)
 #include <linux/pkt_cls.h>
 
-#define BPF_CTX         __sk_buff           // User accessible mirror of in-kernel sk_buff
+#define BPFW_CTX         __sk_buff           // User accessible mirror of in-kernel sk_buff
 
-#define BPF_PASS        TC_ACT_OK           // Let the package pass to the normal network stack
-#define BPF_DROP        TC_ACT_SHOT         // Drop the package
-#define BPF_REDIRECT    TC_ACT_REDIRECT     // Redirect the package to another network interface
+#define BPFW_PASS        TC_ACT_OK           // Let the package pass to the normal network stack
+#define BPFW_DROP        TC_ACT_SHOT         // Drop the package
+#define BPFW_REDIRECT    TC_ACT_REDIRECT     // Redirect the package to another network interface
 
 #endif
 
@@ -48,12 +48,13 @@
 
 #if BPF_LOG_LEVEL >= BPF_LOG_LEVEL_DEBUG
 #define BPF_DEBUG(...) bpf_printk(__VA_ARGS__)
+#define BPF_DEBUG_IP(prefix, ip)   __bpf_debug_ip(prefix, ip)
+#define BPF_DEBUG_MAC(prefix, mac) __bpf_debug_mac(prefix, mac)
 #else
 #define BPF_DEBUG(...)
+#define BPF_DEBUG_IP(prefix, ip)
+#define BPF_DEBUG_MAC(prefix, mac)
 #endif
-
-#define BPF_DEBUG_IP(s, ip)   BPF_DEBUG("%s%u.%u.%u.%u", s, ip & 0xFF, (ip >> 8) & 0xFF, (ip >> 16) & 0xFF, ip >> 24);
-#define BPF_DEBUG_MAC(s, mac) BPF_DEBUG("%s%02x:%02x:%02x:%02x:%02x:%02x", s, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 
 
 #ifndef memcpy
@@ -66,7 +67,33 @@
 	data_ptr += sizeof(header_type); \
     if (data_ptr > data_end) { \
         BPF_WARN(#header_type" > data_end"); \
-        return BPF_DROP; \
+        return BPFW_DROP; \
     }
+
+
+void __bpf_debug_ip(const char *prefix, __be32 ip_addr) {
+    __u8 *ip = (__u8*)&ip_addr;
+    __u64 ip_data[] = { ip[0], ip[1], ip[2], ip[3] };
+
+    // Format IP address into a string buffer
+    char ip_str[INET_ADDRSTRLEN];
+    bpf_snprintf(ip_str, sizeof(ip_str), "%u.%u.%u.%u",
+                    ip_data, sizeof(ip_data));
+
+    BPF_DEBUG("%s%s", prefix, ip_str);
+}
+
+void __bpf_debug_mac(const char *prefix, __u8 *mac_addr) {
+    __u64 mac_data[] = { mac_addr[0], mac_addr[1], mac_addr[2], 
+                         mac_addr[3], mac_addr[4], mac_addr[5] };
+
+    // Format MAC address into a string buffer
+    char mac_str[18] = {};
+    bpf_snprintf(mac_str, sizeof(mac_str), "%02x:%02x:%02x:%02x:%02x:%02x",
+                    mac_data, sizeof(mac_data));
+
+    BPF_DEBUG("%s%s", prefix, mac_str);
+}
+
 
 #endif

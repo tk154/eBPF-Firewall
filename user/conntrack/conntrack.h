@@ -1,5 +1,5 @@
-#ifndef CONNTRACK_H
-#define CONNTRACK_H
+#ifndef BPFW_CONNTRACK_H
+#define BPFW_CONNTRACK_H
 
 #include <bpf/libbpf.h>
 

@@ -12,6 +12,8 @@
 #include <linux/netfilter/nf_conntrack_tcp.h>
 #include <libnetfilter_conntrack/libnetfilter_conntrack.h>
 
+#include "../netlink/netlink.h"
+
 #include "../common_user.h"
 #include "../../common.h"
 
@@ -23,14 +25,25 @@ static int map_fd;
 static struct nfct_handle *ct_handle;
 
 // For the currently iterated BPF conntrack key and value of the conntrack callbacks
-struct conn_key   c_key;
-struct conn_value c_value;
+static struct flow_key   f_key;
+static struct flow_value f_value;
 
 // Timeouts from /proc/sys/net/netfilter
 // Note: There are more, for now just basic ones
-__u32 tcp_timeout;
-__u32 udp_timeout;
+static __u32 tcp_timeout;
+static __u32 udp_timeout;
 
+
+static inline void log_entry(const char* prefix) {
+#if FW_LOG_LEVEL >= FW_LOG_LEVEL_DEBUG
+    char src_ip[INET_ADDRSTRLEN], dest_ip[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &f_key.src_ip, src_ip, sizeof(src_ip));
+    inet_ntop(AF_INET, &f_key.dest_ip, dest_ip, sizeof(dest_ip));
+
+    FW_DEBUG("%s%u %hhu %s %s %hu %hu\n", prefix, f_key.ifindex, f_key.l4_proto,
+        src_ip, dest_ip, ntohs(f_key.src_port), ntohs(f_key.dest_port));
+#endif
+}
 
 /**
  * Reads timeout values from /proc/sys/net/netfilter/nf_conntrack_<filename>
@@ -72,7 +85,7 @@ static void update_timeout(struct nf_conntrack *ct) {
     __u32 timeout;
 
     // Determine the timeout for the specific protocol
-    switch (c_key.l4_proto) {
+    switch (f_key.l4_proto) {
         case IPPROTO_TCP: timeout = tcp_timeout; break;
         case IPPROTO_UDP: timeout = udp_timeout; break;
     }
@@ -81,37 +94,18 @@ static void update_timeout(struct nf_conntrack *ct) {
     nfct_set_attr_u32(ct, ATTR_TIMEOUT, timeout);
 }
 
-// Helper to swap the src and dest IP and the src and dest port of a connection key
-static void reverse_conn_key() {
-	__be32 tmp_ip   = c_key.src_ip;
-	c_key.src_ip    = c_key.dest_ip;
-	c_key.dest_ip   = tmp_ip;
-
-	__be16 tmp_port = c_key.src_port;
-	c_key.src_port  = c_key.dest_port;
-	c_key.dest_port = tmp_port;
-}
-
-static inline void log_entry(const char* prefix) {
-#ifdef FW_LOG_LEVEL_DEBUG
-    char src_ip[INET_ADDRSTRLEN], dest_ip[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &c_key.src_ip, src_ip, sizeof(src_ip));
-    inet_ntop(AF_INET, &c_key.dest_ip, dest_ip, sizeof(dest_ip));
-
-    FW_DEBUG("%s%hhu %s %s %hu %hu\n", prefix, c_key.l4_proto,
-        src_ip, dest_ip, ntohs(c_key.src_port), ntohs(c_key.dest_port));
-#endif
-}
-
 static int check_nat_and_update_bpf_map(struct nf_conntrack *ct) {
     // Since the TTL is decremented, we must increment the checksum
     // Check for NAT afterward
-    c_value.state         = CONN_ESTABLISHED;
-    c_value.l3_cksum_diff = htons(0x0100);
-    check_nat(ct, &c_key, &c_value);
+    f_value.state         = FLOW_OFFLOADED;
+    f_value.l3_cksum_diff = htons(0x0100);
+
+    check_nat(ct, &f_key, &f_value);
+    int rc = get_next_hop(&f_key, &f_value);
+    if (rc != 0) return rc;
 
     // Add the conntrack info to the map, stop the nf_conntrack iteration on error
-    if (bpf_map_update_elem(map_fd, &c_key, &c_value, BPF_NOEXIST) != 0) {
+    if (bpf_map_update_elem(map_fd, &f_key, &f_value, BPF_NOEXIST) != 0) {
         FW_ERROR("Error adding conntrack entry to conntrack map: %s (Code: -%d).\n", strerror(errno), errno);
         return errno;
     }
@@ -121,25 +115,25 @@ static int check_nat_and_update_bpf_map(struct nf_conntrack *ct) {
 
 // Callback to retrieve all conntrack entries one after the other
 static int ct_dump_callback(enum nf_conntrack_msg_type type, struct nf_conntrack *ct, void *data) {
-    c_key   = (const struct conn_key)   {};
-    c_value = (const struct conn_value) {};
+    memset(&f_key,   0, sizeof(f_key));
+    memset(&f_value, 0, sizeof(f_value));
 
-    c_key.l4_proto = nfct_get_attr_u8(ct, ATTR_L4PROTO);
+    f_key.l4_proto = nfct_get_attr_u8(ct, ATTR_L4PROTO);
 
-    switch (c_key.l4_proto) {
+    switch (f_key.l4_proto) {
         case IPPROTO_TCP:
-            // Retrieve the current TCP connection state
-            __u8 state = nfct_get_attr_u8(ct, ATTR_TCP_STATE);
-
-            // If the connection isn't established yet or anymore,
-            // the BPF program shouldn't forward its packages
-            if (state != TCP_CONNTRACK_ESTABLISHED)
+            if (f_key.l4_proto == IPPROTO_TCP &&
+                nfct_get_attr_u8(ct, ATTR_TCP_STATE) != TCP_CONNTRACK_ESTABLISHED)
+            {
+                // If the flow isn't established yet or anymore,
+                // the BPF program shouldn't forward its packages
                 return NFCT_CB_CONTINUE;
+            }
 
         case IPPROTO_UDP:
             // Save the ports
-            c_key.src_port  = nfct_get_attr_u16(ct, ATTR_PORT_SRC);
-            c_key.dest_port = nfct_get_attr_u16(ct, ATTR_PORT_DST);
+            f_key.src_port  = nfct_get_attr_u16(ct, ATTR_PORT_SRC);
+            f_key.dest_port = nfct_get_attr_u16(ct, ATTR_PORT_DST);
         break;
 
         // Ignore other protocols
@@ -147,16 +141,16 @@ static int ct_dump_callback(enum nf_conntrack_msg_type type, struct nf_conntrack
             return NFCT_CB_CONTINUE;
     }
 
-    c_key.src_ip  = nfct_get_attr_u32(ct, ATTR_IPV4_SRC);
-    c_key.dest_ip = nfct_get_attr_u32(ct, ATTR_IPV4_DST);
+    f_key.src_ip  = nfct_get_attr_u32(ct, ATTR_IPV4_SRC);
+    f_key.dest_ip = nfct_get_attr_u32(ct, ATTR_IPV4_DST);
     log_entry("Dump: ");
 
     if (check_nat_and_update_bpf_map(ct) != 0)
         return NFCT_CB_FAILURE;
 
     // We also need to create an entry for the reverse direction
-    reverse_conn_key(&c_key);
-    c_value = (const struct conn_value) {};
+    reverse_flow_key(&f_key);
+    memset(&f_value, 0, sizeof(f_value));
 
     if (check_nat_and_update_bpf_map(ct) != 0)
         return NFCT_CB_FAILURE;
@@ -167,36 +161,46 @@ static int ct_dump_callback(enum nf_conntrack_msg_type type, struct nf_conntrack
 
 // Callback to retrieve a specific conntrack entry
 static int ct_get_callback(enum nf_conntrack_msg_type type, struct nf_conntrack *ct, void *data) {
-    switch (c_value.state) {
-        // If the BPF connection was not marked as established (yet)
-        case CONN_NEW:
-            if (c_key.l4_proto == IPPROTO_TCP) {
-                __u8 state = nfct_get_attr_u8(ct, ATTR_TCP_STATE);
-
-                // If the connection isn't established yet or anymore, the BPF program shouldn't forward its packages
-                if (state != TCP_CONNTRACK_ESTABLISHED)
-                    return NFCT_CB_CONTINUE;
+    switch (f_value.state) {
+        // If the flow was not marked as offloaded (yet)
+        case FLOW_NONE:
+            if (f_key.l4_proto == IPPROTO_TCP &&
+                nfct_get_attr_u8(ct, ATTR_TCP_STATE) != TCP_CONNTRACK_ESTABLISHED)
+            {
+                // If the flow isn't established yet or anymore,
+                // the BPF program shouldn't forward its packages
+                return NFCT_CB_CONTINUE;
             }
 
             log_entry("New: ");
             
-            // Mark the connection as established so that the BPF program can take over now
+            // Mark the flow as established so that the BPF program can take over now
             // Since the TTL is decremented, we must increment the checksum
             // Check for NAT afterward
-            c_value.state         = CONN_ESTABLISHED;
-            c_value.l3_cksum_diff = htons(0x0100);
-            check_nat(ct, &c_key, &c_value);
+            f_value.state         = FLOW_OFFLOADED;
+            f_value.l3_cksum_diff = htons(0x0100);
+            check_nat(ct, &f_key, &f_value);
+            
+            if (get_next_hop(&f_key, &f_value) != 0)
+                return NFCT_CB_STOP;
         break;
 
-        // If the connection is currently established
-        case CONN_ESTABLISHED:
-            // If there are no new packages, there is nothing to do for this connection
-            if (!c_value.update)
+        // If the flow is currently established
+        case FLOW_OFFLOADED:
+            if (f_key.l4_proto == IPPROTO_TCP &&
+                nfct_get_attr_u8(ct, ATTR_TCP_STATE) != TCP_CONNTRACK_ESTABLISHED)
+            {
+                f_value.state = FLOW_NONE;
+                break;
+            }
+
+            // If there are no new packages, there is nothing to do for this flow
+            if (!f_value.update)
                 return NFCT_CB_CONTINUE;
 
             // Update the nf_conntrack timeout
             update_timeout(ct);
-            c_value.update = 0;
+            f_value.update = 0;
 
             // Update the edited nf_conntrack entry
             if (nfct_query(ct_handle, NFCT_Q_UPDATE, ct) != 0) {
@@ -205,18 +209,15 @@ static int ct_get_callback(enum nf_conntrack_msg_type type, struct nf_conntrack 
             }
         break;
 
-        // If the connection is finished
-        case CONN_FIN:
-            if (!c_value.update)
-                return NFCT_CB_CONTINUE;
-
+        // If the flow is finished
+        case FLOW_FINISHED:
             log_entry("Fin: ");
-            c_value.update = 0;
+            f_value.state = FLOW_NONE;
         break;
     }
 
     // Update the BPF conntrack entry, break out on error
-    if (bpf_map_update_elem(map_fd, &c_key, &c_value, BPF_EXIST) != 0) {
+    if (bpf_map_update_elem(map_fd, &f_key, &f_value, BPF_EXIST) != 0) {
         FW_ERROR("Error updating conntrack entry in conntrack map: %s (-%d).\n", strerror(errno), errno);
         return NFCT_CB_STOP;
     }
@@ -227,9 +228,9 @@ static int ct_get_callback(enum nf_conntrack_msg_type type, struct nf_conntrack 
 
 int conntrack_init(struct bpf_object* obj) {
     // Get the file descriptor of the BPF connections map
-    map_fd = bpf_object__find_map_fd_by_name(obj, CONN_MAP_NAME);
+    map_fd = bpf_object__find_map_fd_by_name(obj, FLOW_MAP_NAME);
     if (map_fd < 0) {
-        FW_ERROR("Couldn't find map '%s' in %s.\n", CONN_MAP_NAME, bpf_object__name(obj));
+        FW_ERROR("Couldn't find map '%s' in %s.\n", FLOW_MAP_NAME, bpf_object__name(obj));
         return -1;
     }
 
@@ -253,8 +254,6 @@ int conntrack_init(struct bpf_object* obj) {
     // Retrieve all IPv4 conntrack entries
     __u32 family = AF_INET;
 	if (nfct_query(ct_handle, NFCT_Q_DUMP, &family) != 0) {
-        FW_ERROR("Error dumping conntrack entries: %s (-%d).\n", strerror(errno), errno);
-
         conntrack_destroy();
 
         return errno;
@@ -271,12 +270,12 @@ int conntrack_init(struct bpf_object* obj) {
 
 int update_conntrack(struct bpf_object* obj) {
     // Retrieve the first key of the BPF conntrack map
-    int rc = bpf_map_get_next_key(map_fd, NULL, &c_key);
+    int rc = bpf_map_get_next_key(map_fd, NULL, &f_key);
 
     // Iterate through all the connection entries
     while (rc == 0) {
         // Retrieve the connection value of the current key
-        if (bpf_map_lookup_elem(map_fd, &c_key, &c_value) != 0) {
+        if (bpf_map_lookup_elem(map_fd, &f_key, &f_value) != 0) {
             FW_ERROR("Error looking up connection entry: %s (-%d).\n", strerror(errno), errno);
             return errno;
         }
@@ -290,11 +289,11 @@ int update_conntrack(struct bpf_object* obj) {
 
         // Set the attributes accordingly
         nfct_set_attr_u8 (ct, ATTR_L3PROTO,  AF_INET);
-        nfct_set_attr_u8 (ct, ATTR_L4PROTO,  c_key.l4_proto);
-        nfct_set_attr_u32(ct, ATTR_IPV4_SRC, c_key.src_ip);
-        nfct_set_attr_u32(ct, ATTR_IPV4_DST, c_key.dest_ip);
-        nfct_set_attr_u16(ct, ATTR_PORT_SRC, c_key.src_port);
-        nfct_set_attr_u16(ct, ATTR_PORT_DST, c_key.dest_port);
+        nfct_set_attr_u8 (ct, ATTR_L4PROTO,  f_key.l4_proto);
+        nfct_set_attr_u32(ct, ATTR_IPV4_SRC, f_key.src_ip);
+        nfct_set_attr_u32(ct, ATTR_IPV4_DST, f_key.dest_ip);
+        nfct_set_attr_u16(ct, ATTR_PORT_SRC, f_key.src_port);
+        nfct_set_attr_u16(ct, ATTR_PORT_DST, f_key.dest_port);
 
         // Try to find the connection inside nf_conntrack
         if (nfct_query(ct_handle, NFCT_Q_GET, ct) != 0) {
@@ -305,7 +304,7 @@ int update_conntrack(struct bpf_object* obj) {
             
             // If no connection could be found, it is finished or a timeout occured
             // So delete it from the BPF connection map
-            if (bpf_map_delete_elem(map_fd, &c_key) != 0) {
+            if (bpf_map_delete_elem(map_fd, &f_key) != 0) {
                 FW_ERROR("Error deleting connection entry: %s (-%d).\n", strerror(errno), errno);
 
                 // Free the conntrack object
@@ -319,7 +318,7 @@ int update_conntrack(struct bpf_object* obj) {
         nfct_destroy(ct);
 
         // Retrieve the next key of the connections map
-        rc = bpf_map_get_next_key(map_fd, &c_key, &c_key);
+        rc = bpf_map_get_next_key(map_fd, &f_key, &f_key);
     }
 
     return 0;

@@ -10,7 +10,6 @@
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
 
-#define FW_LOG_LEVEL FW_LOG_LEVEL_DEBUG
 #include "common_user.h"
 #include "../common.h"
 
