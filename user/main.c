@@ -85,8 +85,6 @@ int main(int argc, char* argv[]) {
     if (!bpf)
         return EXIT_FAILURE;
 
-    FW_INFO("Dumping conntrack entries into BPF map ...\n");
-
     // Read the conntrack info and save it inside the BPF conntrack map
     int rc = conntrack_init(bpf->obj);
     if (rc != 0)

@@ -94,70 +94,6 @@ static void update_timeout(struct nf_conntrack *ct) {
     nfct_set_attr_u32(ct, ATTR_TIMEOUT, timeout);
 }
 
-static int check_nat_and_update_bpf_map(struct nf_conntrack *ct) {
-    // Since the TTL is decremented, we must increment the checksum
-    // Check for NAT afterward
-    f_value.state         = FLOW_OFFLOADED;
-    f_value.l3_cksum_diff = htons(0x0100);
-
-    check_nat(ct, &f_key, &f_value);
-    int rc = get_next_hop(&f_key, &f_value);
-    if (rc != 0) return rc;
-
-    // Add the conntrack info to the map, stop the nf_conntrack iteration on error
-    if (bpf_map_update_elem(map_fd, &f_key, &f_value, BPF_NOEXIST) != 0) {
-        FW_ERROR("Error adding conntrack entry to conntrack map: %s (Code: -%d).\n", strerror(errno), errno);
-        return errno;
-    }
-
-    return 0;
-}
-
-// Callback to retrieve all conntrack entries one after the other
-static int ct_dump_callback(enum nf_conntrack_msg_type type, struct nf_conntrack *ct, void *data) {
-    memset(&f_key,   0, sizeof(f_key));
-    memset(&f_value, 0, sizeof(f_value));
-
-    f_key.l4_proto = nfct_get_attr_u8(ct, ATTR_L4PROTO);
-
-    switch (f_key.l4_proto) {
-        case IPPROTO_TCP:
-            if (f_key.l4_proto == IPPROTO_TCP &&
-                nfct_get_attr_u8(ct, ATTR_TCP_STATE) != TCP_CONNTRACK_ESTABLISHED)
-            {
-                // If the flow isn't established yet or anymore,
-                // the BPF program shouldn't forward its packages
-                return NFCT_CB_CONTINUE;
-            }
-
-        case IPPROTO_UDP:
-            // Save the ports
-            f_key.src_port  = nfct_get_attr_u16(ct, ATTR_PORT_SRC);
-            f_key.dest_port = nfct_get_attr_u16(ct, ATTR_PORT_DST);
-        break;
-
-        // Ignore other protocols
-        default:
-            return NFCT_CB_CONTINUE;
-    }
-
-    f_key.src_ip  = nfct_get_attr_u32(ct, ATTR_IPV4_SRC);
-    f_key.dest_ip = nfct_get_attr_u32(ct, ATTR_IPV4_DST);
-    log_entry("Dump: ");
-
-    if (check_nat_and_update_bpf_map(ct) != 0)
-        return NFCT_CB_FAILURE;
-
-    // We also need to create an entry for the reverse direction
-    reverse_flow_key(&f_key);
-    memset(&f_value, 0, sizeof(f_value));
-
-    if (check_nat_and_update_bpf_map(ct) != 0)
-        return NFCT_CB_FAILURE;
-
-	return NFCT_CB_CONTINUE;
-}
-
 
 // Callback to retrieve a specific conntrack entry
 static int ct_get_callback(enum nf_conntrack_msg_type type, struct nf_conntrack *ct, void *data) {
@@ -247,19 +183,6 @@ int conntrack_init(struct bpf_object* obj) {
 		FW_ERROR("Error opening conntrack handle: %s (-%d).\n", strerror(errno), errno);
 		return errno;
 	}
-
-    // Register the callback for the upcoming dump request
-	nfct_callback_register(ct_handle, NFCT_T_ALL, ct_dump_callback, NULL);
-
-    // Retrieve all IPv4 conntrack entries
-    __u32 family = AF_INET;
-	if (nfct_query(ct_handle, NFCT_Q_DUMP, &family) != 0) {
-        conntrack_destroy();
-
-        return errno;
-    }
-
-    nfct_callback_unregister(ct_handle);
 
     // Register the callback for retrieving single conntrack entries
     nfct_callback_register(ct_handle, NFCT_T_ALL, ct_get_callback, NULL); 
