@@ -34,15 +34,15 @@ static __u32 tcp_timeout;
 static __u32 udp_timeout;
 
 
-static inline void log_entry(const char* prefix) {
-#if FW_LOG_LEVEL >= FW_LOG_LEVEL_DEBUG
-    char src_ip[INET_ADDRSTRLEN], dest_ip[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &f_key.src_ip, src_ip, sizeof(src_ip));
-    inet_ntop(AF_INET, &f_key.dest_ip, dest_ip, sizeof(dest_ip));
+static void log_entry(const char* prefix) {
+    if (fw_log_level >= FW_LOG_LEVEL_DEBUG) {
+        char src_ip[INET_ADDRSTRLEN], dest_ip[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &f_key.src_ip, src_ip, sizeof(src_ip));
+        inet_ntop(AF_INET, &f_key.dest_ip, dest_ip, sizeof(dest_ip));
 
-    FW_DEBUG("%s%u %hhu %s %s %hu %hu\n", prefix, f_key.ifindex, f_key.l4_proto,
-        src_ip, dest_ip, ntohs(f_key.src_port), ntohs(f_key.dest_port));
-#endif
+        FW_DEBUG("%s%u %hhu %s %hu %s %hu\n", prefix, f_key.ifindex, f_key.l4_proto,
+            src_ip, ntohs(f_key.src_port), dest_ip, ntohs(f_key.dest_port));
+    }
 }
 
 /**
@@ -108,7 +108,7 @@ static int ct_get_callback(enum nf_conntrack_msg_type type, struct nf_conntrack 
                 return NFCT_CB_CONTINUE;
             }
 
-            log_entry("New: ");
+            log_entry("\nNew: ");
             
             // Mark the flow as established so that the BPF program can take over now
             // Since the TTL is decremented, we must increment the checksum
@@ -147,7 +147,7 @@ static int ct_get_callback(enum nf_conntrack_msg_type type, struct nf_conntrack 
 
         // If the flow is finished
         case FLOW_FINISHED:
-            log_entry("Fin: ");
+            log_entry("\nFin: ");
             f_value.state = FLOW_NONE;
         break;
     }
@@ -223,22 +223,20 @@ int update_conntrack(struct bpf_object* obj) {
             /* It could be possible that we have received the package here through the BPF map
              * before it was processed by nf_conntrack, or it has been dropped
              */
-            log_entry("Del: ");
+            log_entry("\nDel: ");
             
             // If no connection could be found, it is finished or a timeout occured
             // So delete it from the BPF connection map
             if (bpf_map_delete_elem(map_fd, &f_key) != 0) {
                 FW_ERROR("Error deleting connection entry: %s (-%d).\n", strerror(errno), errno);
-
-                // Free the conntrack object
-                nfct_destroy(ct);
-
-                return errno;
+                rc = errno;
             }
         }
 
         // Free the conntrack object
         nfct_destroy(ct);
+
+        CHECK_RC(rc);
 
         // Retrieve the next key of the connections map
         rc = bpf_map_get_next_key(map_fd, &f_key, &f_key);

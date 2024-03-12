@@ -19,18 +19,18 @@ static void *nl_buffer;
 static struct mnl_socket *nl_socket;
 
 
-static inline void log_next_hop(struct next_hop *next_h) {
-#if FW_LOG_LEVEL >= FW_LOG_LEVEL_DEBUG
-    char src_mac[18], dest_mac[18];
-    snprintf(src_mac, sizeof(src_mac), "%02x:%02x:%02x:%02x:%02x:%02x", 
-        next_h->src_mac[0], next_h->src_mac[1], next_h->src_mac[2],
-        next_h->src_mac[3], next_h->src_mac[4], next_h->src_mac[5]);
-    snprintf(dest_mac, sizeof(dest_mac), "%02x:%02x:%02x:%02x:%02x:%02x", 
-        next_h->dest_mac[0], next_h->dest_mac[1], next_h->dest_mac[2],
-        next_h->dest_mac[3], next_h->dest_mac[4], next_h->dest_mac[5]);
+static void log_next_hop(struct next_hop *next_h) {
+    if (fw_log_level >= FW_LOG_LEVEL_VERBOSE) {
+        char src_mac[18], dest_mac[18];
+        snprintf(src_mac, sizeof(src_mac), "%02x:%02x:%02x:%02x:%02x:%02x", 
+            next_h->src_mac[0], next_h->src_mac[1], next_h->src_mac[2],
+            next_h->src_mac[3], next_h->src_mac[4], next_h->src_mac[5]);
+        snprintf(dest_mac, sizeof(dest_mac), "%02x:%02x:%02x:%02x:%02x:%02x", 
+            next_h->dest_mac[0], next_h->dest_mac[1], next_h->dest_mac[2],
+            next_h->dest_mac[3], next_h->dest_mac[4], next_h->dest_mac[5]);
 
-    FW_DEBUG("%u %s %s\n", next_h->ifindex, src_mac, dest_mac);
-#endif
+        FW_VERBOSE("Hop: %u %s %s\n", next_h->ifindex, src_mac, dest_mac);
+    }
 }
 
 static int send_request() {
@@ -74,8 +74,8 @@ static int get_route(struct flow_key *f_key, struct flow_value *f_value, __be32 
     mnl_attr_put_u32(nlh, RTA_SRC, f_key->src_ip);
     mnl_attr_put_u32(nlh, RTA_DST, *dest_ip);
     mnl_attr_put_u16(nlh, RTA_SPORT, f_key->src_port);
-    mnl_attr_put_u16(nlh, RTA_DPORT, f_value->n_entry.dest_port ?
-                        f_value->n_entry.dest_port : f_key->dest_port);
+    mnl_attr_put_u16(nlh, RTA_DPORT, f_value->n_entry.rewrite_flag & REWRITE_DEST_PORT ?
+                                     f_value->n_entry.dest_port : f_key->dest_port);
     mnl_attr_put_u8(nlh, RTA_IP_PROTO, f_key->l4_proto);
 
     // Send request and receive response
@@ -104,8 +104,8 @@ static int get_route(struct flow_key *f_key, struct flow_value *f_value, __be32 
     }
 
     __u32 ifindex = 0;
+    
     struct nlattr *attr;
-
     mnl_attr_for_each(attr, nlh, sizeof(struct rtmsg)) {
         switch (mnl_attr_get_type(attr)) {
             // Output interface index
@@ -209,8 +209,8 @@ int get_next_hop(struct flow_key *f_key, struct flow_value *f_value) {
     }
 
     nl_buffer = malloc(NL_BUFFER_SIZE);
-    __be32 dest_ip = f_value->n_entry.dest_ip ?
-        f_value->n_entry.dest_ip : f_key->dest_ip;
+    __be32 dest_ip = f_value->n_entry.rewrite_flag & REWRITE_DEST_IP ?
+                     f_value->n_entry.dest_ip : f_key->dest_ip;
 
     int rc = get_route(f_key, f_value, &dest_ip);
     if (rc != 0 || f_value->action != ACTION_REDIRECT)

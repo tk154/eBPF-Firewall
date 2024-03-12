@@ -20,7 +20,7 @@ struct flow_key {
 	__be32 dest_ip;
 	__be16 src_port;
 	__be16 dest_port;
-	__u16  vlan_id;
+	//__u16  vlan_id;
 	__u8   l4_proto;
 };
 
@@ -67,21 +67,6 @@ enum {
 	REWRITE_SRC_PORT  = 4,
 	REWRITE_DEST_PORT = 8
 };
-
-
-/**
- * Helper to swap the src and dest IP and the src and dest port of a flow key
- * @param f_key Pointer to the flow key
- * **/
-static void reverse_flow_key(struct flow_key *f_key) {
-	__be32 tmp_ip    = f_key->src_ip;
-	f_key->src_ip    = f_key->dest_ip;
-	f_key->dest_ip   = tmp_ip;
-
-	__be16 tmp_port  = f_key->src_port;
-	f_key->src_port  = f_key->dest_port;
-	f_key->dest_port = tmp_port;
-}
 
 
 #endif

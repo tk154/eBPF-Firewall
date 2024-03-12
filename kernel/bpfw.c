@@ -42,6 +42,31 @@ struct tcp_flags {
 #define TCP_FLAGS_OFFSET 13
 
 
+/**
+ * Helper to swap the src and dest IP and the src and dest port of a flow key
+ * @param f_key Pointer to the flow key
+ * @param f_value Pointer to the flow value
+ * **/
+__always_inline void reverse_flow_key(struct flow_key *f_key, struct flow_value *f_value) {
+	__be32 src_ip    = f_value->n_entry.rewrite_flag & REWRITE_SRC_IP ?
+					   f_value->n_entry.src_ip : f_key->src_ip;
+
+	f_key->src_ip    = f_value->n_entry.rewrite_flag & REWRITE_DEST_IP ?
+					   f_value->n_entry.dest_ip : f_key->dest_ip;
+
+	f_key->dest_ip   = src_ip;
+
+	__be16 src_port  = f_value->n_entry.rewrite_flag & REWRITE_SRC_PORT ?
+					   f_value->n_entry.src_port : f_key->src_port;
+
+	f_key->src_port  = f_value->n_entry.rewrite_flag & REWRITE_DEST_PORT ?
+					   f_value->n_entry.dest_port : f_key->dest_port;
+
+	f_key->dest_port = src_port;
+
+	f_key->ifindex   = f_value->next_h.ifindex;
+}
+
 __always_inline bool tcp_finished(struct flow_key *f_key, struct flow_value *f_value, struct tcp_flags flags) {
 	if (!flags.fin && !flags.rst)
 		return false;
@@ -50,7 +75,7 @@ __always_inline bool tcp_finished(struct flow_key *f_key, struct flow_value *f_v
 	f_value->state = FLOW_FINISHED;
 
 	// Also mark the flow as finished for the reverse direction, if there is one
-	reverse_flow_key(f_key);
+	reverse_flow_key(f_key, f_value);
 
 	f_value = bpf_map_lookup_elem(&FLOW_MAP, f_key);
 	if (f_value)
@@ -147,11 +172,8 @@ int fw_func(struct BPFW_CTX *ctx) {
     BPF_DEBUG_MAC("Src MAC: ", ethh->h_source);
 	BPF_DEBUG_MAC("Dst MAC: ", ethh->h_dest);
 
-	// Initialize the connection key
-	struct flow_key f_key = {};
-	f_key.ifindex = ctx->ingress_ifindex;
-
     __be16 h_proto = ethh->h_proto;
+	__u16 vlan_id = 0;
 
 	// Check if there is a VLAN header
     if (h_proto == bpf_htons(ETH_P_8021Q) || h_proto == bpf_htons(ETH_P_8021AD)) {
@@ -159,7 +181,7 @@ int fw_func(struct BPFW_CTX *ctx) {
 		parse_header(struct vlan_hdr, *vlan_h, data, data_end);
 
 		// Save the VLAN ID (last 12 Byte)
-        f_key.vlan_id = bpf_htons(vlan_h->h_vlan_TCI) & 0x0FFF;
+        vlan_id = bpf_htons(vlan_h->h_vlan_TCI) & 0x0FFF;
 
 		BPF_DEBUG("VLAN ID: %u", vlan_id);
 
@@ -178,10 +200,6 @@ int fw_func(struct BPFW_CTX *ctx) {
 	BPF_DEBUG_IP("Src IP: ", iph->saddr);
 	BPF_DEBUG_IP("Dst IP: ", iph->daddr);
 
-	f_key.src_ip   = iph->saddr;
-	f_key.dest_ip  = iph->daddr;
-	f_key.l4_proto = iph->protocol;
-
 	// Pointers for possible NAT adjustments
 	__be16  *sport, *dport;
 	__sum16 *cksum;
@@ -196,9 +214,6 @@ int fw_func(struct BPFW_CTX *ctx) {
 
 			BPF_DEBUG("TCP Src Port: %u", bpf_ntohs(tcph->source));
 			BPF_DEBUG("TCP Dst Port: %u", bpf_ntohs(tcph->dest));
-
-			f_key.src_port  = tcph->source;
-			f_key.dest_port = tcph->dest;
 
 			// For possible NAT adjustmenets
 			sport = &tcph->source;
@@ -216,9 +231,6 @@ int fw_func(struct BPFW_CTX *ctx) {
 			BPF_DEBUG("UDP Src Port: %u", bpf_ntohs(udph->source));
 			BPF_DEBUG("UDP Dst Port: %u", bpf_ntohs(udph->dest));
 
-			f_key.src_port  = udph->source;
-			f_key.dest_port = udph->dest;
-
 			// For possible NAT adjustmenets
 			sport = &udph->source;
 			dport = &udph->dest;
@@ -229,6 +241,16 @@ int fw_func(struct BPFW_CTX *ctx) {
 			BPF_DEBUG("IP Protocol: %u", iph->protocol);
 			return BPFW_PASS;
 	}
+
+	// Fill the flow key
+	struct flow_key f_key = {};
+	f_key.ifindex = ctx->ingress_ifindex;
+	//f_key.vlan_id = vlan_id;
+	f_key.src_ip = iph->saddr;
+	f_key.dest_ip = iph->daddr;
+	f_key.src_port = *sport;
+	f_key.dest_port = *dport;
+	f_key.l4_proto = iph->protocol;
 
 	// Check if a conntrack entry exists
 	struct flow_value* f_value = bpf_map_lookup_elem(&FLOW_MAP, &f_key);

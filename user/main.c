@@ -1,10 +1,13 @@
 #define _XOPEN_SOURCE 700   // Needed for sigaction
 #include <signal.h>
 
-#include <errno.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include <errno.h>
+#include <getopt.h>
+#include <limits.h>
 #include <unistd.h>
 
 #include <bpf/bpf.h>
@@ -16,72 +19,102 @@
 #include "bpf_loader/bpf_loader.h"
 #include "conntrack/conntrack.h"
 
-#define BPF_MAP_POLL_SEC 5
+#define BPF_DEFAULT_MAP_POLL_SEC 5
 
+
+int fw_log_level = FW_LOG_LEVEL_INFO;
+
+struct cmd_args {
+    enum bpf_prog_type prog_type;
+    char* prog_path;
+    char** if_names;
+    unsigned int if_count;
+    unsigned int map_poll_sec;
+};
 
 // Wether to exit the main loop and the program
-bool exitLoop = false;
+static bool exitLoop = false;
 
 // Interrupt and terminate signal handler
-void signal_handler(int sig) {
+static void signal_handler(int sig) {
     // On SIGINT or SIGTERM, the main loop should exit
     exitLoop = true;
 }
 
 // Checks if the given arguments are valid and determines the BPF hook
-bool check_cmd_args(int argc, char* argv[], enum bpf_prog_type* prog_type,
-                    char** prog_path, char*** ifnames, unsigned int* if_count)
-{
-    // Check if the hook is provided in the command line
-    if (argc < 2) {
-        FW_ERROR("Missing hook argument: Must be either xdp or tc.\n");
-        return false;
+static bool check_cmd_args(int argc, char* argv[], struct cmd_args *args) {
+    struct option options[] = {
+        { "interval",  required_argument, 0, 'i' },
+        { "log-level", required_argument, 0, 'l' },
+        { 0,           0,                 0,  0  }
+    };
+
+    int opt, opt_index;
+    while ((opt = getopt_long(argc, argv, "i:l:", options, &opt_index)) != -1) {
+        switch (opt) {
+            case 'i':
+                long sec = strtol(optarg, NULL, 10);
+                if (sec <= 0 || sec > UINT_MAX)
+                    return false;
+
+                args->map_poll_sec = sec;
+            break;
+
+            case 'l':
+                size_t arg_len = strlen(optarg);
+
+                if (strncmp(optarg, "error", arg_len) == 0)
+                    fw_log_level = FW_LOG_LEVEL_ERROR;
+                else if (strncmp(optarg, "warning", arg_len) == 0)
+                    fw_log_level = FW_LOG_LEVEL_WARN;
+                else if (strncmp(optarg, "info", arg_len) == 0)
+                    fw_log_level = FW_LOG_LEVEL_INFO;
+                else if (strncmp(optarg, "debug", arg_len) == 0)
+                    fw_log_level = FW_LOG_LEVEL_DEBUG;
+                else if (strncmp(optarg, "verbose", arg_len) == 0)
+                    fw_log_level = FW_LOG_LEVEL_VERBOSE;
+                else
+                    return false;
+            break;
+
+            case '?':
+                return false;
+        }
     }
 
-    // Check if the BPF program/object path is provided in the command line
-    if (argc < 3) {
-        FW_ERROR("Missing BPF object path.\n");
+    // Check if hook, BPF object and network interface(s) are provided in the command line
+    if (argc - optind < 3)
         return false;
-    }
-
-    // Check if network interface(s) are provided in the command line
-    if (argc < 4) {
-        FW_ERROR("Missing network interface(s).\n");
-        return false;
-    }
-    
-
-    char* prog_hook = argv[1];
 
     // Check the hook argument
+    char* prog_hook = argv[optind];
     if (strcmp(prog_hook, "xdp") == 0)
-        *prog_type = BPF_PROG_TYPE_XDP;
+        args->prog_type = BPF_PROG_TYPE_XDP;
     else if (strcmp(prog_hook, "tc") == 0)
-        *prog_type = BPF_PROG_TYPE_SCHED_CLS;
-    else {
-        FW_ERROR("Hook '%s' is not allowed: Must be either xdp or tc.\n", prog_hook);
+        args->prog_type = BPF_PROG_TYPE_SCHED_CLS;
+    else
         return false;
-    }
 
-    *prog_path =  argv[2];
-    *ifnames   = &argv[3];
-    *if_count  = argc - 3;
+    args->prog_path =  argv[optind + 1];
+    args->if_names  = &argv[optind + 2];
+    args->if_count  =  argc - optind - 2;
 
     return true;
 }
 
 int main(int argc, char* argv[]) {
-    enum bpf_prog_type prog_type;
-    char *prog_path, **ifnames;
-    unsigned int if_count;
+    struct cmd_args args;
+    args.map_poll_sec = BPF_DEFAULT_MAP_POLL_SEC;
 
     // Check if the arguments are provided correctly
-    if (!check_cmd_args(argc, argv, &prog_type, &prog_path, &ifnames, &if_count))
+    if (!check_cmd_args(argc, argv, &args)) {
+        FW_ERROR("Usage: %s {xdp|tc} bpf_object_path network_interface(s)... [options]\n", argv[0]);
         return EXIT_FAILURE;
+    }
 
     // Load the BPF object (including program and maps) into the kernel
     FW_INFO("Loading BPF program into kernel ...\n");
-    struct bpf_object_program* bpf = bpf_load_program(prog_path, prog_type);
+    struct bpf_object_program* bpf = bpf_load_program(args.prog_path, args.prog_type);
     if (!bpf)
         return EXIT_FAILURE;
 
@@ -93,7 +126,7 @@ int main(int argc, char* argv[]) {
     FW_INFO("Attaching BPF program to network interfaces ...\n");
 
     // Attach the program to the specified interface names
-    rc = bpf_ifs_attach_program(bpf->prog, ifnames, if_count);
+    rc = bpf_ifs_attach_program(bpf->prog, args.if_names, args.if_count);
     if (rc != 0)
         goto conntrack_destroy;
 
@@ -106,7 +139,7 @@ int main(int argc, char* argv[]) {
     FW_INFO("Successfully loaded BPF program. Press CTRL+C to unload.\n");
 
     do {
-        sleep(BPF_MAP_POLL_SEC);
+        sleep(args.map_poll_sec);
 
         if (exitLoop)
             break;
@@ -119,7 +152,7 @@ int main(int argc, char* argv[]) {
 
 bpf_detach_program:
     // Detach the program from the specified interface names
-    bpf_ifs_detach_program(bpf->prog, ifnames, if_count);
+    bpf_ifs_detach_program(bpf->prog, args.if_names, args.if_count);
 
 conntrack_destroy:
     // De-Init conntrack

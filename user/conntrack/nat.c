@@ -1,6 +1,47 @@
 #include "nat.h"
 #include "checksum.h"
 
+#include <arpa/inet.h>
+
+#include "../common_user.h"
+
+
+static void log_nat(struct nat_entry *n_entry) {
+    if (fw_log_level >= FW_LOG_LEVEL_VERBOSE) {
+        if (!n_entry->rewrite_flag)
+            return;
+
+        FW_VERBOSE("Nat:");
+
+        if (n_entry->rewrite_flag & REWRITE_SRC_IP) {
+            char src_ip[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &n_entry->src_ip, src_ip, sizeof(src_ip));
+            FW_VERBOSE(" %s", src_ip);
+        }
+        else
+            FW_VERBOSE(" -");
+
+        if (n_entry->rewrite_flag & REWRITE_SRC_PORT)
+            FW_VERBOSE(" %hu", ntohs(n_entry->src_port));
+        else
+            FW_VERBOSE(" -");
+
+        if (n_entry->rewrite_flag & REWRITE_DEST_IP) {
+            char dest_ip[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &n_entry->dest_ip, dest_ip, sizeof(dest_ip));
+            FW_VERBOSE(" %s", dest_ip);
+        }
+        else
+            FW_VERBOSE(" -");
+
+        if (n_entry->rewrite_flag & REWRITE_DEST_PORT)
+            FW_VERBOSE(" %hu", ntohs(n_entry->dest_port));
+        else
+            FW_VERBOSE(" -");
+
+        FW_VERBOSE("\n");
+    }
+}
 
 void check_nat(struct nf_conntrack *ct, struct flow_key *f_key, struct flow_value *f_value) {
     // SNAT
@@ -104,4 +145,6 @@ void check_nat(struct nf_conntrack *ct, struct flow_key *f_key, struct flow_valu
         // Calculate the L4 checksum diff
         csum_replace2(&f_value->n_entry.l4_cksum_diff, old_port, new_port);
     }
+
+    log_nat(&f_value->n_entry);
 }
