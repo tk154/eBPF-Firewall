@@ -3,6 +3,25 @@
 
 #include <stdio.h>
 
+#include <arpa/inet.h>
+#include <linux/bpf.h>
+
+#include "../common.h"
+
+
+struct flow_key_value {
+    struct flow_key key;
+    struct flow_value value;
+};
+
+struct cmd_args {
+    enum bpf_prog_type prog_type;
+    char* prog_path;
+    char** if_names;
+    unsigned int if_count;
+    unsigned int map_poll_sec;
+};
+
 
 extern int fw_log_level;
 
@@ -33,10 +52,16 @@ extern int fw_log_level;
         printf(format, ##__VA_ARGS__); } while (0)
 
 
-// Used to check and return the error code of a function
-#define CHECK_RC(rc) do { \
-    int _rc = (rc); if (_rc != 0) return _rc; \
-} while (0)
+static void log_key(struct flow_key *f_key, const char* prefix) {
+    if (fw_log_level >= FW_LOG_LEVEL_DEBUG) {
+        char src_ip[INET_ADDRSTRLEN], dest_ip[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &f_key->src_ip, src_ip, sizeof(src_ip));
+        inet_ntop(AF_INET, &f_key->dest_ip, dest_ip, sizeof(dest_ip));
+
+        FW_DEBUG("%s%u %hhu %s %hu %s %hu\n", prefix, f_key->ifindex, f_key->l4_proto,
+            src_ip, ntohs(f_key->src_port), dest_ip, ntohs(f_key->dest_port));
+    }
+}
 
 
 #endif

@@ -61,7 +61,7 @@ static int send_request() {
     return 0;
 }
 
-static int get_route(struct flow_key *f_key, struct flow_value *f_value, __be32 *dest_ip) {
+static int get_route(struct flow_key_value* flow, __be32 *dest_ip) {
     // Prepare a Netlink request message
     struct nlmsghdr *nlh = mnl_nlmsg_put_header(nl_buffer);
     nlh->nlmsg_type = RTM_GETROUTE;
@@ -70,13 +70,13 @@ static int get_route(struct flow_key *f_key, struct flow_value *f_value, __be32 
     rtm->rtm_family = AF_INET;
 
     // Add attributes
-    mnl_attr_put_u32(nlh, RTA_IIF, f_key->ifindex);
-    mnl_attr_put_u32(nlh, RTA_SRC, f_key->src_ip);
+    mnl_attr_put_u32(nlh, RTA_IIF, flow->key.ifindex);
+    mnl_attr_put_u32(nlh, RTA_SRC, flow->key.src_ip);
     mnl_attr_put_u32(nlh, RTA_DST, *dest_ip);
-    mnl_attr_put_u16(nlh, RTA_SPORT, f_key->src_port);
-    mnl_attr_put_u16(nlh, RTA_DPORT, f_value->n_entry.rewrite_flag & REWRITE_DEST_PORT ?
-                                     f_value->n_entry.dest_port : f_key->dest_port);
-    mnl_attr_put_u8(nlh, RTA_IP_PROTO, f_key->l4_proto);
+    mnl_attr_put_u16(nlh, RTA_SPORT, flow->key.src_port);
+    mnl_attr_put_u16(nlh, RTA_DPORT, flow->value.n_entry.rewrite_flag & REWRITE_DEST_PORT ?
+                                     flow->value.n_entry.dest_port : flow->key.dest_port);
+    mnl_attr_put_u8(nlh, RTA_IP_PROTO, flow->key.l4_proto);
 
     // Send request and receive response
     int rc = send_request();
@@ -90,16 +90,16 @@ static int get_route(struct flow_key *f_key, struct flow_value *f_value, __be32 
             break;
 
         case RTN_BLACKHOLE:
-            f_value->action = ACTION_DROP;
+            flow->value.action = ACTION_DROP;
             return 0;
 
         case RTN_LOCAL:
-            f_value->action = ACTION_PASS;
+            flow->value.action = ACTION_PASS;
             return 0;
 
         default:
             FW_DEBUG("rtm_type: %u\n", rtm->rtm_type);
-            f_value->action = ACTION_PASS;
+            flow->value.action = ACTION_PASS;
             return 0;
     }
 
@@ -126,8 +126,8 @@ static int get_route(struct flow_key *f_key, struct flow_value *f_value, __be32 
         return -1;
     }
 
-    f_value->action = ACTION_REDIRECT;
-    f_value->next_h.ifindex = ifindex;
+    flow->value.action = ACTION_REDIRECT;
+    flow->value.next_h.ifindex = ifindex;
 
     return 0;
 }
@@ -192,7 +192,28 @@ static int get_dest_mac(struct next_hop *next_h, __be32 dest_ip) {
     return -1;
 }
 
-int get_next_hop(struct flow_key *f_key, struct flow_value *f_value) {
+int netlink_get_next_hop(struct flow_key_value* flow) {
+    __be32 dest_ip = flow->value.n_entry.rewrite_flag & REWRITE_DEST_IP ?
+                     flow->value.n_entry.dest_ip : flow->key.dest_ip;
+
+    int rc = get_route(flow, &dest_ip);
+    if (rc != 0 || flow->value.action != ACTION_REDIRECT)
+        return rc;
+
+    rc = get_if_mac(&flow->value.next_h);
+    if (rc != 0)
+        return rc;
+
+    rc = get_dest_mac(&flow->value.next_h, dest_ip);
+    if (rc != 0)
+        return rc;
+
+    log_next_hop(&flow->value.next_h);
+
+    return 0;
+}
+
+int netlink_init() {
     // Open a Netlink socket
     nl_socket = mnl_socket_open(NETLINK_ROUTE);
     if (!nl_socket) {
@@ -208,29 +229,21 @@ int get_next_hop(struct flow_key *f_key, struct flow_value *f_value) {
         return errno;
     }
 
+    // Allocate the netlink buffer
     nl_buffer = malloc(NL_BUFFER_SIZE);
-    __be32 dest_ip = f_value->n_entry.rewrite_flag & REWRITE_DEST_IP ?
-                     f_value->n_entry.dest_ip : f_key->dest_ip;
+    if (!nl_buffer) {
+        FW_ERROR("Error allocating netlink buffer: %s (-%d).\n", strerror(errno), errno);
+        mnl_socket_close(nl_socket);
 
-    int rc = get_route(f_key, f_value, &dest_ip);
-    if (rc != 0 || f_value->action != ACTION_REDIRECT)
-        goto free_buffer;
+        return errno;
+    }
 
-    rc = get_if_mac(&f_value->next_h);
-    if (rc != 0)
-        goto free_buffer;
+    return 0;
+}
 
-    rc = get_dest_mac(&f_value->next_h, dest_ip);
-    if (rc != 0)
-        goto free_buffer;
-
-    log_next_hop(&f_value->next_h);
-
-free_buffer:
-    free(nl_buffer);
-
+void netlink_destroy() {
     // Close the socket
     mnl_socket_close(nl_socket);
 
-    return rc;
+    free(nl_buffer);
 }

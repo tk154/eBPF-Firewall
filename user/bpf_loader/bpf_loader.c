@@ -17,50 +17,49 @@
 #define XDP_ATTACH_FLAGS XDP_FLAGS_SKB_MODE
 
 
-struct bpf_object_program* bpf_load_program(const char* prog_path, enum bpf_prog_type prog_type) {
-    struct bpf_object_program* bpf = (struct bpf_object_program*)malloc(sizeof(struct bpf_object_program));
+// BPF object pointer
+static struct bpf_object *bpf_obj;
 
+// BPF program pointer
+static struct bpf_program *bpf_prog;
+
+
+int bpf_load_program(const char* prog_path, enum bpf_prog_type prog_type) {
     // Try to open the BPF object file, return on error
-    bpf->obj = bpf_object__open_file(prog_path, NULL);
-    if (!bpf->obj) {
+    bpf_obj = bpf_object__open_file(prog_path, NULL);
+    if (!bpf_obj) {
         fprintf(stderr, "Error opening BPF object file: %s (-%d).\n", strerror(errno), errno);
-        goto error;
+        return errno;
     }
 
-    bpf->prog = bpf_object__next_program(bpf->obj, NULL);
-    if (!bpf->prog) {
+    bpf_prog = bpf_object__next_program(bpf_obj, NULL);
+    if (!bpf_prog) {
         fprintf(stderr, "Couldn't find a BPF program in %s.\n", prog_path);
-        goto bpf_object__close;
+        bpf_object__close(bpf_obj);
+
+        return ENOENT;
     }
     
-    bpf_program__set_type(bpf->prog, prog_type);
+    bpf_program__set_type(bpf_prog, prog_type);
 
     // Try to load the BPF object into the kernel, return on error
-    if (bpf_object__load(bpf->obj) != 0) {
+    if (bpf_object__load(bpf_obj) != 0) {
         fprintf(stderr, "Error loading BPF program into kernel: %s (-%d).\n", strerror(errno), errno);
-        goto bpf_object__close;
+        bpf_object__close(bpf_obj);
+
+        return errno;
     }
 
-    return bpf;
-
-bpf_object__close:
-    bpf_object__close(bpf->obj);
-
-error:
-    free(bpf);
-
-    return NULL;
+    return 0;
 }
 
-void bpf_unload_program(struct bpf_object_program* bpf) {
+void bpf_unload_program() {
     // Unpin the maps from /sys/fs/bpf
-    bpf_object__unpin_maps(bpf->obj, NULL);
-    bpf_object__close(bpf->obj);
-
-    free(bpf);
+    bpf_object__unpin_maps(bpf_obj, NULL);
+    bpf_object__close(bpf_obj);
 }
 
-int bpf_if_attach_program(struct bpf_program* prog, char* ifname) {
+int bpf_if_attach_program(char* ifname) {
     // Get the interface index from the interface name
     unsigned int ifindex = if_nametoindex(ifname);
     if (ifindex == 0) {
@@ -68,11 +67,11 @@ int bpf_if_attach_program(struct bpf_program* prog, char* ifname) {
         return errno;
     }
     
-    enum bpf_prog_type prog_type = bpf_program__type(prog);
+    enum bpf_prog_type prog_type = bpf_program__type(bpf_prog);
     switch (prog_type) {
         case BPF_PROG_TYPE_XDP:
             // Attach the program to the XDP hook
-            if (bpf_xdp_attach(ifindex, bpf_program__fd(prog), XDP_ATTACH_FLAGS, NULL) != 0) {
+            if (bpf_xdp_attach(ifindex, bpf_program__fd(bpf_prog), XDP_ATTACH_FLAGS, NULL) != 0) {
                 fprintf(stderr, "Error attaching XDP program: %s (-%d).\n", strerror(errno), errno);
                 return errno;
             }
@@ -80,7 +79,7 @@ int bpf_if_attach_program(struct bpf_program* prog, char* ifname) {
 
         case BPF_PROG_TYPE_SCHED_CLS:
             DECLARE_LIBBPF_OPTS(bpf_tc_hook, hook, .ifindex = ifindex, .attach_point = BPF_TC_INGRESS);
-            DECLARE_LIBBPF_OPTS(bpf_tc_opts, opts, .prog_fd = bpf_program__fd(prog));
+            DECLARE_LIBBPF_OPTS(bpf_tc_opts, opts, .prog_fd = bpf_program__fd(bpf_prog));
 
             // Create a TC hook on the ingress of the interface
             // bpf_tc_hook_create will return an error and print an error message if the hook already exists
@@ -101,17 +100,12 @@ int bpf_if_attach_program(struct bpf_program* prog, char* ifname) {
                 return errno;
             }
         break;
-
-        // If the program is not of type XDP or TC
-        default:
-            fprintf(stderr, "Error: BPF program type %d is not supported.\n", prog_type);
-            return -1;
     }
 
     return 0;
 }
 
-void bpf_if_detach_program(struct bpf_program* prog, char* ifname) {
+void bpf_if_detach_program(char* ifname) {
     // Get the interface index from the interface name
     unsigned int ifindex = if_nametoindex(ifname);
     if (ifindex == 0) {
@@ -119,7 +113,7 @@ void bpf_if_detach_program(struct bpf_program* prog, char* ifname) {
         return;
     }
 
-    enum bpf_prog_type prog_type = bpf_program__type(prog);
+    enum bpf_prog_type prog_type = bpf_program__type(bpf_prog);
     switch (prog_type) {
         case BPF_PROG_TYPE_XDP:
             // Detach the program from the XDP hook
@@ -128,7 +122,7 @@ void bpf_if_detach_program(struct bpf_program* prog, char* ifname) {
 
         case BPF_PROG_TYPE_SCHED_CLS:
             DECLARE_LIBBPF_OPTS(bpf_tc_hook, hook, .ifindex = ifindex, .attach_point = BPF_TC_INGRESS);
-            DECLARE_LIBBPF_OPTS(bpf_tc_opts, opts, .prog_fd = bpf_program__fd(prog));
+            DECLARE_LIBBPF_OPTS(bpf_tc_opts, opts, .prog_fd = bpf_program__fd(bpf_prog));
 
             /* It should be possible to detach the TC program from the hook, 
                check the hook if there is still another program attached to it
@@ -143,21 +137,17 @@ void bpf_if_detach_program(struct bpf_program* prog, char* ifname) {
                 bpf_tc_hook_destroy(&hook);
             //}
         break;
-
-        // If the program is not of type XDP or TC
-        default:
-            fprintf(stderr, "Error: BPF program type %d is not supported.\n", prog_type);
     }
 }
 
-int bpf_ifs_attach_program(struct bpf_program* prog, char* ifnames[], unsigned int ifname_size) {
+int bpf_ifs_attach_program(char* ifnames[], unsigned int ifname_size) {
     // Iterate to all the given interfaces and attache the program to them
     for (int i = 0; i < ifname_size; i++) {
-        int rc = bpf_if_attach_program(prog, ifnames[i]);
+        int rc = bpf_if_attach_program(ifnames[i]);
         if (rc != 0) {
             // If an error occured while attaching to one interface, detach all the already attached programs
             while (--i >= 0)
-                bpf_if_detach_program(prog, ifnames[i]);
+                bpf_if_detach_program(ifnames[i]);
 
             return rc;
         }
@@ -166,8 +156,12 @@ int bpf_ifs_attach_program(struct bpf_program* prog, char* ifnames[], unsigned i
     return 0;
 }
 
-void bpf_ifs_detach_program(struct bpf_program* prog, char* ifnames[], unsigned int ifname_size) {
+void bpf_ifs_detach_program(char* ifnames[], unsigned int ifname_size) {
     // Iterate to all the given interfaces and detache the program from them
     for (int i = 0; i < ifname_size; i++)
-        bpf_if_detach_program(prog, ifnames[i]);
+        bpf_if_detach_program(ifnames[i]);
+}
+
+int bpf_get_map_fd(const char *map_name) {
+    return bpf_object__find_map_fd_by_name(bpf_obj, map_name);
 }
