@@ -12,20 +12,16 @@
 #include <linux/netfilter/nf_conntrack_tcp.h>
 #include <libnetfilter_conntrack/libnetfilter_conntrack.h>
 
-#include "../common_user.h"
-#include "../../common.h"
+#include "../netfilter.h"
+#include "../../common_user.h"
 
-
-// To store the file descriptor of the BPF flow map
-static int map_fd;
 
 // Store the nf_conntrack handle pointer
 static struct nfct_handle *ct_handle;
 
 // Timeouts from /proc/sys/net/netfilter
 // Note: There are more, for now just basic ones
-static __u32 tcp_timeout;
-static __u32 udp_timeout;
+static __u32 tcp_timeout, udp_timeout, udp_stream_timeout;
 
 
 /**
@@ -34,30 +30,13 @@ static __u32 udp_timeout;
  * @param timeout Where to store the timeout value
  * @returns 0 on success, errno otherwise
  * **/
-static int read_timeout(const char *filename, __u32 *timeout) {
-    const char* base_path = "/proc/sys/net/netfilter/nf_conntrack_%s";
+static int read_conntrack_timeout(const char *filename, __u32 *timeout) {
+    const char* base_path = "nf_conntrack_%s";
 
-    char path[128];
+    char path[64];
     snprintf(path, sizeof(path), base_path, filename);
 
-    FILE *file = fopen(path, "r");
-    if (!file) {
-        FW_ERROR("Error opening %s: %s (-%d).\n", path, strerror(errno), errno);
-        return errno;
-    }
-
-    char buffer[16];
-    if (!fgets(buffer, sizeof(buffer), file)) {
-        FW_ERROR("Error reading %s value: %s (-%d).\n", filename, strerror(errno), errno);
-        fclose(file);
-
-        return errno;
-    }
-
-    fclose(file);
-    *timeout = strtol(buffer, NULL, 10);
-
-    return 0;
+    return read_netfilter_sysfs_timeout(path, timeout);
 }
 
 /**
@@ -70,8 +49,14 @@ static void set_timeout(struct nf_conntrack *ct, __u8 l4_proto) {
 
     // Determine the timeout for the specific protocol
     switch (l4_proto) {
-        case IPPROTO_TCP: timeout = tcp_timeout; break;
-        case IPPROTO_UDP: timeout = udp_timeout; break;
+        case IPPROTO_TCP:
+            timeout = tcp_timeout;
+        break;
+
+        case IPPROTO_UDP:
+            bool assured = nfct_get_attr_u32(ct, ATTR_STATUS) & IPS_ASSURED;
+            timeout = assured ? udp_stream_timeout : udp_timeout;
+        break;
     }
 
     // Set the new timeout
@@ -115,7 +100,7 @@ static int nfct_get_cb(enum nf_conntrack_msg_type type, struct nf_conntrack *ct,
             }
 
             // If there are no new packages, there is nothing to do for this flow
-            if (!flow->value.update)
+            if (flow->value.action != ACTION_REDIRECT || flow->value.idle > 0)
                 break;
 
             // Update the nf_conntrack timeout
@@ -141,8 +126,9 @@ static int nfct_get_cb(enum nf_conntrack_msg_type type, struct nf_conntrack *ct,
 
 int conntrack_init() {
     // Read TCP and UDP timeout values
-    if (read_timeout("tcp_timeout_established", &tcp_timeout) != 0 ||
-        read_timeout("udp_timeout"            , &udp_timeout) != 0)
+    if (read_conntrack_timeout("tcp_timeout_established", &tcp_timeout) != 0 ||
+        read_conntrack_timeout("udp_timeout"            , &udp_timeout) != 0 ||
+        read_conntrack_timeout("udp_timeout_stream"     , &udp_stream_timeout) != 0)
     {
         return errno;
     }

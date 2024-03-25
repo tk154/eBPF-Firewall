@@ -268,6 +268,9 @@ int fw_func(struct BPFW_CTX *ctx) {
 
 	BPF_DEBUG("Flow is offloaded");
 
+	// Reset the timeout
+	f_value->idle = 0;
+
 	switch (f_value->action) {
 		case ACTION_REDIRECT:
 			// Pass the package to the network stack if 
@@ -281,9 +284,6 @@ int fw_func(struct BPFW_CTX *ctx) {
 
 			// Apply NAT
 			apply_nat(&f_value->n_entry, iph, sport, dport, cksum);
-
-			// Tell the user-space program to update the conntrack timeout
-			f_value->update = 1;
 
 			// Redirect the package
 			return redirect_package(ethh, &f_value->next_h);

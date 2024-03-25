@@ -2,12 +2,15 @@
 
 #include <errno.h>
 #include <bpf/bpf.h>
-
-#include "common_user.h"
+#include <netinet/in.h>
 
 #include "bpf_loader/bpf_loader.h"
-#include "conntrack/conntrack.h"
 #include "netlink/netlink.h"
+
+#include "netfilter/netfilter.h"
+#include "netfilter/conntrack/conntrack.h"
+
+#include "common_user.h"
 
 
 enum flowtrack_destroy {
@@ -21,6 +24,27 @@ enum flowtrack_destroy {
 
 static int flow_map_fd;
 
+static unsigned int map_poll_sec;
+
+// Timeouts from /proc/sys/net/netfilter
+static __u32 tcp_flow_timeout;
+static __u32 udp_flow_timeout;
+
+
+/**
+ * Reads timeout values from /proc/sys/net/netfilter/nf_flowtable_<filename>
+ * @param filename The timeout value to read
+ * @param timeout Where to store the timeout value
+ * @returns 0 on success, errno otherwise
+ * **/
+static int read_flowtable_timeout(const char *filename, __u32 *timeout) {
+    const char* base_path = "nf_flowtable_%s";
+
+    char path[64];
+    snprintf(path, sizeof(path), base_path, filename);
+
+    return read_netfilter_sysfs_timeout(path, timeout);
+}
 
 static void __flowtrack_destroy(struct cmd_args *args, enum flowtrack_destroy jump) {
     switch (jump) {
@@ -44,6 +68,8 @@ static void __flowtrack_destroy(struct cmd_args *args, enum flowtrack_destroy ju
 
 
 int flowtrack_init(struct cmd_args *args) {
+    map_poll_sec = args->map_poll_sec;
+
     // Load the BPF object (including program and maps) into the kernel
     FW_INFO("Loading BPF program into kernel ...\n");
 
@@ -82,6 +108,13 @@ int flowtrack_init(struct cmd_args *args) {
         return rc;
     }
 
+    // Read TCP and UDP flow timeout values
+    if (read_flowtable_timeout("tcp_timeout", &tcp_flow_timeout) != 0 ||
+        read_flowtable_timeout("udp_timeout", &udp_flow_timeout) != 0)
+    {
+        return errno;
+    }
+
     return 0;
 }
 
@@ -97,6 +130,21 @@ int flowtrack_update() {
         if (bpf_map_lookup_elem(flow_map_fd, &flow.key, &flow.value) != 0) {
             FW_ERROR("Error looking up flow entry: %s (-%d).\n", strerror(errno), errno);
             return errno;
+        }
+
+        if (flow.key.l4_proto == IPPROTO_TCP && flow.value.idle >= tcp_flow_timeout ||
+            flow.key.l4_proto == IPPROTO_UDP && flow.value.idle >= udp_flow_timeout)
+        {
+            log_key(&flow.key, "\nTim: ");
+            
+            // If no flow could be found, it is finished or a timeout occured
+            // So delete it from the BPF flow map
+            if (bpf_map_delete_elem(flow_map_fd, &flow.key) != 0) {
+                FW_ERROR("Error deleting flow entry: %s (-%d).\n", strerror(errno), errno);
+                return errno;
+            }
+
+            goto get_next_key;
         }
 
         __u8 old_state = flow.value.state;
@@ -115,27 +163,28 @@ int flowtrack_update() {
         }
 
         __u8 new_state = flow.value.state;
-        if (old_state != new_state) {
-            if (new_state == FLOW_OFFLOADED) {
-                rc = netlink_get_next_hop(&flow);
-                if (rc != 0)
-                    return rc;
-            }
+        if (old_state != FLOW_OFFLOADED && new_state == FLOW_OFFLOADED) {
+            rc = netlink_get_next_hop(&flow);
+            if (rc != 0)
+                return rc;
         }
-        else if (flow.value.update)
-            flow.value.update = 0;
-        else
-            goto get_next_key;
 
-        // Update the BPF conntrack entry, break out on error
+        flow.value.idle += map_poll_sec;
+
+        // Update the BPF flow entry, break out on error
         if (bpf_map_update_elem(flow_map_fd, &flow.key, &flow.value, BPF_EXIST) != 0) {
-            FW_ERROR("Error updating conntrack entry in conntrack map: %s (-%d).\n", strerror(errno), errno);
+            FW_ERROR("Error updating flow entry: %s (-%d).\n", strerror(errno), errno);
             return errno;
         }
 
 get_next_key:
         // Retrieve the next key of the flows map
         rc = bpf_map_get_next_key(flow_map_fd, &flow.key, &flow.key);
+    }
+
+    if (rc != -ENOENT) {
+        FW_ERROR("Error retrieving flow key: %s (-%d).\n", strerror(errno), errno);
+        return errno;
     }
 
     return 0;

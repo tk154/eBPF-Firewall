@@ -29,7 +29,13 @@ int read_netfilter_sysfs_timeout(const char *filename, unsigned int *timeout) {
     }
 
     fclose(file);
-    *timeout = strtol(buffer, NULL, 10);
+
+    char *endptr = NULL;
+    *timeout = strtoul(buffer, &endptr, 10);
+    if (buffer == endptr) {
+        FW_ERROR("Error converting %s value to unsigned integer.\n", filename);
+        return -1;
+    }
 
     return 0;
 }

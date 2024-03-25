@@ -43,9 +43,9 @@ struct nat_entry {
 struct flow_value {
 	struct next_hop next_h;
 	struct nat_entry n_entry;
+	__u32 idle;
 	__sum16 l3_cksum_diff;
 	__u8 state, action;
-	__u8 update;
 };
 
 
