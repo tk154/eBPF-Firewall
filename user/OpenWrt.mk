@@ -7,7 +7,7 @@ define first_wildcard_match
 endef
 
 
-GCC_VERSION := 12.3.0
+GCC_VERSION := 13.2.0
 
 TOOLCHAIN_DIR := $(call first_wildcard_match,$(OPENWRT_DIR)/staging_dir/toolchain-$(TARGET)*_gcc-$(GCC_VERSION)_musl*)
 TARGET_DIR    := $(call first_wildcard_match,$(OPENWRT_DIR)/staging_dir/target-$(TARGET)*_musl*)
