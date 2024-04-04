@@ -19,6 +19,8 @@ static void *nl_buffer;
 static struct mnl_socket *nl_socket;
 
 
+static int get_link(struct netlink_handle* netlink_h, struct flow_value *f_value, __u32 ifindex);
+
 static void log_next_hop(struct next_hop *next_h) {
     if (fw_log_level >= FW_LOG_LEVEL_VERBOSE) {
         char src_mac[18], dest_mac[18];
@@ -29,8 +31,29 @@ static void log_next_hop(struct next_hop *next_h) {
             next_h->dest_mac[0], next_h->dest_mac[1], next_h->dest_mac[2],
             next_h->dest_mac[3], next_h->dest_mac[4], next_h->dest_mac[5]);
 
-        FW_VERBOSE("Hop: %u %s %s\n", next_h->ifindex, src_mac, dest_mac);
+        FW_VERBOSE("Hop: %u %s %s", next_h->ifindex, src_mac, dest_mac);
+
+        if (next_h->vlan_id)
+            FW_VERBOSE(" %hu\n", next_h->vlan_id);
+        else
+            FW_VERBOSE("\n");
     }
+}
+
+static int mnl_attr_parse_cb(const struct nlattr *attr, void *data) {
+    const struct nlattr **tb = data;
+    tb[mnl_attr_get_type(attr)] = attr;
+
+    return MNL_CB_OK;
+}
+
+static int mnl_attr_parse_cb2(const struct nlattr *attr, void *data) {
+    const struct nlattr **tb = data;
+    tb[mnl_attr_get_type(attr)] = attr;
+
+    FW_VERBOSE("%hu\n", mnl_attr_get_type(attr));
+
+    return MNL_CB_OK;
 }
 
 static int send_request() {
@@ -61,7 +84,49 @@ static int send_request() {
     return 0;
 }
 
-static int get_route(struct flow_key_value* flow, __be32 *dest_ip) {
+static int bridge_get_lower(struct netlink_handle* netlink_h, struct flow_value *f_value, __u32 ifindex) {
+    // Prepare a Netlink request message
+    struct nlmsghdr *nlh = mnl_nlmsg_put_header(netlink_h->nl_buffer);
+    nlh->nlmsg_type = RTM_GETNEIGH;
+
+    struct ndmsg *ndm = mnl_nlmsg_put_extra_header(nlh, sizeof(struct ndmsg));
+    ndm->ndm_family = PF_BRIDGE;
+
+    // Set the destination IP (of Receiver or Gateway)
+    mnl_attr_put(nlh, NDA_LLADDR, ETH_ALEN, f_value->next_h.dest_mac);
+    mnl_attr_put_u32(nlh, NDA_MASTER, ifindex);
+
+    // Send request and receive response
+    int rc = send_request(netlink_h);
+    if (rc != 0) {
+        FW_ERROR("%s request error.\n", STRINGIFY(RTM_GETNEIGH));
+        return rc;
+    }
+
+    return get_link(netlink_h, f_value, ndm->ndm_ifindex);
+}
+
+static int parse_vlan_if(struct netlink_handle* netlink_h, struct nlattr **ifla_info, __u32 phy_ifindex, struct flow_value *f_value) {
+    if (f_value->next_h.vlan_id) {
+        f_value->action = ACTION_PASS;
+        return 0;
+    }
+
+    struct nlattr *ifla_vlan[IFLA_VLAN_MAX + 1] = {};
+    mnl_attr_parse_nested(ifla_info[IFLA_INFO_DATA], mnl_attr_parse_cb, ifla_vlan);
+
+    __u16 vlan_proto = mnl_attr_get_u16(ifla_vlan[IFLA_VLAN_PROTOCOL]);
+    if (vlan_proto != ntohs(ETH_P_8021Q)) {
+        f_value->action = ACTION_PASS;
+        return 0;
+    }
+
+    f_value->next_h.vlan_id = mnl_attr_get_u16(ifla_vlan[IFLA_VLAN_ID]);
+
+    return get_link(netlink_h, f_value, phy_ifindex);
+}
+
+static int get_route(struct netlink_handle* netlink_h, struct flow_key_value* flow, __u32 *ifindex, void *dest_ip) {
     // Prepare a Netlink request message
     struct nlmsghdr *nlh = mnl_nlmsg_put_header(nl_buffer);
     nlh->nlmsg_type = RTM_GETROUTE;
@@ -103,71 +168,32 @@ static int get_route(struct flow_key_value* flow, __be32 *dest_ip) {
             return 0;
     }
 
-    __u32 ifindex = 0;
-    
-    struct nlattr *attr;
-    mnl_attr_for_each(attr, nlh, sizeof(struct rtmsg)) {
-        switch (mnl_attr_get_type(attr)) {
-            // Output interface index
-            case RTA_OIF:
-                ifindex = mnl_attr_get_u32(attr);
-            break;
+    struct nlattr *attr[RTA_MAX + 1] = {};
+    mnl_attr_parse(nlh, sizeof(*rtm), mnl_attr_parse_cb, attr);
 
-            // If the packet cannot be send directly,
-            // save the IP of the Gateway
-            case RTA_GATEWAY:
-                *dest_ip = mnl_attr_get_u32(attr);
-            break;
-        }
-    }
-
-    if (!ifindex) {
-        FW_ERROR("Netlink didn't return output ifindex");
+    if (!attr[RTA_OIF]) {
+        FW_ERROR("%s didn't return output ifindex.\n", STRINGIZE(RTM_GETROUTE));
         return -1;
     }
 
+    *ifindex = mnl_attr_get_u32(attr[RTA_OIF]);
+
+    if (attr[RTA_GATEWAY])
+        *dest_ip = mnl_attr_get_u32(attr[RTA_GATEWAY]);
+
     flow->value.action = ACTION_REDIRECT;
-    flow->value.next_h.ifindex = ifindex;
 
     return 0;
 }
 
-static int get_if_mac(struct next_hop *next_h) {
-    // Prepare a Netlink request message
-    struct nlmsghdr *nlh = mnl_nlmsg_put_header(nl_buffer);
-    nlh->nlmsg_type = RTM_GETLINK;
-
-    struct ifinfomsg *ifi_req = mnl_nlmsg_put_extra_header(nlh, sizeof(struct ifinfomsg));
-    ifi_req->ifi_index = next_h->ifindex;
-
-    // Send request and receive response
-    int rc = send_request();
-    if (rc != 0) {
-        FW_ERROR("%s request error.\n", STRINGIZE(RTM_GETLINK));
-        return rc;
-    }
-
-    struct nlattr *attr;
-    mnl_attr_for_each(attr, nlh, sizeof(struct ifinfomsg)) {
-        // Interface L2 address
-        if (mnl_attr_get_type(attr) == IFLA_ADDRESS) {
-            memcpy(next_h->src_mac, mnl_attr_get_payload(attr), sizeof(next_h->src_mac));
-            return 0;
-        }
-    }
-
-    FW_ERROR("Netlink didn't return interface MAC address");
-    return -1;
-}
-
-static int get_dest_mac(struct next_hop *next_h, __be32 dest_ip) {
+static int get_neigh(struct netlink_handle* netlink_h, struct flow_key_value* flow, __u32 ifindex, void *dest_ip) {
     // Prepare a Netlink request message
     struct nlmsghdr *nlh = mnl_nlmsg_put_header(nl_buffer);
     nlh->nlmsg_type = RTM_GETNEIGH;
 
-    struct ndmsg *nd_req = mnl_nlmsg_put_extra_header(nlh, sizeof(struct ndmsg));
-    nd_req->ndm_family = AF_INET;
-    nd_req->ndm_ifindex = next_h->ifindex;
+    struct ndmsg *ndm = mnl_nlmsg_put_extra_header(nlh, sizeof(struct ndmsg));
+    ndm->ndm_family  = AF_INET;
+    ndm->ndm_ifindex = ifindex;
 
     // Set the destination IP (of Receiver or Gateway)
     mnl_attr_put_u32(nlh, NDA_DST, dest_ip);
@@ -179,33 +205,82 @@ static int get_dest_mac(struct next_hop *next_h, __be32 dest_ip) {
         return rc;
     }
 
-    struct nlattr *attr;
-    mnl_attr_for_each(attr, nlh, sizeof(struct ndmsg)) {
-        // Neighbor cache link layer address
-        if (mnl_attr_get_type(attr) == NDA_LLADDR) {
-            memcpy(next_h->dest_mac, mnl_attr_get_payload(attr), sizeof(next_h->dest_mac));
-            return 0;
+    struct nlattr *attr[NDA_MAX + 1] = {};
+    mnl_attr_parse(nlh, sizeof(*ndm), mnl_attr_parse_cb, attr);
+
+    if (!attr[NDA_LLADDR]) {
+        FW_ERROR("%s didn't return destination MAC address.\n", STRINGIZE(RTM_GETNEIGH));
+        return -1;
+    }
+
+    void *dest_mac = mnl_attr_get_payload(attr[NDA_LLADDR]);
+    memcpy(f_value->next_h.dest_mac, dest_mac, ETH_ALEN);
+
+    return 0;
+}
+
+static int get_link(struct netlink_handle* netlink_h, struct flow_value *f_value, __u32 ifindex) {
+    // Prepare a Netlink request message
+    struct nlmsghdr *nlh = mnl_nlmsg_put_header(netlink_h->nl_buffer);
+    nlh->nlmsg_type = RTM_GETLINK;
+
+    struct ifinfomsg *ifinfom = mnl_nlmsg_put_extra_header(nlh, sizeof(struct ifinfomsg));
+    ifinfom->ifi_index = ifindex;
+
+    // Send request and receive response
+    int rc = send_request();
+    if (rc != 0) {
+        FW_ERROR("%s request error.\n", STRINGIFY(RTM_GETLINK));
+        return rc;
+    }
+
+    struct nlattr *attr[IFLA_MAX + 1] = {};
+    mnl_attr_parse(nlh, sizeof(*ifinfom), mnl_attr_parse_cb, attr);
+
+    if (attr[IFLA_LINKINFO]) {
+        struct nlattr *ifla_info[IFLA_INFO_MAX + 1] = {};
+        mnl_attr_parse_nested(attr[IFLA_LINKINFO], mnl_attr_parse_cb, ifla_info);
+
+        if (ifla_info[IFLA_INFO_KIND]) {
+            const char *if_type = mnl_attr_get_str(ifla_info[IFLA_INFO_KIND]);
+            if (strcmp(if_type, "bridge") == 0)
+                return bridge_get_lower(netlink_h, f_value, ifindex);
+
+            if (strcmp(if_type, "vlan") == 0) {
+                __u32 phy_ifindex = mnl_attr_get_u32(attr[IFLA_LINK]);
+                return parse_vlan_if(netlink_h, ifla_info, phy_ifindex, f_value);
+            }
         }
     }
 
-    FW_ERROR("Netlink didn't return destination MAC address");
-    return -1;
+    if (!attr[IFLA_ADDRESS]) {
+        FW_ERROR("%s didn't return interface MAC address.\n", STRINGIFY(RTM_GETLINK));
+        return -1;
+    }
+
+    void *if_mac = mnl_attr_get_payload(attr[IFLA_ADDRESS]);
+    memcpy(f_value->next_h.src_mac, if_mac, ETH_ALEN);
+
+    f_value->next_h.ifindex = ifindex;
+
+    return 0;
 }
 
 int netlink_get_next_hop(struct flow_key_value* flow) {
+    __u32 ifindex;
     __be32 dest_ip = flow->value.n_entry.rewrite_flag & REWRITE_DEST_IP ?
                      flow->value.n_entry.dest_ip : flow->key.dest_ip;
 
-    int rc = get_route(flow, &dest_ip);
+    int rc = get_route(flow, &ifindex, &dest_ip);
     if (rc != 0 || flow->value.action != ACTION_REDIRECT)
         return rc;
 
-    rc = get_if_mac(&flow->value.next_h);
+    rc = get_neigh(netlink_h, flow, ifindex, dest_ip);
     if (rc != 0)
         return rc;
 
-    rc = get_dest_mac(&flow->value.next_h, dest_ip);
-    if (rc != 0)
+    rc = get_link(netlink_h, &flow->value, ifindex);
+    if (rc != 0 || flow->value.action != ACTION_REDIRECT)
         return rc;
 
     log_next_hop(&flow->value.next_h);

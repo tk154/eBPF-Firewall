@@ -133,6 +133,110 @@ __always_inline void apply_nat(struct nat_entry *n_entry, struct iphdr *iph, __b
 	cksum_add(cksum, n_entry->l4_cksum_diff);
 }
 
+__always_inline int check_vlan(struct BPFW_CTX *ctx, struct ethhdr **ethh, __be16 h_proto, __u16 packet_vlan, __u16 next_hop_vlan) {
+	if (!packet_vlan && next_hop_vlan) {
+		BPF_DEBUG("Add VLAN Tag %u", next_hop_vlan);
+
+#if defined(XDP_PROGRAM)
+		if (bpf_xdp_adjust_head(ctx, -(int)sizeof(struct vlan_hdr)) != 0)
+			return -1;
+
+		if (ctx->data + sizeof(struct ethhdr) + sizeof(struct vlan_hdr) > ctx->data_end)
+			return -1;
+
+		*ethh = (void*)(long)ctx->data;
+		(*ethh)->h_proto = bpf_htons(ETH_P_8021Q);
+
+		struct vlan_hdr *vlan_h = (struct vlan_hdr*)(*ethh + 1);
+		vlan_h->h_vlan_TCI = bpf_htons(next_hop_vlan);
+		vlan_h->h_vlan_encapsulated_proto = h_proto;
+		
+#elif defined(TC_PROGRAM)
+		if (bpf_skb_vlan_push(ctx, ETH_P_8021Q, next_hop_vlan) != 0)
+			return -1;
+
+		if (ctx->data + sizeof(struct ethhdr) > ctx->data_end)
+			return -1;
+
+		*ethh = (void*)(long)ctx->data;
+#endif
+	}
+	else if (packet_vlan && !next_hop_vlan) {
+		BPF_DEBUG("Remove VLAN Tag");
+
+#if defined(XDP_PROGRAM)
+		if (bpf_xdp_adjust_head(ctx, sizeof(struct vlan_hdr)) != 0)
+			return -1;
+
+		if (ctx->data + sizeof(struct ethhdr) > ctx->data_end)
+			return -1;
+
+		*ethh = (void*)(long)ctx->data;
+		(*ethh)->h_proto = h_proto;
+		
+#elif defined(TC_PROGRAM)
+		if (bpf_skb_vlan_pop(ctx) != 0)
+			return -1;
+
+		if (ctx->data + sizeof(struct ethhdr) > ctx->data_end)
+			return -1;
+
+		*ethh = (void*)(long)ctx->data;
+#endif
+	}
+
+/*#if defined(XDP_PROGRAM)
+	if (!packet_vlan && next_hop_vlan) {
+		if (bpf_xdp_adjust_head(ctx, -(int)sizeof(struct vlan_hdr)) != 0)
+			return -1;
+
+		goto add_vlan_hdr;
+	}
+	else if (packet_vlan && !next_hop_vlan) {
+		if (bpf_xdp_adjust_head(ctx, sizeof(struct vlan_hdr)) != 0)
+			return -1;
+	}
+	else
+		return 0;
+
+#elif defined(TC_PROGRAM)
+	if (!packet_vlan && next_hop_vlan) {
+		if (bpf_skb_vlan_push(ctx, ETH_P_8021Q, next_hop_vlan) != 0)
+			return -1;
+	}
+	else if (packet_vlan && !next_hop_vlan) {
+		if (bpf_skb_vlan_pop(ctx) != 0)
+			return -1;
+	}
+	else
+		return 0;
+#endif
+
+	if (ctx->data + sizeof(struct ethhdr) > ctx->data_end)
+		return -1;
+
+	*ethh = (void*)(long)ctx->data;
+#if defined(XDP_PROGRAM)
+	(*ethh)->h_proto = h_proto;
+#endif
+	return 0;
+
+#if defined(XDP_PROGRAM)
+add_vlan_hdr:
+	if (ctx->data + sizeof(struct ethhdr) + sizeof(struct vlan_hdr) > ctx->data_end)
+		return -1;
+
+	*ethh = (void*)(long)ctx->data;
+	(*ethh)->h_proto = bpf_htons(ETH_P_8021Q);
+
+	struct vlan_hdr *vlan_h = (struct vlan_hdr*)(*ethh + 1);
+	vlan_h->h_vlan_TCI = bpf_htons(next_hop_vlan);
+	vlan_h->h_vlan_encapsulated_proto = h_proto;
+#endif*/
+
+	return 0;
+}
+
 /**
  * Rewrite the Ethernet header and redirect the package to the next hop
  * @param ethh The Ethernet header to rewrite
@@ -176,7 +280,8 @@ int fw_func(struct BPFW_CTX *ctx) {
 	__u16 vlan_id = 0;
 
 	// Check if there is a VLAN header
-    if (h_proto == bpf_htons(ETH_P_8021Q) || h_proto == bpf_htons(ETH_P_8021AD)) {
+#if defined(XDP_PROGRAM)
+    if (h_proto == bpf_htons(ETH_P_8021Q)) {
 		// Parse the VLAN header, will drop the package if out-of-bounds
 		parse_header(struct vlan_hdr, *vlan_h, data, data_end);
 
@@ -188,6 +293,14 @@ int fw_func(struct BPFW_CTX *ctx) {
 		// Save the packet type ID of the next header
 		h_proto = vlan_h->h_vlan_encapsulated_proto;
     }
+#elif defined(TC_PROGRAM)
+	if (ctx->vlan_present && ctx->vlan_proto == bpf_htons(ETH_P_8021Q)) {
+		// Save the VLAN ID (last 12 Byte)
+        vlan_id = ctx->vlan_tci & 0x0FFF;
+
+		BPF_DEBUG("VLAN ID: %u", vlan_id);
+	}
+#endif
 
 	if (h_proto != bpf_htons(ETH_P_IP)) {
 		BPF_DEBUG("h_proto: 0x%04x", h_proto);
@@ -284,6 +397,9 @@ int fw_func(struct BPFW_CTX *ctx) {
 
 			// Apply NAT
 			apply_nat(&f_value->n_entry, iph, sport, dport, cksum);
+
+			if (check_vlan(ctx, &ethh, h_proto, vlan_id, f_value->next_h.vlan_id) != 0)
+				return BPFW_DROP;
 
 			// Redirect the package
 			return redirect_package(ethh, &f_value->next_h);

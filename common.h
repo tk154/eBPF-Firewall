@@ -29,6 +29,7 @@ struct next_hop {
 	__u8  src_mac[ETH_ALEN];
 	__u8  dest_mac[ETH_ALEN];
 	__u32 ifindex;
+	__u16 vlan_id;
 };
 
 struct nat_entry {
