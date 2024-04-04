@@ -4,20 +4,23 @@
 #include <linux/bpf.h>
 
 
+// Struct to keep BPF object and program pointers together
+struct bpf_object_program;
+
 /**
  * Load a BPF object including its map and program into the kernel
  * @param prog_path Path to the BPF object
  * @param prog_type Can be either BPF_PROG_TYPE_XDP for XDP or BPF_PROG_TYPE_SCHED_CLS for TC programs
  * @returns On success, a pointer to a dynamically allocated bpf_object_program struct, NULL otherwise
 **/
-int bpf_load_program(const char* prog_path, enum bpf_prog_type prog_type);
+struct bpf_object_program* bpf_load_program(const char* prog_path, enum bpf_prog_type prog_type);
 
 /**
  * Unload a BPF object including its map and program from the kernel
  * @param bpf A pointer to a valid bpf_object_program struct. 
  * The allocated memory for the struct will be freed so the pointer should not be used anymore afterwards.
 **/
-void bpf_unload_program();
+void bpf_unload_program(struct bpf_object_program* bpf);
 
 /**
  * Attach a BPF program to an interface
@@ -25,14 +28,14 @@ void bpf_unload_program();
  * @param ifname The name of the network interface where the program should be attached to
  * @returns 0 on success, -1 if the program is not of type XDP or TC, errno for other errors
  * **/
-int bpf_if_attach_program(char* ifname);
+int bpf_if_attach_program(struct bpf_object_program* bpf, char* ifname);
 
 /**
  * Detach a BPF program from an interface
  * @param prog A pointer to the to-be-unattached BPF program
  * @param ifname The name of the network interface where the program should be detached from
  * **/
-void bpf_if_detach_program(char* ifname);
+void bpf_if_detach_program(struct bpf_object_program* bpf, char* ifname);
 
 /**
  * Attach a BPF program to multiple interfaces
@@ -41,7 +44,7 @@ void bpf_if_detach_program(char* ifname);
  * @param ifname_size The size of the ifnames array
  * @returns 0 on success, -1 if the program is not of type XDP or TC, errno for other errors
  * **/
-int bpf_ifs_attach_program(char* ifnames[], unsigned int ifname_size);
+int bpf_ifs_attach_program(struct bpf_object_program* bpf, char* ifnames[], unsigned int ifname_size);
 
 /**
  * Detach a BPF program from multiple interfaces
@@ -49,10 +52,10 @@ int bpf_ifs_attach_program(char* ifnames[], unsigned int ifname_size);
  * @param ifnames An array containing the interface names where the program should be detached from
  * @param ifname_size The size of the ifnames array
  * **/
-void bpf_ifs_detach_program(char* ifnames[], unsigned int ifname_size);
+void bpf_ifs_detach_program(struct bpf_object_program* bpf, char* ifnames[], unsigned int ifname_size);
 
 
-int bpf_get_map_fd(const char *map_name);
+int bpf_get_map_fd(struct bpf_object_program* bpf, const char *map_name);
 
 
 #endif

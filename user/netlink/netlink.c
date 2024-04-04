@@ -13,10 +13,12 @@
 #define NL_BUFFER_SIZE MNL_SOCKET_BUFFER_SIZE
 
 
-// Dynamically allocated buffer for all Netlink requests and responses
-static void *nl_buffer;
-
-static struct mnl_socket *nl_socket;
+struct netlink_handle {
+    struct mnl_socket *nl_socket;
+    
+    // Dynamically allocated buffer for all Netlink requests and responses
+    void *nl_buffer;
+};
 
 
 static int get_link(struct netlink_handle* netlink_h, struct flow_value *f_value, __u32 ifindex);
@@ -47,7 +49,7 @@ static int mnl_attr_parse_cb(const struct nlattr *attr, void *data) {
     return MNL_CB_OK;
 }
 
-static int mnl_attr_parse_cb2(const struct nlattr *attr, void *data) {
+static int mnl_attr_parse_cb_test(const struct nlattr *attr, void *data) {
     const struct nlattr **tb = data;
     tb[mnl_attr_get_type(attr)] = attr;
 
@@ -56,18 +58,18 @@ static int mnl_attr_parse_cb2(const struct nlattr *attr, void *data) {
     return MNL_CB_OK;
 }
 
-static int send_request() {
-    struct nlmsghdr *nlh = (struct nlmsghdr*)nl_buffer;
+static int send_request(struct netlink_handle* netlink_h) {
+    struct nlmsghdr *nlh = (struct nlmsghdr*)netlink_h->nl_buffer;
     nlh->nlmsg_flags = NLM_F_REQUEST;
 
     // Send the request
-    if (mnl_socket_sendto(nl_socket, nlh, nlh->nlmsg_len) < 0) {
+    if (mnl_socket_sendto(netlink_h->nl_socket, nlh, nlh->nlmsg_len) < 0) {
         FW_ERROR("Error sending netlink request: %s (-%d).\n", strerror(errno), errno);
         return errno;
     }
 
     // Receive and parse the response
-    ssize_t nbytes = mnl_socket_recvfrom(nl_socket, nl_buffer, NL_BUFFER_SIZE);
+    ssize_t nbytes = mnl_socket_recvfrom(netlink_h->nl_socket, netlink_h->nl_buffer, NL_BUFFER_SIZE);
     if (nbytes < 0) {
         FW_ERROR("Error receiving netlink response: %s (-%d).\n", strerror(errno), errno);
         return errno;
@@ -128,7 +130,7 @@ static int parse_vlan_if(struct netlink_handle* netlink_h, struct nlattr **ifla_
 
 static int get_route(struct netlink_handle* netlink_h, struct flow_key_value* flow, __u32 *ifindex, void *dest_ip) {
     // Prepare a Netlink request message
-    struct nlmsghdr *nlh = mnl_nlmsg_put_header(nl_buffer);
+    struct nlmsghdr *nlh = mnl_nlmsg_put_header(netlink_h->nl_buffer);
     nlh->nlmsg_type = RTM_GETROUTE;
 
     struct rtmsg *rtm = mnl_nlmsg_put_extra_header(nlh, sizeof(struct rtmsg));
@@ -144,7 +146,7 @@ static int get_route(struct netlink_handle* netlink_h, struct flow_key_value* fl
     mnl_attr_put_u8(nlh, RTA_IP_PROTO, flow->key.l4_proto);
 
     // Send request and receive response
-    int rc = send_request();
+    int rc = send_request(netlink_h);
     if (rc != 0) {
         FW_ERROR("%s request error.\n", STRINGIZE(RTM_GETROUTE));
         return rc;
@@ -188,7 +190,7 @@ static int get_route(struct netlink_handle* netlink_h, struct flow_key_value* fl
 
 static int get_neigh(struct netlink_handle* netlink_h, struct flow_key_value* flow, __u32 ifindex, void *dest_ip) {
     // Prepare a Netlink request message
-    struct nlmsghdr *nlh = mnl_nlmsg_put_header(nl_buffer);
+    struct nlmsghdr *nlh = mnl_nlmsg_put_header(netlink_h->nl_buffer);
     nlh->nlmsg_type = RTM_GETNEIGH;
 
     struct ndmsg *ndm = mnl_nlmsg_put_extra_header(nlh, sizeof(struct ndmsg));
@@ -199,7 +201,7 @@ static int get_neigh(struct netlink_handle* netlink_h, struct flow_key_value* fl
     mnl_attr_put_u32(nlh, NDA_DST, dest_ip);
 
     // Send request and receive response
-    int rc = send_request();
+    int rc = send_request(netlink_h);
     if (rc != 0) {
         FW_ERROR("%s request error.\n", STRINGIZE(RTM_GETNEIGH));
         return rc;
@@ -228,7 +230,7 @@ static int get_link(struct netlink_handle* netlink_h, struct flow_value *f_value
     ifinfom->ifi_index = ifindex;
 
     // Send request and receive response
-    int rc = send_request();
+    int rc = send_request(netlink_h);
     if (rc != 0) {
         FW_ERROR("%s request error.\n", STRINGIFY(RTM_GETLINK));
         return rc;
@@ -266,12 +268,12 @@ static int get_link(struct netlink_handle* netlink_h, struct flow_value *f_value
     return 0;
 }
 
-int netlink_get_next_hop(struct flow_key_value* flow) {
+int netlink_get_next_hop(struct netlink_handle* netlink_h, struct flow_key_value* flow) {
     __u32 ifindex;
     __be32 dest_ip = flow->value.n_entry.rewrite_flag & REWRITE_DEST_IP ?
                      flow->value.n_entry.dest_ip : flow->key.dest_ip;
 
-    int rc = get_route(flow, &ifindex, &dest_ip);
+    int rc = get_route(netlink_h, flow, &ifindex, &dest_ip);
     if (rc != 0 || flow->value.action != ACTION_REDIRECT)
         return rc;
 
@@ -288,37 +290,48 @@ int netlink_get_next_hop(struct flow_key_value* flow) {
     return 0;
 }
 
-int netlink_init() {
+struct netlink_handle* netlink_init() {
+    struct netlink_handle *netlink_h = (struct netlink_handle*)malloc(sizeof(struct netlink_handle));
+    if (!netlink_h) {
+        FW_ERROR("Error allocating netlink handle: %s (-%d).\n", strerror(errno), errno);
+        return NULL;
+    }
+
     // Open a Netlink socket
-    nl_socket = mnl_socket_open(NETLINK_ROUTE);
-    if (!nl_socket) {
+    netlink_h->nl_socket = mnl_socket_open(NETLINK_ROUTE);
+    if (!netlink_h->nl_socket) {
         FW_ERROR("Error opening netlink socket: %s (-%d).\n", strerror(errno), errno);
-        return errno;
+        goto free;
     }
 
     // Bind the socket
-    if (mnl_socket_bind(nl_socket, 0, MNL_SOCKET_AUTOPID) != 0) {
+    if (mnl_socket_bind(netlink_h->nl_socket, 0, MNL_SOCKET_AUTOPID) != 0) {
         FW_ERROR("Error binding netlink socket: %s (-%d).\n", strerror(errno), errno);
-        mnl_socket_close(nl_socket);
-
-        return errno;
+        goto mnl_socket_close;
     }
 
     // Allocate the netlink buffer
-    nl_buffer = malloc(NL_BUFFER_SIZE);
-    if (!nl_buffer) {
+    netlink_h->nl_buffer = malloc(NL_BUFFER_SIZE);
+    if (!netlink_h->nl_buffer) {
         FW_ERROR("Error allocating netlink buffer: %s (-%d).\n", strerror(errno), errno);
-        mnl_socket_close(nl_socket);
-
-        return errno;
+        goto mnl_socket_close;
     }
 
-    return 0;
+    return netlink_h;
+
+mnl_socket_close:
+    mnl_socket_close(netlink_h->nl_socket);
+
+free:
+    free(netlink_h);
+
+    return NULL;
 }
 
-void netlink_destroy() {
+void netlink_destroy(struct netlink_handle* netlink_h) {
     // Close the socket
-    mnl_socket_close(nl_socket);
+    mnl_socket_close(netlink_h->nl_socket);
 
-    free(nl_buffer);
+    free(netlink_h->nl_buffer);
+    free(netlink_h);
 }

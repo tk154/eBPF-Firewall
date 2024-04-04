@@ -15,6 +15,7 @@
 
 
 int fw_log_level = FW_LOG_LEVEL_INFO;
+struct flowtrack_handle* flowtrack_h;
 
 struct cmd_args args = {
     .map_poll_sec = 5
@@ -87,7 +88,7 @@ static void signal_handler(int sig) {
     // On SIGINT or SIGTERM, the main loop should exit
     FW_INFO("\nUnloading ...\n");
 
-    flowtrack_destroy(&args);
+    flowtrack_destroy(flowtrack_h, &args);
     exit(EXIT_SUCCESS);
 }
 
@@ -98,7 +99,8 @@ int main(int argc, char* argv[]) {
         return EXIT_FAILURE;
     }
 
-    if (flowtrack_init(&args) != 0)
+    flowtrack_h = flowtrack_init(&args);
+    if (!flowtrack_h)
         return EXIT_FAILURE;
 
     // Catch CTRL+C and SIGTERM with the handler to exit the main loop
@@ -112,8 +114,8 @@ int main(int argc, char* argv[]) {
     while (1) {
         sleep(args.map_poll_sec);
 
-        if (flowtrack_update() != 0) {
-            flowtrack_destroy(&args);
+        if (flowtrack_update(flowtrack_h) != 0) {
+            flowtrack_destroy(flowtrack_h, &args);
             return EXIT_FAILURE;
         }
     }

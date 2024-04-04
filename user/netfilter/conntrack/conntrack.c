@@ -16,12 +16,19 @@
 #include "../../common_user.h"
 
 
-// Store the nf_conntrack handle pointer
-static struct nfct_handle *ct_handle;
+struct conntrack_handle {
+    // Store the nf_conntrack handle pointer
+    struct nfct_handle *ct_handle;
 
-// Timeouts from /proc/sys/net/netfilter
-// Note: There are more, for now just basic ones
-static __u32 tcp_timeout, udp_timeout, udp_stream_timeout;
+    // Timeouts from /proc/sys/net/netfilter
+    // Note: There are more, for now just basic ones
+    __u32 tcp_timeout, udp_timeout, udp_stream_timeout;
+};
+
+struct nfct_get_cb_args {
+    struct conntrack_handle *conntrack_h;
+    struct flow_key_value *flow;
+};
 
 
 /**
@@ -44,18 +51,18 @@ static int read_conntrack_timeout(const char *filename, __u32 *timeout) {
  * @param ct The nf_conntrack entry where to update the timeout
  * @param l4_proto The L4 protocol type (TCP or UDP)
  * **/
-static void set_timeout(struct nf_conntrack *ct, __u8 l4_proto) {
+static void set_timeout(struct conntrack_handle* conntrack_h, struct nf_conntrack *ct, __u8 l4_proto) {
     __u32 timeout;
 
     // Determine the timeout for the specific protocol
     switch (l4_proto) {
         case IPPROTO_TCP:
-            timeout = tcp_timeout;
+            timeout = conntrack_h->tcp_timeout;
         break;
 
         case IPPROTO_UDP:
             bool assured = nfct_get_attr_u32(ct, ATTR_STATUS) & IPS_ASSURED;
-            timeout = assured ? udp_stream_timeout : udp_timeout;
+            timeout = assured ? conntrack_h->udp_stream_timeout : conntrack_h->udp_timeout;
         break;
     }
 
@@ -72,7 +79,9 @@ static bool tcp_not_established(__u8 l4_proto, struct nf_conntrack *ct) {
 
 // Callback to retrieve a specific conntrack entry
 static int nfct_get_cb(enum nf_conntrack_msg_type type, struct nf_conntrack *ct, void *data) {
-    struct flow_key_value *flow = data;
+    struct nfct_get_cb_args *args = data;
+    struct conntrack_handle *conntrack_h = args->conntrack_h;
+    struct flow_key_value *flow = args->flow;
 
     switch (flow->value.state) {
         // If the flow was not marked as offloaded (yet)
@@ -104,10 +113,10 @@ static int nfct_get_cb(enum nf_conntrack_msg_type type, struct nf_conntrack *ct,
                 break;
 
             // Update the nf_conntrack timeout
-            set_timeout(ct, flow->key.l4_proto);
+            set_timeout(conntrack_h, ct, flow->key.l4_proto);
 
             // Update the edited nf_conntrack entry
-            if (nfct_query(ct_handle, NFCT_Q_UPDATE, ct) != 0) {
+            if (nfct_query(conntrack_h->ct_handle, NFCT_Q_UPDATE, ct) != 0) {
                 FW_ERROR("Error updating conntrack entry: %s (-%d).\n", strerror(errno), errno);
                 return NFCT_CB_FAILURE;
             }
@@ -124,27 +133,38 @@ static int nfct_get_cb(enum nf_conntrack_msg_type type, struct nf_conntrack *ct,
 }
 
 
-int conntrack_init() {
+struct conntrack_handle* conntrack_init() {
+    struct conntrack_handle *conntrack_h = (struct conntrack_handle*)malloc(sizeof(struct conntrack_handle));
+    if (!conntrack_h) {
+        FW_ERROR("Error allocating conntrack handle: %s (-%d).\n", strerror(errno), errno);
+        return NULL;
+    }
+
     // Read TCP and UDP timeout values
-    if (read_conntrack_timeout("tcp_timeout_established", &tcp_timeout) != 0 ||
-        read_conntrack_timeout("udp_timeout"            , &udp_timeout) != 0 ||
-        read_conntrack_timeout("udp_timeout_stream"     , &udp_stream_timeout) != 0)
+    if (read_conntrack_timeout("tcp_timeout_established", &conntrack_h->tcp_timeout) != 0 ||
+        read_conntrack_timeout("udp_timeout"            , &conntrack_h->udp_timeout) != 0 ||
+        read_conntrack_timeout("udp_timeout_stream"     , &conntrack_h->udp_stream_timeout) != 0)
     {
-        return errno;
+        goto free;
     }
 
     // Open a new conntrack handle
-	ct_handle = nfct_open(CONNTRACK, 0);
-	if (!ct_handle) {
+	conntrack_h->ct_handle = nfct_open(CONNTRACK, 0);
+	if (!conntrack_h->ct_handle) {
 		FW_ERROR("Error opening conntrack handle: %s (-%d).\n", strerror(errno), errno);
-		return errno;
+		goto free;
 	}
 
-    return 0;
+    return conntrack_h;
+
+free:
+    free(conntrack_h);
+
+    return NULL;
 }
 
 
-int conntrack_lookup(struct flow_key_value *flow) {
+int conntrack_lookup(struct conntrack_handle* conntrack_h, struct flow_key_value *flow) {
     // Create a new conntrack entry object for a lookup
     struct nf_conntrack *ct = nfct_new();
     if (!ct) {
@@ -161,19 +181,21 @@ int conntrack_lookup(struct flow_key_value *flow) {
     nfct_set_attr_u16(ct, ATTR_PORT_SRC, flow->key.src_port);
     nfct_set_attr_u16(ct, ATTR_PORT_DST, flow->key.dest_port);
 
+    struct nfct_get_cb_args args = { conntrack_h, flow };
+
     // Register the callback for retrieving single conntrack entries
-    if (nfct_callback_register(ct_handle, NFCT_T_ALL, nfct_get_cb, flow) != 0) {
+    if (nfct_callback_register(conntrack_h->ct_handle, NFCT_T_ALL, nfct_get_cb, &args) != 0) {
         FW_ERROR("Error registering conntrack callback: %s (-%d).\n",
             strerror(errno), errno);
     }
 
     // Try to find the connection inside nf_conntrack
-    int rc = nfct_query(ct_handle, NFCT_Q_GET, ct);
+    int rc = nfct_query(conntrack_h->ct_handle, NFCT_Q_GET, ct);
     if (rc != 0)
         rc = errno;
 
     // Unregister the callback
-    nfct_callback_unregister(ct_handle);
+    nfct_callback_unregister(conntrack_h->ct_handle);
 
     // Free the conntrack object
     nfct_destroy(ct);
@@ -182,7 +204,9 @@ int conntrack_lookup(struct flow_key_value *flow) {
 }
 
 
-void conntrack_destroy() {
+void conntrack_destroy(struct conntrack_handle* conntrack_h) {
     // Close/free the conntrack handle
-    nfct_close(ct_handle);
+    nfct_close(conntrack_h->ct_handle);
+
+    free(conntrack_h);
 }
