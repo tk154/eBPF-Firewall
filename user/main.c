@@ -34,11 +34,10 @@ static bool check_cmd_args(int argc, char* argv[]) {
     while ((opt = getopt_long(argc, argv, "i:l:", options, &opt_index)) != -1) {
         switch (opt) {
             case 'i':
-                long sec = strtol(optarg, NULL, 10);
-                if (sec <= 0 || sec > UINT_MAX)
+                char *endptr = NULL;
+                args.map_poll_sec = strtoul(optarg, &endptr, 10);
+                if (optarg == endptr)
                     return false;
-
-                args.map_poll_sec = sec;
             break;
 
             case 'l':
@@ -63,8 +62,8 @@ static bool check_cmd_args(int argc, char* argv[]) {
         }
     }
 
-    // Check if hook, BPF object and network interface(s) are provided in the command line
-    if (argc - optind < 3)
+    // Check if BPF hook and object are provided in the command line
+    if (argc - optind < 2)
         return false;
 
     // Check the hook argument
@@ -76,9 +75,11 @@ static bool check_cmd_args(int argc, char* argv[]) {
     else
         return false;
 
-    args.prog_path =  argv[optind + 1];
-    args.if_names  = &argv[optind + 2];
-    args.if_count  =  argc - optind - 2;
+    args.prog_path = argv[optind + 1];
+    args.if_count  = argc - optind - 2;
+
+    if (args.if_count > 0)
+        args.if_names = &argv[optind + 2];
 
     return true;
 }
@@ -95,7 +96,7 @@ static void signal_handler(int sig) {
 int main(int argc, char* argv[]) {
     // Check if the arguments are provided correctly
     if (!check_cmd_args(argc, argv)) {
-        FW_ERROR("Usage: %s {xdp|tc} bpf_object_path network_interface(s)... [options]\n", argv[0]);
+        FW_ERROR("Usage: %s {xdp|tc} bpf_object_path [network_interface(s)...] [options]\n", argv[0]);
         return EXIT_FAILURE;
     }
 

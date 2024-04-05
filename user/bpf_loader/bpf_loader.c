@@ -1,7 +1,9 @@
 #include "bpf_loader.h"
 
 #include <errno.h>
+#include <glob.h>
 #include <stdlib.h>
+#include <unistd.h>
 
 #include <linux/if_link.h>
 #include <net/if.h>
@@ -21,6 +23,53 @@ struct bpf_object_program {
     struct bpf_program* prog;   // BPF program pointer
 };
 
+
+/**
+ * Used to check if a network interface is virtual
+ * @param ifname Name of the network interface
+ * @returns true if it is a virtual interface, false if it is physical
+ * **/
+static bool if_is_virtual(char* ifname) {
+    char path[64];
+    snprintf(path, sizeof(path), "/sys/class/net/%s/device", ifname);
+
+    // Check if the device file is present, if not, the interface is virtual
+    return access(path, F_OK) != 0;
+}
+
+/**
+ * Used to check if a network interface has any physical upper
+ * @param ifname Name of the network interface
+ * @returns true if it has, false if not
+ * **/
+static bool if_any_upper_physical(char* ifname) {
+    const char base_path[] = "/sys/class/net/";
+    const char upper[] = "/upper_";
+
+    char path[64];
+    snprintf(path, sizeof(path), "%s%s%s*", base_path, ifname, upper);
+
+    glob_t globbuf;
+    glob(path, 0, NULL, &globbuf);
+
+    unsigned int offset = sizeof(base_path) + strlen(ifname) + sizeof(upper) - 2;
+    bool any_physical = false;
+
+    for (int i = 0; i < globbuf.gl_pathc; i++) {
+        if (!if_is_virtual(globbuf.gl_pathv[i] + offset)) {
+            any_physical = true;
+            break;
+        }
+    }
+
+    globfree(&globbuf);
+
+    return any_physical;
+}
+
+static bool if_should_attach(char* ifname) {
+    return !if_is_virtual(ifname) && !if_any_upper_physical(ifname);
+}
 
 struct bpf_object_program* bpf_load_program(const char* prog_path, enum bpf_prog_type prog_type) {
     struct bpf_object_program* bpf = (struct bpf_object_program*)malloc(sizeof(struct bpf_object_program));
@@ -179,6 +228,54 @@ void bpf_ifs_detach_program(struct bpf_object_program* bpf, char* ifnames[], uns
     // Iterate to all the given interfaces and detache the program from them
     for (int i = 0; i < ifname_size; i++)
         bpf_if_detach_program(bpf, ifnames[i]);
+}
+
+int bpf_attach_program(struct bpf_object_program* bpf) {
+    // Retrieve the name and index of all network interfaces
+    struct if_nameindex* ifaces = if_nameindex();
+    if (!ifaces) {
+        fprintf(stderr, "Error retrieving network interfaces: %s (-%d).\n", strerror(errno), errno);
+        return errno;
+    }
+
+    int rc = 0;
+    for (struct if_nameindex* iface = ifaces; iface->if_index && iface->if_name; iface++) {
+        if (!if_should_attach(iface->if_name))
+            continue;
+
+        rc = bpf_if_attach_program(bpf, iface->if_name);
+        if (rc != 0) {
+            // If an error occured while attaching to one interface, detach all the already attached programs
+            while (--iface >= ifaces)
+                if (if_should_attach(iface->if_name))
+                    bpf_if_detach_program(bpf, iface->if_name);
+
+            break;
+        }
+    }
+
+    // Retrieved interfaces are dynamically allocated, so they must be freed
+    if_freenameindex(ifaces);
+
+    return rc;
+}
+
+int bpf_detach_program(struct bpf_object_program* bpf) {
+    // Retrieve the name and index of all network interfaces
+    struct if_nameindex* ifaces = if_nameindex();
+    if (!ifaces) {
+        fprintf(stderr, "Error retrieving network interfaces: %s (-%d).\n", strerror(errno), errno);
+        return errno;
+    }
+
+    for (struct if_nameindex* iface = ifaces; iface->if_index && iface->if_name; iface++)
+        if (if_should_attach(iface->if_name))
+            bpf_if_detach_program(bpf, iface->if_name);
+
+    // Retrieved interfaces are dynamically allocated, so they must be freed
+    if_freenameindex(ifaces);
+
+    return 0;
 }
 
 int bpf_get_map_fd(struct bpf_object_program* bpf, const char *map_name) {

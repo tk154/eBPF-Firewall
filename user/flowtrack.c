@@ -71,7 +71,9 @@ struct flowtrack_handle* flowtrack_init(struct cmd_args *args) {
     FW_INFO("Attaching BPF program to network interfaces ...\n");
 
     // Attach the program to the specified interface names
-    int rc = bpf_ifs_attach_program(flowtrack_h->bpf, args->if_names, args->if_count);
+    int rc = args->if_count == 0 ? bpf_attach_program(flowtrack_h->bpf) :
+        bpf_ifs_attach_program(flowtrack_h->bpf, args->if_names, args->if_count);
+
     if (rc != 0)
         goto bpf_unload_program;
 
@@ -188,17 +190,18 @@ get_next_key:
 }
 
 void flowtrack_destroy(struct flowtrack_handle* flowtrack_h, struct cmd_args *args) {
-    // De-Init netlink
-    netlink_destroy(flowtrack_h->netlink_h);
+    // Detach the program from the specified interface names
+    args->if_count == 0 ? bpf_detach_program(flowtrack_h->bpf) :
+        bpf_ifs_detach_program(flowtrack_h->bpf, args->if_names, args->if_count);
+
+    // Unload the BPF object from the kernel
+    bpf_unload_program(flowtrack_h->bpf);
 
     // De-Init conntrack
     conntrack_destroy(flowtrack_h->conntrack_h);
 
-    // Detach the program from the specified interface names
-    bpf_ifs_detach_program(flowtrack_h->bpf, args->if_names, args->if_count);
-
-    // Unload the BPF object from the kernel
-    bpf_unload_program(flowtrack_h->bpf);
+    // De-Init netlink
+    netlink_destroy(flowtrack_h->netlink_h);
 
     free(flowtrack_h);
 }
