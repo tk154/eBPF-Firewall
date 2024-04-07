@@ -28,8 +28,20 @@ struct conntrack_handle {
 struct nfct_get_cb_args {
     struct conntrack_handle *conntrack_h;
     struct flow_key_value *flow;
+    enum connection_state state;
 };
 
+
+static void log_key(struct flow_key *f_key, const char* prefix) {
+    if (fw_log_level >= FW_LOG_LEVEL_DEBUG) {
+        char src_ip[INET_ADDRSTRLEN], dest_ip[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &f_key->src_ip, src_ip, sizeof(src_ip));
+        inet_ntop(AF_INET, &f_key->dest_ip, dest_ip, sizeof(dest_ip));
+
+        FW_DEBUG("%s%u %hhu %s %hu %s %hu\n", prefix, f_key->ifindex, f_key->l4_proto,
+            src_ip, ntohs(f_key->src_port), dest_ip, ntohs(f_key->dest_port));
+    }
+}
 
 /**
  * Reads timeout values from /proc/sys/net/netfilter/nf_conntrack_<filename>
@@ -82,34 +94,30 @@ static int nfct_get_cb(enum nf_conntrack_msg_type type, struct nf_conntrack *ct,
     struct nfct_get_cb_args *args = data;
     struct conntrack_handle *conntrack_h = args->conntrack_h;
     struct flow_key_value *flow = args->flow;
+    enum connection_state *state = &args->state;
 
-    switch (flow->value.state) {
-        // If the flow was not marked as offloaded (yet)
-        case FLOW_NONE:
-            if (tcp_not_established(flow->key.l4_proto, ct))
-                // If the flow isn't established yet or anymore,
-                // the BPF program shouldn't forward its packages
-                break;
+    if (tcp_not_established(flow->key.l4_proto, ct)) {
+        // If the flow isn't established yet or anymore,
+        // the BPF program shouldn't forward its packages
+        *state = CONNECTION_NOT_ESTABLISHED;
+        return NFCT_CB_CONTINUE;
+    }
 
+    *state = CONNECTION_ESTABLISHED;
+
+    switch (flow->value.action) {
+        case ACTION_NONE:
             log_key(&flow->key, "\nNew: ");
             
             // Mark the flow as established so that the BPF program can take over now
             // Since the TTL is decremented, we must increment the checksum
             // Check for NAT afterward
-            flow->value.state         = FLOW_OFFLOADED;
             flow->value.l3_cksum_diff = htons(0x0100);
             check_nat(ct, flow);
         break;
 
-        // If the flow is currently offloaded
-        case FLOW_OFFLOADED:
-            if (tcp_not_established(flow->key.l4_proto, ct)) {
-                flow->value.state = FLOW_NONE;
-                break;
-            }
-
-            // If there are no new packages, there is nothing to do for this flow
-            if (flow->value.action != ACTION_REDIRECT || flow->value.idle > 0)
+        case ACTION_REDIRECT:
+            if (flow->value.idle > 0)
                 break;
 
             // Update the nf_conntrack timeout
@@ -120,12 +128,6 @@ static int nfct_get_cb(enum nf_conntrack_msg_type type, struct nf_conntrack *ct,
                 FW_ERROR("Error updating conntrack entry: %s (-%d).\n", strerror(errno), errno);
                 return NFCT_CB_FAILURE;
             }
-        break;
-
-        // If the flow is finished
-        case FLOW_FINISHED:
-            log_key(&flow->key, "\nFin: ");
-            flow->value.state = FLOW_NONE;
         break;
     }
 
@@ -190,9 +192,8 @@ int conntrack_lookup(struct conntrack_handle* conntrack_h, struct flow_key_value
     }
 
     // Try to find the connection inside nf_conntrack
-    int rc = nfct_query(conntrack_h->ct_handle, NFCT_Q_GET, ct);
-    if (rc != 0)
-        rc = errno;
+    int rc = nfct_query(conntrack_h->ct_handle, NFCT_Q_GET, ct) == 0 ?
+        args.state : errno == ENOENT ? CONNECTION_NOT_ESTABLISHED : -errno;
 
     // Unregister the callback
     nfct_callback_unregister(conntrack_h->ct_handle);

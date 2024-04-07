@@ -5,11 +5,11 @@
 #include <linux/if_ether.h>
 
 
-#define STRINGIZE(x) #x
-#define MAP_TO_STRING(map) STRINGIZE(map)           // Used to get the map name as a string (used for user space programs)
+#define STRINGIFY(x) #x
+#define MAP_NAME(map) STRINGIFY(map)           // Used to get the map name as a string (used for user space programs)
 
 #define FLOW_MAP         		flow_map
-#define FLOW_MAP_NAME    		MAP_TO_STRING(FLOW_MAP)
+#define FLOW_MAP_NAME    		MAP_NAME(FLOW_MAP)
 
 
 struct flow_key {
@@ -20,7 +20,7 @@ struct flow_key {
 	__be32 dest_ip;
 	__be16 src_port;
 	__be16 dest_port;
-	//__u16  vlan_id;
+	__u16  vlan_id;
 	__u8   l4_proto;
 };
 
@@ -46,27 +46,22 @@ struct flow_value {
 	struct nat_entry n_entry;
 	__u32 idle;
 	__sum16 l3_cksum_diff;
-	__u8 state, action;
+	__u8 action;
 };
 
 
 enum {
-	FLOW_NONE = 0,
-	FLOW_OFFLOADED,
-	FLOW_FINISHED
-};
-
-enum {
-	ACTION_PASS = 1,
+	ACTION_NONE,
+	ACTION_PASS,
 	ACTION_DROP,
 	ACTION_REDIRECT
 };
 
 enum {
-	REWRITE_SRC_IP    = 1,
-	REWRITE_DEST_IP   = 2,
-	REWRITE_SRC_PORT  = 4,
-	REWRITE_DEST_PORT = 8
+	REWRITE_SRC_IP    = (1U << 0),
+	REWRITE_DEST_IP   = (1U << 1),
+	REWRITE_SRC_PORT  = (1U << 2),
+	REWRITE_DEST_PORT = (1U << 3)
 };
 
 

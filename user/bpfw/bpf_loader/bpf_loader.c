@@ -19,8 +19,8 @@
 
 // Struct to keep BPF object and program pointers together
 struct bpf_object_program {
-    struct bpf_object*  obj;    // BPF object pointer
-    struct bpf_program* prog;   // BPF program pointer
+    struct bpf_object  *obj;    // BPF object pointer
+    struct bpf_program *prog;   // BPF program pointer
 };
 
 
@@ -186,16 +186,11 @@ void bpf_if_detach_program(struct bpf_object_program* bpf, char* ifname) {
 
         case BPF_PROG_TYPE_SCHED_CLS:
             DECLARE_LIBBPF_OPTS(bpf_tc_hook, hook, .ifindex = ifindex, .attach_point = BPF_TC_INGRESS);
-            DECLARE_LIBBPF_OPTS(bpf_tc_opts, opts, .prog_fd = bpf_program__fd(bpf->prog));
+            //DECLARE_LIBBPF_OPTS(bpf_tc_opts, opts, .prog_fd = bpf_program__fd(bpf->prog));
 
-            /* It should be possible to detach the TC program from the hook, 
-               check the hook if there is still another program attached to it
-               and destroy the hook if not, but bpf_tc_detach always returns Invalid argument(-22)
-               which means that TC programs cannot be detached, so for now just destroy the hook
-               although there might be other programs attached to it */
             //printf("detach: %d\n", bpf_tc_detach(&hook, &opts));
 
-            //if (bpf_tc_query(&hook, NULL) == -ENOENT) {
+            //if (bpf_tc_query(&hook, &opts) == -ENOENT) {
                 // Needed to really destroy the qdisc hook and not just detaching the programs from it
                 hook.attach_point |= BPF_TC_EGRESS;
                 bpf_tc_hook_destroy(&hook);

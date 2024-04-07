@@ -1,5 +1,5 @@
 ifdef OPENWRT_DIR
-include OpenWrt.mk
+include ../OpenWrt.mk
 endif
 
 LDLIBS := -lbpf -lelf -lz -lnetfilter_conntrack -lnfnetlink -lmnl
@@ -13,6 +13,7 @@ SOURCES := $(shell find -name "*.c" ! -name $(MAIN_SRC))
 OBJECTS := $(patsubst %.c,$(OUT_DIR)/%.o,$(notdir $(SOURCES)))
 
 vpath %.c $(dir $(SOURCES))
+
 
 $(OUT_BIN): $(MAIN_SRC) $(OBJECTS)
 	$(CC) $(CPPFLAGS) $^ -o $@ $(LDFLAGS) $(LDLIBS)

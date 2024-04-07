@@ -77,10 +77,14 @@ struct flowtrack_handle* flowtrack_init(struct cmd_args *args) {
     if (rc != 0)
         goto bpf_unload_program;
 
+    FW_INFO("Initializing nf_conntrack ...\n");
+
     // Read the conntrack info and save it inside the BPF conntrack map
     flowtrack_h->conntrack_h = conntrack_init();
     if (!flowtrack_h->conntrack_h)
         goto bpf_ifs_detach_program;
+
+    FW_INFO("Initializing netlink ...\n");
 
     flowtrack_h->netlink_h = netlink_init();
     if (!flowtrack_h->netlink_h)
@@ -130,12 +134,11 @@ int flowtrack_update(struct flowtrack_handle* flowtrack_h) {
             return errno;
         }
 
-        if (flow.key.l4_proto == IPPROTO_TCP && flow.value.idle >= flowtrack_h->tcp_flow_timeout ||
-            flow.key.l4_proto == IPPROTO_UDP && flow.value.idle >= flowtrack_h->udp_flow_timeout)
+        __u32 idle = flow.value.idle + flowtrack_h->map_poll_sec;
+
+        if (flow.key.l4_proto == IPPROTO_TCP && idle >= flowtrack_h->tcp_flow_timeout ||
+            flow.key.l4_proto == IPPROTO_UDP && idle >= flowtrack_h->udp_flow_timeout)
         {
-            if (flow.value.state == FLOW_OFFLOADED)
-                log_key(&flow.key, "\nTim: ");
-            
             // If no flow could be found, it is finished or a timeout occured
             // So delete it from the BPF flow map
             if (bpf_map_delete_elem(flowtrack_h->flow_map_fd, &flow.key) != 0) {
@@ -146,29 +149,29 @@ int flowtrack_update(struct flowtrack_handle* flowtrack_h) {
             goto get_next_key;
         }
 
-        __u8 old_state = flow.value.state;
         rc = conntrack_lookup(flowtrack_h->conntrack_h, &flow);
-
-        if (rc == ENOENT)
-            /* It could be possible that we have received the package here through the BPF map
-                * before it was processed by nf_conntrack, or it has been dropped
+        switch (rc) {
+            case CONNECTION_NOT_ESTABLISHED:
+                /* It could be possible that we have received the package here through the BPF map
+                *  before it was processed by nf_conntrack, or it has been dropped
                 */
-            flow.value.state = FLOW_NONE;
-        else if (rc != 0) {
-            FW_ERROR("Conntrack lookup error: %s (-%d).\n", strerror(errno), errno);
-            return rc;
-        }
+                flow.value.action = ACTION_NONE;
+            break;
 
-        __u8 new_state = flow.value.state;
-        if (old_state != FLOW_OFFLOADED && new_state == FLOW_OFFLOADED) {
-            rc = netlink_get_next_hop(flowtrack_h->netlink_h, &flow);
-            if (rc != 0)
+            case CONNECTION_ESTABLISHED:
+                if (flow.value.action == ACTION_NONE) {
+                    rc = netlink_get_next_hop(flowtrack_h->netlink_h, &flow);
+                    if (rc != 0)
+                        return rc;
+                }
+            break;
+
+            default:
+                FW_ERROR("Conntrack lookup error: %s (-%d).\n", strerror(errno), errno);
                 return rc;
         }
-        else if (old_state == FLOW_OFFLOADED && new_state != FLOW_OFFLOADED)
-            log_key(&flow.key, "\nExp: ");
 
-        flow.value.idle += flowtrack_h->map_poll_sec;
+        flow.value.idle = idle;
 
         // Update the BPF flow entry, break out on error
         if (bpf_map_update_elem(flowtrack_h->flow_map_fd, &flow.key, &flow.value, BPF_EXIST) != 0) {

@@ -65,6 +65,7 @@ __always_inline void reverse_flow_key(struct flow_key *f_key, struct flow_value 
 	f_key->dest_port = src_port;
 
 	f_key->ifindex   = f_value->next_h.ifindex;
+	f_key->vlan_id   = f_value->next_h.vlan_id;
 }
 
 __always_inline bool tcp_finished(struct flow_key *f_key, struct flow_value *f_value, struct tcp_flags flags) {
@@ -72,14 +73,14 @@ __always_inline bool tcp_finished(struct flow_key *f_key, struct flow_value *f_v
 		return false;
 
 	// Mark the flow as finished
-	f_value->state = FLOW_FINISHED;
+	f_value->action = ACTION_NONE;
 
 	// Also mark the flow as finished for the reverse direction, if there is one
 	reverse_flow_key(f_key, f_value);
 
 	f_value = bpf_map_lookup_elem(&FLOW_MAP, f_key);
 	if (f_value)
-		f_value->state = FLOW_FINISHED;
+		f_value->action = ACTION_NONE;
 
 	#if BPF_LOG_LEVEL >= BPF_LOG_LEVEL_INFO
 		if (flags.fin) BPF_INFO("FIN");
@@ -184,55 +185,6 @@ __always_inline int check_vlan(struct BPFW_CTX *ctx, struct ethhdr **ethh, __be1
 		*ethh = (void*)(long)ctx->data;
 #endif
 	}
-
-/*#if defined(XDP_PROGRAM)
-	if (!packet_vlan && next_hop_vlan) {
-		if (bpf_xdp_adjust_head(ctx, -(int)sizeof(struct vlan_hdr)) != 0)
-			return -1;
-
-		goto add_vlan_hdr;
-	}
-	else if (packet_vlan && !next_hop_vlan) {
-		if (bpf_xdp_adjust_head(ctx, sizeof(struct vlan_hdr)) != 0)
-			return -1;
-	}
-	else
-		return 0;
-
-#elif defined(TC_PROGRAM)
-	if (!packet_vlan && next_hop_vlan) {
-		if (bpf_skb_vlan_push(ctx, ETH_P_8021Q, next_hop_vlan) != 0)
-			return -1;
-	}
-	else if (packet_vlan && !next_hop_vlan) {
-		if (bpf_skb_vlan_pop(ctx) != 0)
-			return -1;
-	}
-	else
-		return 0;
-#endif
-
-	if (ctx->data + sizeof(struct ethhdr) > ctx->data_end)
-		return -1;
-
-	*ethh = (void*)(long)ctx->data;
-#if defined(XDP_PROGRAM)
-	(*ethh)->h_proto = h_proto;
-#endif
-	return 0;
-
-#if defined(XDP_PROGRAM)
-add_vlan_hdr:
-	if (ctx->data + sizeof(struct ethhdr) + sizeof(struct vlan_hdr) > ctx->data_end)
-		return -1;
-
-	*ethh = (void*)(long)ctx->data;
-	(*ethh)->h_proto = bpf_htons(ETH_P_8021Q);
-
-	struct vlan_hdr *vlan_h = (struct vlan_hdr*)(*ethh + 1);
-	vlan_h->h_vlan_TCI = bpf_htons(next_hop_vlan);
-	vlan_h->h_vlan_encapsulated_proto = h_proto;
-#endif*/
 
 	return 0;
 }
@@ -358,7 +310,7 @@ int fw_func(struct BPFW_CTX *ctx) {
 	// Fill the flow key
 	struct flow_key f_key = {};
 	f_key.ifindex = ctx->ingress_ifindex;
-	//f_key.vlan_id = vlan_id;
+	f_key.vlan_id = vlan_id;
 	f_key.src_ip = iph->saddr;
 	f_key.dest_ip = iph->daddr;
 	f_key.src_port = *sport;
@@ -374,12 +326,6 @@ int fw_func(struct BPFW_CTX *ctx) {
 
 		return BPFW_PASS;
 	}
-
-	// Pass the package to the network stack if the connection is not yet or anymore established
-	if (f_value->state != FLOW_OFFLOADED)
-		return BPFW_PASS;
-
-	BPF_DEBUG("Flow is offloaded");
 
 	// Reset the timeout
 	f_value->idle = 0;

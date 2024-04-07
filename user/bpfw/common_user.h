@@ -6,7 +6,7 @@
 #include <arpa/inet.h>
 #include <linux/bpf.h>
 
-#include "../common.h"
+#include "../../common.h"
 
 
 struct flow_key_value {
@@ -50,18 +50,6 @@ extern int fw_log_level;
 #define FW_VERBOSE(format, ...) \
     do { if (fw_log_level >= FW_LOG_LEVEL_VERBOSE) \
         printf(format, ##__VA_ARGS__); } while (0)
-
-
-static void log_key(struct flow_key *f_key, const char* prefix) {
-    if (fw_log_level >= FW_LOG_LEVEL_DEBUG) {
-        char src_ip[INET_ADDRSTRLEN], dest_ip[INET_ADDRSTRLEN];
-        inet_ntop(AF_INET, &f_key->src_ip, src_ip, sizeof(src_ip));
-        inet_ntop(AF_INET, &f_key->dest_ip, dest_ip, sizeof(dest_ip));
-
-        FW_DEBUG("%s%u %hhu %s %hu %s %hu\n", prefix, f_key->ifindex, f_key->l4_proto,
-            src_ip, ntohs(f_key->src_port), dest_ip, ntohs(f_key->dest_port));
-    }
-}
 
 
 #endif

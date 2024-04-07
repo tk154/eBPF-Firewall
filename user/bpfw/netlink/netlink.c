@@ -6,7 +6,6 @@
 #include <libmnl/libmnl.h>
 
 #include "../common_user.h"
-#include "../../common.h"
 
 
 // Size of the dynamically allocated Netlink Buffer
@@ -148,7 +147,7 @@ static int get_route(struct netlink_handle* netlink_h, struct flow_key_value* fl
     // Send request and receive response
     int rc = send_request(netlink_h);
     if (rc != 0) {
-        FW_ERROR("%s request error.\n", STRINGIZE(RTM_GETROUTE));
+        FW_ERROR("%s request error.\n", STRINGIFY(RTM_GETROUTE));
         return rc;
     }
 
@@ -160,12 +159,7 @@ static int get_route(struct netlink_handle* netlink_h, struct flow_key_value* fl
             flow->value.action = ACTION_DROP;
             return 0;
 
-        case RTN_LOCAL:
-            flow->value.action = ACTION_PASS;
-            return 0;
-
         default:
-            FW_DEBUG("rtm_type: %u\n", rtm->rtm_type);
             flow->value.action = ACTION_PASS;
             return 0;
     }
@@ -174,7 +168,7 @@ static int get_route(struct netlink_handle* netlink_h, struct flow_key_value* fl
     mnl_attr_parse(nlh, sizeof(*rtm), mnl_attr_parse_cb, attr);
 
     if (!attr[RTA_OIF]) {
-        FW_ERROR("%s didn't return output ifindex.\n", STRINGIZE(RTM_GETROUTE));
+        FW_ERROR("%s didn't return output ifindex.\n", STRINGIFY(RTM_GETROUTE));
         return -1;
     }
 
@@ -203,7 +197,7 @@ static int get_neigh(struct netlink_handle* netlink_h, struct flow_key_value* fl
     // Send request and receive response
     int rc = send_request(netlink_h);
     if (rc != 0) {
-        FW_ERROR("%s request error.\n", STRINGIZE(RTM_GETNEIGH));
+        FW_ERROR("%s request error.\n", STRINGIFY(RTM_GETNEIGH));
         return rc;
     }
 
@@ -211,7 +205,7 @@ static int get_neigh(struct netlink_handle* netlink_h, struct flow_key_value* fl
     mnl_attr_parse(nlh, sizeof(*ndm), mnl_attr_parse_cb, attr);
 
     if (!attr[NDA_LLADDR]) {
-        FW_ERROR("%s didn't return destination MAC address.\n", STRINGIZE(RTM_GETNEIGH));
+        FW_ERROR("%s didn't return destination MAC address.\n", STRINGIFY(RTM_GETNEIGH));
         return -1;
     }
 

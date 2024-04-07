@@ -1,2 +1,2 @@
 kernel/obj/*
-user/bin/*
+user/*/bin/*

@@ -6,6 +6,12 @@
 
 struct conntrack_handle;
 
+enum connection_state {
+    CONNECTION_NOT_ESTABLISHED,
+    CONNECTION_ESTABLISHED
+};
+
+
 /**
  * Read conntrack info via libnetfilter_conntrack and save it into the BPF conntrack map.
  * Dynamically allocates memory, conntrack_destroy should be called when finished.
