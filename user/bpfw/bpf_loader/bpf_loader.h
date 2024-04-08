@@ -28,14 +28,14 @@ void bpf_unload_program(struct bpf_object_program* bpf);
  * @param ifname The name of the network interface where the program should be attached to
  * @returns 0 on success, -1 if the program is not of type XDP or TC, errno for other errors
  * **/
-int bpf_if_attach_program(struct bpf_object_program* bpf, char* ifname);
+int bpf_if_attach_program(struct bpf_object_program* bpf, char* ifname, __u32 xdp_flags);
 
 /**
  * Detach a BPF program from an interface
  * @param prog A pointer to the to-be-unattached BPF program
  * @param ifname The name of the network interface where the program should be detached from
  * **/
-void bpf_if_detach_program(struct bpf_object_program* bpf, char* ifname);
+void bpf_if_detach_program(struct bpf_object_program* bpf, char* ifname, __u32 xdp_flags);
 
 /**
  * Attach a BPF program to multiple interfaces
@@ -44,7 +44,7 @@ void bpf_if_detach_program(struct bpf_object_program* bpf, char* ifname);
  * @param ifname_size The size of the ifnames array
  * @returns 0 on success, -1 if the program is not of type XDP or TC, errno for other errors
  * **/
-int bpf_ifs_attach_program(struct bpf_object_program* bpf, char* ifnames[], unsigned int ifname_size);
+int bpf_ifs_attach_program(struct bpf_object_program* bpf, char* ifnames[], unsigned int ifname_size, __u32 xdp_flags);
 
 /**
  * Detach a BPF program from multiple interfaces
@@ -52,21 +52,21 @@ int bpf_ifs_attach_program(struct bpf_object_program* bpf, char* ifnames[], unsi
  * @param ifnames An array containing the interface names where the program should be detached from
  * @param ifname_size The size of the ifnames array
  * **/
-void bpf_ifs_detach_program(struct bpf_object_program* bpf, char* ifnames[], unsigned int ifname_size);
+void bpf_ifs_detach_program(struct bpf_object_program* bpf, char* ifnames[], unsigned int ifname_size, __u32 xdp_flags);
 
 /**
  * Attach a BPF program to all non-virtual network interfaces
  * @param prog A pointer to the to-be-attached BPF program
  * @returns 0 on success, -1 if the program is not of type XDP or TC, errno for other errors
  * **/
-int bpf_attach_program(struct bpf_object_program* bpf);
+int bpf_attach_program(struct bpf_object_program* bpf, __u32 xdp_flags);
 
 /**
  * Detach a BPF program from all non-virtual network interfaces
  * @param prog A pointer to the to-be-detached BPF program
  * @returns 0 on success, errno if the network interfaces couldn't be retrieved
  * **/
-int bpf_detach_program(struct bpf_object_program* bpf);
+int bpf_detach_program(struct bpf_object_program* bpf, __u32 xdp_flags);
 
 int bpf_get_map_fd(struct bpf_object_program* bpf, const char *map_name);
 

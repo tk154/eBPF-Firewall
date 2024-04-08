@@ -16,6 +16,7 @@ struct flow_key_value {
 
 struct cmd_args {
     enum bpf_prog_type prog_type;
+    __u32 xdp_flags;
     char* prog_path;
     char** if_names;
     unsigned int if_count;

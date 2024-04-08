@@ -10,17 +10,36 @@
 #include <limits.h>
 #include <unistd.h>
 
+#include <linux/if_link.h>
+
 #include "common_user.h"
 #include "flowtrack.h"
+
+#define BPF_DEFAULT_MAP_POLL_SEC 5
 
 
 int fw_log_level = FW_LOG_LEVEL_INFO;
 struct flowtrack_handle* flowtrack_h;
 
 struct cmd_args args = {
-    .map_poll_sec = 5
+    .map_poll_sec = BPF_DEFAULT_MAP_POLL_SEC
 };
 
+
+static void print_usage(char* prog) {
+    FW_ERROR("Usage: %s hook bpf_object_path [network_interface(s)...] [options]\n\n", prog);
+
+    FW_ERROR("Hooks:\n");
+    FW_ERROR("  xdp       \tXDP hook\n");
+    FW_ERROR("  xdpgeneric\tGeneric/SKB XDP hook\n");
+    FW_ERROR("  xdpdrv    \tDriver/Native XDP hook\n");
+    FW_ERROR("  xdpoffload\tXDP offloaded into hardware\n");
+    FW_ERROR("  tc        \tTC hoook\n\n");
+
+    FW_ERROR("Options:\n");
+    FW_ERROR("  -i, --interval \tBPF map poll interval in seconds (Default: %u)\n", BPF_DEFAULT_MAP_POLL_SEC);
+    FW_ERROR("  -l, --log-level\tLog level, can be error, warning, info, debug, verbose (Default: info)\n");
+}
 
 // Checks if the given arguments are valid and determines the BPF hook
 static bool check_cmd_args(int argc, char* argv[]) {
@@ -68,8 +87,24 @@ static bool check_cmd_args(int argc, char* argv[]) {
 
     // Check the hook argument
     char* prog_hook = argv[optind];
-    if (strcmp(prog_hook, "xdp") == 0)
+    int xdp_cmp = strcmp(prog_hook, "xdp");
+
+    if (xdp_cmp >= 0) {
         args.prog_type = BPF_PROG_TYPE_XDP;
+
+        if (xdp_cmp > 0) {
+            size_t arg_len = strlen(prog_hook);
+
+            if (strncmp(prog_hook, "xdpgeneric", arg_len) == 0)
+                args.xdp_flags = XDP_FLAGS_SKB_MODE;
+            else if (strncmp(prog_hook, "xdpdrv", arg_len) == 0)
+                args.xdp_flags = XDP_FLAGS_DRV_MODE;
+            else if (strncmp(prog_hook, "xdpoffload", arg_len) == 0)
+                args.xdp_flags = XDP_FLAGS_HW_MODE;
+            else
+                return false;
+        }
+    }
     else if (strcmp(prog_hook, "tc") == 0)
         args.prog_type = BPF_PROG_TYPE_SCHED_CLS;
     else
@@ -96,7 +131,7 @@ static void signal_handler(int sig) {
 int main(int argc, char* argv[]) {
     // Check if the arguments are provided correctly
     if (!check_cmd_args(argc, argv)) {
-        FW_ERROR("Usage: %s {xdp|tc} bpf_object_path [network_interface(s)...] [options]\n", argv[0]);
+        print_usage(argv[0]);
         return EXIT_FAILURE;
     }
 

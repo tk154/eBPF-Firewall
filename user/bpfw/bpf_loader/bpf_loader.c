@@ -14,9 +14,6 @@
 #include "../common_user.h"
 
 
-// For now, attach XDP programs in SKB/Generic mode
-#define XDP_ATTACH_FLAGS XDP_FLAGS_SKB_MODE
-
 // Struct to keep BPF object and program pointers together
 struct bpf_object_program {
     struct bpf_object  *obj;    // BPF object pointer
@@ -118,7 +115,7 @@ void bpf_unload_program(struct bpf_object_program* bpf) {
     free(bpf);
 }
 
-int bpf_if_attach_program(struct bpf_object_program* bpf, char* ifname) {
+int bpf_if_attach_program(struct bpf_object_program* bpf, char* ifname, __u32 xdp_flags) {
     // Get the interface index from the interface name
     unsigned int ifindex = if_nametoindex(ifname);
     if (ifindex == 0) {
@@ -130,8 +127,8 @@ int bpf_if_attach_program(struct bpf_object_program* bpf, char* ifname) {
     switch (prog_type) {
         case BPF_PROG_TYPE_XDP:
             // Attach the program to the XDP hook
-            if (bpf_xdp_attach(ifindex, bpf_program__fd(bpf->prog), XDP_ATTACH_FLAGS, NULL) != 0) {
-                FW_ERROR("Error attaching XDP program: %s (-%d).\n", strerror(errno), errno);
+            if (bpf_xdp_attach(ifindex, bpf_program__fd(bpf->prog), xdp_flags, NULL) != 0) {
+                FW_ERROR("Error attaching XDP program to %s: %s (-%d).\n", ifname, strerror(errno), errno);
                 return errno;
             }
         break;
@@ -152,7 +149,7 @@ int bpf_if_attach_program(struct bpf_object_program* bpf, char* ifname) {
 
             // Attach the TC prgram to the created hook
             if (bpf_tc_attach(&hook, &opts) != 0) {
-                FW_ERROR("Error attaching TC program on %s: %s (-%d).\n", ifname, strerror(errno), errno);
+                FW_ERROR("Error attaching TC program to %s: %s (-%d).\n", ifname, strerror(errno), errno);
                 hook.attach_point |= BPF_TC_EGRESS;
                 bpf_tc_hook_destroy(&hook);
 
@@ -169,7 +166,7 @@ int bpf_if_attach_program(struct bpf_object_program* bpf, char* ifname) {
     return 0;
 }
 
-void bpf_if_detach_program(struct bpf_object_program* bpf, char* ifname) {
+void bpf_if_detach_program(struct bpf_object_program* bpf, char* ifname, __u32 xdp_flags) {
     // Get the interface index from the interface name
     unsigned int ifindex = if_nametoindex(ifname);
     if (ifindex == 0) {
@@ -181,7 +178,7 @@ void bpf_if_detach_program(struct bpf_object_program* bpf, char* ifname) {
     switch (prog_type) {
         case BPF_PROG_TYPE_XDP:
             // Detach the program from the XDP hook
-            bpf_xdp_detach(ifindex, XDP_ATTACH_FLAGS, NULL);
+            bpf_xdp_detach(ifindex, xdp_flags, NULL);
         break;
 
         case BPF_PROG_TYPE_SCHED_CLS:
@@ -203,14 +200,14 @@ void bpf_if_detach_program(struct bpf_object_program* bpf, char* ifname) {
     }
 }
 
-int bpf_ifs_attach_program(struct bpf_object_program* bpf, char* ifnames[], unsigned int ifname_size) {
+int bpf_ifs_attach_program(struct bpf_object_program* bpf, char* ifnames[], unsigned int ifname_size, __u32 xdp_flags) {
     // Iterate to all the given interfaces and attache the program to them
     for (int i = 0; i < ifname_size; i++) {
-        int rc = bpf_if_attach_program(bpf, ifnames[i]);
+        int rc = bpf_if_attach_program(bpf, ifnames[i], xdp_flags);
         if (rc != 0) {
             // If an error occured while attaching to one interface, detach all the already attached programs
             while (--i >= 0)
-                bpf_if_detach_program(bpf, ifnames[i]);
+                bpf_if_detach_program(bpf, ifnames[i], xdp_flags);
 
             return rc;
         }
@@ -219,13 +216,13 @@ int bpf_ifs_attach_program(struct bpf_object_program* bpf, char* ifnames[], unsi
     return 0;
 }
 
-void bpf_ifs_detach_program(struct bpf_object_program* bpf, char* ifnames[], unsigned int ifname_size) {
+void bpf_ifs_detach_program(struct bpf_object_program* bpf, char* ifnames[], unsigned int ifname_size, __u32 xdp_flags) {
     // Iterate to all the given interfaces and detache the program from them
     for (int i = 0; i < ifname_size; i++)
-        bpf_if_detach_program(bpf, ifnames[i]);
+        bpf_if_detach_program(bpf, ifnames[i], xdp_flags);
 }
 
-int bpf_attach_program(struct bpf_object_program* bpf) {
+int bpf_attach_program(struct bpf_object_program* bpf, __u32 xdp_flags) {
     // Retrieve the name and index of all network interfaces
     struct if_nameindex* ifaces = if_nameindex();
     if (!ifaces) {
@@ -238,12 +235,12 @@ int bpf_attach_program(struct bpf_object_program* bpf) {
         if (!if_should_attach(iface->if_name))
             continue;
 
-        rc = bpf_if_attach_program(bpf, iface->if_name);
+        rc = bpf_if_attach_program(bpf, iface->if_name, xdp_flags);
         if (rc != 0) {
             // If an error occured while attaching to one interface, detach all the already attached programs
             while (--iface >= ifaces)
                 if (if_should_attach(iface->if_name))
-                    bpf_if_detach_program(bpf, iface->if_name);
+                    bpf_if_detach_program(bpf, iface->if_name, xdp_flags);
 
             break;
         }
@@ -255,7 +252,7 @@ int bpf_attach_program(struct bpf_object_program* bpf) {
     return rc;
 }
 
-int bpf_detach_program(struct bpf_object_program* bpf) {
+int bpf_detach_program(struct bpf_object_program* bpf, __u32 xdp_flags) {
     // Retrieve the name and index of all network interfaces
     struct if_nameindex* ifaces = if_nameindex();
     if (!ifaces) {
@@ -265,7 +262,7 @@ int bpf_detach_program(struct bpf_object_program* bpf) {
 
     for (struct if_nameindex* iface = ifaces; iface->if_index && iface->if_name; iface++)
         if (if_should_attach(iface->if_name))
-            bpf_if_detach_program(bpf, iface->if_name);
+            bpf_if_detach_program(bpf, iface->if_name, xdp_flags);
 
     // Retrieved interfaces are dynamically allocated, so they must be freed
     if_freenameindex(ifaces);
