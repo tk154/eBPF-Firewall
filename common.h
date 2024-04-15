@@ -2,7 +2,6 @@
 #define BPFW_COMMON_H
 
 #include <linux/types.h>
-#include <linux/if_ether.h>
 
 
 #define STRINGIFY(x) #x
@@ -15,26 +14,27 @@
 struct flow_key {
 	//__u8 src_mac[ETH_ALEN];
 	//__u8 dest_mac[ETH_ALEN];
-    __u32  ifindex;
-	__be32 src_ip;
-	__be32 dest_ip;
+	__u8   src_ip[16];
+	__u8   dest_ip[16];
+	__u32  ifindex;
 	__be16 src_port;
 	__be16 dest_port;
 	__u16  vlan_id;
-	__u8   l4_proto;
+	__u8   family;
+	__u8   proto;
 };
 
 
 struct next_hop {
-	__u8  src_mac[ETH_ALEN];
-	__u8  dest_mac[ETH_ALEN];
+	__u8  src_mac[6];
+	__u8  dest_mac[6];
 	__u32 ifindex;
 	__u16 vlan_id;
 };
 
 struct nat_entry {
-	__be32  src_ip;
-	__be32  dest_ip;
+	__u8 	src_ip[16];
+	__u8 	dest_ip[16];
 	__be16  src_port;
 	__be16  dest_port;
 	__sum16 l4_cksum_diff;
@@ -44,9 +44,9 @@ struct nat_entry {
 struct flow_value {
 	struct next_hop next_h;
 	struct nat_entry n_entry;
-	__u32 idle;
-	__sum16 l3_cksum_diff;
-	__u8 action;
+	__u32   idle;
+	__sum16 ipv4_cksum_diff;
+	__u8    action;
 };
 
 
@@ -63,6 +63,22 @@ enum {
 	REWRITE_SRC_PORT  = (1U << 2),
 	REWRITE_DEST_PORT = (1U << 3)
 };
+
+
+#ifndef memcpy
+#define memcpy(dest, src, n) __builtin_memcpy(dest, src, n)
+#endif
+
+static void* ipcpy(void *dest, const void* src, __u8 family) {
+    switch (family) {
+        case AF_INET:
+            return memcpy(dest, src, 4);
+        case AF_INET6:
+            return memcpy(dest, src, 16);
+    }
+
+    return NULL;
+}
 
 
 #endif

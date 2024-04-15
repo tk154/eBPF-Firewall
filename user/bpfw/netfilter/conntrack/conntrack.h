@@ -6,7 +6,8 @@
 
 struct conntrack_handle;
 
-enum connection_state {
+enum conntrack_conn_state {
+    CONNECTION_NOT_FOUND,
     CONNECTION_NOT_ESTABLISHED,
     CONNECTION_ESTABLISHED
 };

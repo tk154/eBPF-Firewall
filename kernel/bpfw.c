@@ -3,6 +3,7 @@
 #include <linux/bpf.h>
 #include <linux/if_ether.h>
 #include <linux/ip.h>
+#include <linux/ipv6.h>
 #include <linux/tcp.h>
 #include <linux/udp.h>
 
@@ -10,9 +11,8 @@
 #include <bpf/bpf_endian.h>
 #include <bpf/bpf_helpers.h>
 
-#define BPF_LOG_LEVEL BPF_LOG_LEVEL_INFO
+#define BPF_LOG_LEVEL BPF_LOG_LEVEL_WARN
 #include "common_kern.h"
-#include "../common.h"
 
 
 struct {
@@ -25,36 +25,21 @@ struct {
 } FLOW_MAP SEC(".maps");
 
 
-// Declare the VLAN header struct because it's only included in the kernel source header <linux/if_vlan.h>
-struct vlan_hdr {
-	__be16 h_vlan_TCI;					// priority and VLAN ID
-	__be16 h_vlan_encapsulated_proto;	// packet type ID or len
-};
-
-// tcphdr from <linux/tcp.h> uses the host endianness, instead of the compiler endianness
-struct tcp_flags {
-#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-	__u8 fin:1, syn:1, rst:1, psh:1, ack:1, urg:1, ece:1, cwr:1;
-#elif __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
-	__u8 cwr:1, ece:1, urg:1, ack:1, psh:1, rst:1, syn:1, fin:1;
-#endif
-};
-#define TCP_FLAGS_OFFSET 13
-
-
 /**
  * Helper to swap the src and dest IP and the src and dest port of a flow key
  * @param f_key Pointer to the flow key
  * @param f_value Pointer to the flow value
  * **/
 __always_inline void reverse_flow_key(struct flow_key *f_key, struct flow_value *f_value) {
-	__be32 src_ip    = f_value->n_entry.rewrite_flag & REWRITE_SRC_IP ?
-					   f_value->n_entry.src_ip : f_key->src_ip;
+	__u8 src_ip[16];
 
-	f_key->src_ip    = f_value->n_entry.rewrite_flag & REWRITE_DEST_IP ?
-					   f_value->n_entry.dest_ip : f_key->dest_ip;
+	ipcpy(src_ip, f_value->n_entry.rewrite_flag & REWRITE_SRC_IP ?
+		f_value->n_entry.src_ip : f_key->src_ip, f_key->family);
 
-	f_key->dest_ip   = src_ip;
+	ipcpy(f_key->src_ip, f_value->n_entry.rewrite_flag & REWRITE_DEST_IP ?
+		f_value->n_entry.dest_ip : f_key->dest_ip, f_key->family);
+
+	ipcpy(f_key->dest_ip, src_ip, f_key->family);
 
 	__be16 src_port  = f_value->n_entry.rewrite_flag & REWRITE_SRC_PORT ?
 					   f_value->n_entry.src_port : f_key->src_port;
@@ -82,10 +67,7 @@ __always_inline bool tcp_finished(struct flow_key *f_key, struct flow_value *f_v
 	if (f_value)
 		f_value->action = ACTION_NONE;
 
-	#if BPF_LOG_LEVEL >= BPF_LOG_LEVEL_INFO
-		if (flags.fin) BPF_INFO("FIN");
-		if (flags.rst) BPF_INFO("RST");
-	#endif
+	BPF_LOG_KEY(flags.fin ? "FIN" : "RST", f_key);
 
 	return true;
 }
@@ -109,18 +91,19 @@ __always_inline void cksum_add(__sum16 *cksum, __sum16 addend) {
  * @param dport Pointer to the destination port
  * @param cksum Pointer to the L4 checksum
  * **/
-__always_inline void apply_nat(struct nat_entry *n_entry, struct iphdr *iph, __be16 *sport, __be16 *dport, __sum16 *cksum) {
+__always_inline void apply_nat(struct nat_entry *n_entry, __u8 family, void *src_ip, void *dest_ip,
+								__be16 *sport, __be16 *dport, __sum16 *l4_cksum) {
 	// Check if NAT must be applied
 	if (!n_entry->rewrite_flag)
 		return;
 
 	// Rewrite the source IP
 	if (n_entry->rewrite_flag & REWRITE_SRC_IP)
-		iph->saddr = n_entry->src_ip;
+		ipcpy(src_ip, n_entry->src_ip, family);
 
 	// Rewrite the destination IP
 	if (n_entry->rewrite_flag & REWRITE_DEST_IP)
-		iph->daddr = n_entry->dest_ip;
+		ipcpy(dest_ip, n_entry->dest_ip, family);
 
 	// Rewrite the source port
 	if (n_entry->rewrite_flag & REWRITE_SRC_PORT)
@@ -131,7 +114,7 @@ __always_inline void apply_nat(struct nat_entry *n_entry, struct iphdr *iph, __b
 		*dport = n_entry->dest_port;
 
 	// Adjust the L4 checksum
-	cksum_add(cksum, n_entry->l4_cksum_diff);
+	cksum_add(l4_cksum, n_entry->l4_cksum_diff);
 }
 
 __always_inline int check_vlan(struct BPFW_CTX *ctx, struct ethhdr **ethh, __be16 h_proto, __u16 packet_vlan, __u16 next_hop_vlan) {
@@ -139,8 +122,10 @@ __always_inline int check_vlan(struct BPFW_CTX *ctx, struct ethhdr **ethh, __be1
 		BPF_DEBUG("Add VLAN Tag %u", next_hop_vlan);
 
 #if defined(XDP_PROGRAM)
-		if (bpf_xdp_adjust_head(ctx, -(int)sizeof(struct vlan_hdr)) != 0)
+		if (bpf_xdp_adjust_head(ctx, -(int)sizeof(struct vlan_hdr)) != 0) {
+			BPF_WARN("bpf_xdp_adjust_head error");
 			return -1;
+		}
 
 		if (ctx->data + sizeof(struct ethhdr) + sizeof(struct vlan_hdr) > ctx->data_end)
 			return -1;
@@ -153,8 +138,10 @@ __always_inline int check_vlan(struct BPFW_CTX *ctx, struct ethhdr **ethh, __be1
 		vlan_h->h_vlan_encapsulated_proto = h_proto;
 		
 #elif defined(TC_PROGRAM)
-		if (bpf_skb_vlan_push(ctx, ETH_P_8021Q, next_hop_vlan) != 0)
+		if (bpf_skb_vlan_push(ctx, ETH_P_8021Q, next_hop_vlan) != 0) {
+			BPF_WARN("bpf_skb_vlan_push error");
 			return -1;
+		}
 
 		if (ctx->data + sizeof(struct ethhdr) > ctx->data_end)
 			return -1;
@@ -162,12 +149,15 @@ __always_inline int check_vlan(struct BPFW_CTX *ctx, struct ethhdr **ethh, __be1
 		*ethh = (void*)(long)ctx->data;
 #endif
 	}
+
 	else if (packet_vlan && !next_hop_vlan) {
 		BPF_DEBUG("Remove VLAN Tag");
 
 #if defined(XDP_PROGRAM)
-		if (bpf_xdp_adjust_head(ctx, sizeof(struct vlan_hdr)) != 0)
+		if (bpf_xdp_adjust_head(ctx, sizeof(struct vlan_hdr)) != 0) {
+			BPF_WARN("bpf_xdp_adjust_head error");
 			return -1;
+		}
 
 		if (ctx->data + sizeof(struct ethhdr) > ctx->data_end)
 			return -1;
@@ -176,8 +166,10 @@ __always_inline int check_vlan(struct BPFW_CTX *ctx, struct ethhdr **ethh, __be1
 		(*ethh)->h_proto = h_proto;
 		
 #elif defined(TC_PROGRAM)
-		if (bpf_skb_vlan_pop(ctx) != 0)
+		if (bpf_skb_vlan_pop(ctx) != 0) {
+			BPF_WARN("bpf_skb_vlan_pop error");
 			return -1;
+		}
 
 		if (ctx->data + sizeof(struct ethhdr) > ctx->data_end)
 			return -1;
@@ -238,7 +230,7 @@ int fw_func(struct BPFW_CTX *ctx) {
 		parse_header(struct vlan_hdr, *vlan_h, data, data_end);
 
 		// Save the VLAN ID (last 12 Byte)
-        vlan_id = bpf_htons(vlan_h->h_vlan_TCI) & 0x0FFF;
+        vlan_id = bpf_ntohs(vlan_h->h_vlan_TCI) & 0x0FFF;
 
 		BPF_DEBUG("VLAN ID: %u", vlan_id);
 
@@ -254,25 +246,55 @@ int fw_func(struct BPFW_CTX *ctx) {
 	}
 #endif
 
-	if (h_proto != bpf_htons(ETH_P_IP)) {
-		BPF_DEBUG("h_proto: 0x%04x", h_proto);
-		return BPFW_PASS;
+	void *src_ip, *dest_ip;
+	__u8 family, proto, *ttl;
+	__sum16 *l3_cksum;
+
+	switch (h_proto) {
+		case bpf_ntohs(ETH_P_IP):;
+			// Parse the IPv4 header, will drop the package if out-of-bounds
+			parse_header(struct iphdr, *iph, data, data_end);
+
+			BPF_DEBUG_IPV4("Src IPv4: ", &iph->saddr);
+			BPF_DEBUG_IPV4("Dst IPv4: ", &iph->daddr);
+
+			family	= AF_INET;
+			src_ip 	= &iph->saddr;
+			dest_ip = &iph->daddr;
+
+			proto    =  iph->protocol;
+			ttl 	 = &iph->ttl;
+			l3_cksum = &iph->check;
+		break;
+
+		case bpf_ntohs(ETH_P_IPV6):;
+			// Parse the IPv4 header, will drop the package if out-of-bounds
+			parse_header(struct ipv6hdr, *ipv6h, data, data_end);
+
+			BPF_DEBUG_IPV6("Src IPv6: ", &ipv6h->saddr);
+			BPF_DEBUG_IPV6("Dst IPv6: ", &ipv6h->daddr);
+
+			family	= AF_INET6;
+			src_ip  = &ipv6h->saddr;
+			dest_ip = &ipv6h->daddr;
+
+			proto =  ipv6h->nexthdr;
+			ttl   = &ipv6h->hop_limit;
+		break;
+
+		default:
+			BPF_DEBUG("h_proto: 0x%04x", h_proto);
+			return BPFW_PASS;
 	}
-
-	// Parse the IPv4 header, will drop the package if out-of-bounds
-	parse_header(struct iphdr, *iph, data, data_end);
-
-	BPF_DEBUG_IP("Src IP: ", iph->saddr);
-	BPF_DEBUG_IP("Dst IP: ", iph->daddr);
 
 	// Pointers for possible NAT adjustments
 	__be16  *sport, *dport;
-	__sum16 *cksum;
+	__sum16 *l4_cksum;
 
 	// TCP Flags
 	struct tcp_flags flags = {};
 
-	switch (iph->protocol) {
+	switch (proto) {
 		case IPPROTO_TCP:;
 			// Parse the TCP header, will drop the package if out-of-bounds
 			parse_header(struct tcphdr, *tcph, data, data_end);
@@ -281,9 +303,9 @@ int fw_func(struct BPFW_CTX *ctx) {
 			BPF_DEBUG("TCP Dst Port: %u", bpf_ntohs(tcph->dest));
 
 			// For possible NAT adjustmenets
-			sport = &tcph->source;
-			dport = &tcph->dest;
-			cksum = &tcph->check;
+			sport 	 = &tcph->source;
+			dport 	 = &tcph->dest;
+			l4_cksum = &tcph->check;
 
 			// Save the TCP Flags
 			flags = *(struct tcp_flags*)((void*)tcph + TCP_FLAGS_OFFSET);
@@ -297,13 +319,13 @@ int fw_func(struct BPFW_CTX *ctx) {
 			BPF_DEBUG("UDP Dst Port: %u", bpf_ntohs(udph->dest));
 
 			// For possible NAT adjustmenets
-			sport = &udph->source;
-			dport = &udph->dest;
-			cksum = &udph->check;
+			sport 	 = &udph->source;
+			dport 	 = &udph->dest;
+			l4_cksum = &udph->check;
 		break;
 
 		default:
-			BPF_DEBUG("IP Protocol: %u", iph->protocol);
+			BPF_DEBUG("IP Protocol: %u", proto);
 			return BPFW_PASS;
 	}
 
@@ -311,18 +333,23 @@ int fw_func(struct BPFW_CTX *ctx) {
 	struct flow_key f_key = {};
 	f_key.ifindex = ctx->ingress_ifindex;
 	f_key.vlan_id = vlan_id;
-	f_key.src_ip = iph->saddr;
-	f_key.dest_ip = iph->daddr;
 	f_key.src_port = *sport;
 	f_key.dest_port = *dport;
-	f_key.l4_proto = iph->protocol;
+	f_key.family = family;
+	f_key.proto = proto;
+
+	ipcpy(f_key.src_ip, src_ip, family);
+	ipcpy(f_key.dest_ip, dest_ip, family);
 
 	// Check if a conntrack entry exists
 	struct flow_value* f_value = bpf_map_lookup_elem(&FLOW_MAP, &f_key);
 	if (!f_value) {
+		BPF_LOG_KEY("NEW", &f_key);
+
 		// If there is none, create a new one
 		struct flow_value f_value = {};
-		bpf_map_update_elem(&FLOW_MAP, &f_key, &f_value, BPF_NOEXIST);
+		if (bpf_map_update_elem(&FLOW_MAP, &f_key, &f_value, BPF_NOEXIST) != 0)
+			BPF_WARN("bpf_map_update_elem error");
 
 		return BPFW_PASS;
 	}
@@ -334,15 +361,17 @@ int fw_func(struct BPFW_CTX *ctx) {
 		case ACTION_REDIRECT:
 			// Pass the package to the network stack if 
 			// there is a FIN or RST or the TTL expired
-			if (tcp_finished(&f_key, f_value, flags) || iph->ttl <= 1)
+			if (tcp_finished(&f_key, f_value, flags) || *ttl <= 1)
 				return BPFW_PASS;
 
 			// Decrement the TTL, adjust the checksum
-			iph->ttl--;
-			cksum_add(&iph->check, f_value->l3_cksum_diff);
+			(*ttl)--;
+
+			if (family == AF_INET)
+				cksum_add(l3_cksum, f_value->ipv4_cksum_diff);
 
 			// Apply NAT
-			apply_nat(&f_value->n_entry, iph, sport, dport, cksum);
+			apply_nat(&f_value->n_entry, family, src_ip, dest_ip, sport, dport, l4_cksum);
 
 			if (check_vlan(ctx, &ethh, h_proto, vlan_id, f_value->next_h.vlan_id) != 0)
 				return BPFW_DROP;
@@ -356,7 +385,7 @@ int fw_func(struct BPFW_CTX *ctx) {
 
 		case ACTION_PASS:
 		default:
-			BPF_DEBUG("Pass package to network stack");
+			BPF_DEBUG("Pass package");
 			return BPFW_PASS;
 	}
 }

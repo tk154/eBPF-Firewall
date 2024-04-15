@@ -4,44 +4,30 @@
 #include <linux/types.h>
 
 
-/* From include/net/checksum.h */
+/* Modified versions originally from include/net/checksum.h */
 
-static inline __wsum csum_add(__wsum csum, __wsum addend) {
-	__u32 res = (__u32)csum + (__u32)addend;
-	return (__wsum)(res + (res < (__u32)addend));
+static __sum16 csum_add(__sum16 csum, const __be16 *add, size_t len) {
+	__u16 res = (__u16)csum;
+
+	for (size_t i = 0; i < len; i++) {
+		res += (__u16)add[i];
+		res += res < (__u16)add[i];
+	}
+
+	return (__sum16)res;
 }
 
-static inline __wsum csum_sub(__wsum csum, __wsum addend) {
-	return csum_add(csum, ~addend);
+static __sum16 csum_sub(__sum16 csum, const __be16 *sub, size_t len) {
+	__be16 sub_neg[len];
+	
+	for (size_t i = 0; i < len; i++)
+		sub_neg[i] = ~sub[i];
+
+	return csum_add(csum, sub_neg, len);
 }
 
-static inline __sum16 csum16_add(__sum16 csum, __be16 addend) {
-	__u16 res = (__u16)csum + (__u16)addend;
-	return (__sum16)(res + (res < (__u16)addend));
-}
-
-static inline __sum16 csum16_sub(__sum16 csum, __be16 addend) {
-	return csum16_add(csum, ~addend);
-}
-
-static inline __sum16 csum_fold(__wsum csum) {
-	csum = (csum & 0xFFFF) + (csum >> 16);
-	csum = (csum & 0xFFFF) + (csum >> 16);
-
-	return (__u16)~csum;
-}
-
-static inline __wsum csum_unfold(__sum16 n) {
-	return (__wsum)n;
-}
-
-static inline void csum_replace4(__sum16 *sum, __be32 from, __be32 to) {
-	__wsum tmp = csum_sub(~csum_unfold(*sum), (__wsum)from);
-	*sum = csum_fold(csum_add(tmp, (__wsum)to));
-}
-
-static inline void csum_replace2(__sum16 *sum, __be16 old, __be16 new) {
-	*sum = ~csum16_add(csum16_sub(~(*sum), old), new);
+static void csum_replace(__sum16 *csum, const __be16 *old, const __be16 *new, size_t len) {
+	*csum = ~csum_add(csum_sub(~(*csum), old, len), new, len);
 }
 
 

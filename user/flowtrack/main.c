@@ -38,8 +38,8 @@ int print_idle(__u32 idle) {
     return printf(" %u", idle);
 }
 
-int print_l4_proto(__u8 l4_proto) {
-    switch (l4_proto) {
+int print_proto(__u8 proto) {
+    switch (proto) {
         case IPPROTO_TCP:
             return fputs(" tcp", stdout);
         case IPPROTO_UDP:
@@ -49,9 +49,9 @@ int print_l4_proto(__u8 l4_proto) {
     }
 }
 
-int print_ip(__be32 ip, const char *prefix) {
-    char ip_str[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &ip, ip_str, sizeof(ip_str));
+int print_ip(__u8 *ip, __u8 family, const char *prefix) {
+    char ip_str[family == AF_INET ? INET_ADDRSTRLEN : INET6_ADDRSTRLEN];
+    inet_ntop(family, ip, ip_str, sizeof(ip_str));
 
     return printf(" %s=%s", prefix, ip_str);
 }
@@ -86,24 +86,24 @@ void print_base(struct flow_key_value *flow) {
         print_vlan(flow->key.vlan_id);
 
     print_idle(flow->value.idle);
-    print_l4_proto(flow->key.l4_proto);
+    print_proto(flow->key.proto);
 
-    print_ip(flow->key.src_ip, "src");
-    print_ip(flow->key.dest_ip, "dst");
+    print_ip(flow->key.src_ip, flow->key.family, "src");
+    print_ip(flow->key.dest_ip, flow->key.family, "dst");
     print_port(flow->key.src_port, "sport");
     print_port(flow->key.dest_port, "dport");
 
     print_action(flow->value.action);
 }
 
-void print_nat(struct nat_entry *n_entry) {
+void print_nat(struct nat_entry *n_entry, __u8 family) {
     fputs(" |", stdout);
 
     if (n_entry->rewrite_flag & REWRITE_SRC_IP)
-        print_ip(n_entry->src_ip, "snat");
+        print_ip(n_entry->src_ip, family, "snat");
 
     if (n_entry->rewrite_flag & REWRITE_DEST_IP)
-        print_ip(n_entry->dest_ip, "dnat");
+        print_ip(n_entry->dest_ip, family, "dnat");
 
     if (n_entry->rewrite_flag & REWRITE_SRC_PORT)
         print_port(n_entry->src_port, "spat");
@@ -157,7 +157,7 @@ int print_flows(struct cmd_args *args) {
         print_base(&flow);
 
         if (args->print_nat && flow.value.n_entry.rewrite_flag)
-            print_nat(&flow.value.n_entry);
+            print_nat(&flow.value.n_entry, flow.key.family);
 
         if (args->print_hop && flow.value.action == ACTION_REDIRECT)
             print_hop(&flow.value.next_h);

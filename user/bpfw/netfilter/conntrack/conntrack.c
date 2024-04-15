@@ -1,13 +1,14 @@
 #include "conntrack.h"
+
 #include "nat.h"
+#include "ip_attr.h"
 
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include <arpa/inet.h>
-#include <bpf/bpf.h>
-#include <bpf/libbpf.h>
+#include <net/if.h>
 
 #include <linux/netfilter/nf_conntrack_tcp.h>
 #include <libnetfilter_conntrack/libnetfilter_conntrack.h>
@@ -28,17 +29,28 @@ struct conntrack_handle {
 struct nfct_get_cb_args {
     struct conntrack_handle *conntrack_h;
     struct flow_key_value *flow;
-    enum connection_state state;
+
+    enum conntrack_conn_state state;
 };
 
 
-static void log_key(struct flow_key *f_key, const char* prefix) {
+static void log_new_conn(struct flow_key *f_key) {
     if (fw_log_level >= FW_LOG_LEVEL_DEBUG) {
-        char src_ip[INET_ADDRSTRLEN], dest_ip[INET_ADDRSTRLEN];
-        inet_ntop(AF_INET, &f_key->src_ip, src_ip, sizeof(src_ip));
-        inet_ntop(AF_INET, &f_key->dest_ip, dest_ip, sizeof(dest_ip));
+        char ifname[IF_NAMESIZE];
+        if_indextoname(f_key->ifindex, ifname);
 
-        FW_DEBUG("%s%u %hhu %s %hu %s %hu\n", prefix, f_key->ifindex, f_key->l4_proto,
+        size_t ip_str_len = f_key->family == AF_INET ? INET_ADDRSTRLEN : INET6_ADDRSTRLEN;
+        char src_ip[ip_str_len], dest_ip[ip_str_len];
+
+        inet_ntop(f_key->family, &f_key->src_ip, src_ip, sizeof(src_ip));
+        inet_ntop(f_key->family, &f_key->dest_ip, dest_ip, sizeof(dest_ip));
+
+        FW_DEBUG("\nNew: %s", ifname);
+
+        if (f_key->vlan_id)
+            FW_DEBUG(" %hu", f_key->vlan_id);
+
+        FW_DEBUG(" %s %s %hu %s %hu\n", f_key->proto == IPPROTO_TCP ? "tcp" : "udp",
             src_ip, ntohs(f_key->src_port), dest_ip, ntohs(f_key->dest_port));
     }
 }
@@ -63,28 +75,26 @@ static int read_conntrack_timeout(const char *filename, __u32 *timeout) {
  * @param ct The nf_conntrack entry where to update the timeout
  * @param l4_proto The L4 protocol type (TCP or UDP)
  * **/
-static void set_timeout(struct conntrack_handle* conntrack_h, struct nf_conntrack *ct, __u8 l4_proto) {
-    __u32 timeout;
-
-    // Determine the timeout for the specific protocol
-    switch (l4_proto) {
-        case IPPROTO_TCP:
-            timeout = conntrack_h->tcp_timeout;
-        break;
-
-        case IPPROTO_UDP:
-            bool assured = nfct_get_attr_u32(ct, ATTR_STATUS) & IPS_ASSURED;
-            timeout = assured ? conntrack_h->udp_stream_timeout : conntrack_h->udp_timeout;
-        break;
-    }
+static int set_timeout(struct conntrack_handle* conntrack_h, struct nf_conntrack *ct, __u8 proto) {
+    bool assured = nfct_get_attr_u32(ct, ATTR_STATUS) & IPS_ASSURED;
+    __u32 timeout = proto == IPPROTO_TCP ? conntrack_h->tcp_timeout :
+        assured ? conntrack_h->udp_stream_timeout : conntrack_h->udp_timeout;
 
     // Set the new timeout
     nfct_set_attr_u32(ct, ATTR_TIMEOUT, timeout);
+
+    // Update the edited nf_conntrack entry
+    if (nfct_query(conntrack_h->ct_handle, NFCT_Q_UPDATE, ct) != 0) {
+        FW_ERROR("Error updating conntrack entry: %s (-%d).\n", strerror(errno), errno);
+        return errno;
+    }
+
+    return 0;
 }
 
 
-static bool tcp_not_established(__u8 l4_proto, struct nf_conntrack *ct) {
-    return l4_proto == IPPROTO_TCP &&
+static bool tcp_not_established(__u8 proto, struct nf_conntrack *ct) {
+    return proto == IPPROTO_TCP &&
         nfct_get_attr_u8(ct, ATTR_TCP_STATE) != TCP_CONNTRACK_ESTABLISHED;
 }
 
@@ -94,40 +104,40 @@ static int nfct_get_cb(enum nf_conntrack_msg_type type, struct nf_conntrack *ct,
     struct nfct_get_cb_args *args = data;
     struct conntrack_handle *conntrack_h = args->conntrack_h;
     struct flow_key_value *flow = args->flow;
-    enum connection_state *state = &args->state;
+    enum conntrack_conn_state *state = &args->state;
 
-    if (tcp_not_established(flow->key.l4_proto, ct)) {
+    if (tcp_not_established(flow->key.proto, ct)) {
         // If the flow isn't established yet or anymore,
         // the BPF program shouldn't forward its packages
         *state = CONNECTION_NOT_ESTABLISHED;
         return NFCT_CB_CONTINUE;
     }
 
+    // Mark the flow as established so that the BPF program can take over now
     *state = CONNECTION_ESTABLISHED;
 
     switch (flow->value.action) {
         case ACTION_NONE:
-            log_key(&flow->key, "\nNew: ");
+            log_new_conn(&flow->key);
+
+            memset(&flow->value, 0, sizeof(flow->value));
             
-            // Mark the flow as established so that the BPF program can take over now
-            // Since the TTL is decremented, we must increment the checksum
-            // Check for NAT afterward
-            flow->value.l3_cksum_diff = htons(0x0100);
+            // Since the TTL is decremented, we must increment the checksum for IPv4
+            if (flow->key.family == AF_INET)
+                flow->value.ipv4_cksum_diff = htons(0x0100);
+
+            // Check for NAT
             check_nat(ct, flow);
         break;
 
         case ACTION_REDIRECT:
+            // If there was no new package
             if (flow->value.idle > 0)
                 break;
 
             // Update the nf_conntrack timeout
-            set_timeout(conntrack_h, ct, flow->key.l4_proto);
-
-            // Update the edited nf_conntrack entry
-            if (nfct_query(conntrack_h->ct_handle, NFCT_Q_UPDATE, ct) != 0) {
-                FW_ERROR("Error updating conntrack entry: %s (-%d).\n", strerror(errno), errno);
+            if (set_timeout(conntrack_h, ct, flow->key.proto) != 0)
                 return NFCT_CB_FAILURE;
-            }
         break;
     }
 
@@ -172,32 +182,44 @@ int conntrack_lookup(struct conntrack_handle* conntrack_h, struct flow_key_value
     if (!ct) {
         FW_ERROR("Error allocating conntrack object: %s (-%d).\n",
             strerror(errno), errno);
-        return errno;
+        return -errno;
     }
 
     // Set the attributes accordingly
-    nfct_set_attr_u8 (ct, ATTR_L3PROTO,  AF_INET);
-    nfct_set_attr_u8 (ct, ATTR_L4PROTO,  flow->key.l4_proto);
-    nfct_set_attr_u32(ct, ATTR_IPV4_SRC, flow->key.src_ip);
-    nfct_set_attr_u32(ct, ATTR_IPV4_DST, flow->key.dest_ip);
+    nfct_set_attr_u8 (ct, ATTR_L3PROTO,  flow->key.family);
+    nfct_set_attr_u8 (ct, ATTR_L4PROTO,  flow->key.proto);
+    nfct_set_attr_ip (ct, ATTR_IP_SRC, flow->key.src_ip, flow->key.family);
+    nfct_set_attr_ip (ct, ATTR_IP_DST, flow->key.dest_ip, flow->key.family);
     nfct_set_attr_u16(ct, ATTR_PORT_SRC, flow->key.src_port);
     nfct_set_attr_u16(ct, ATTR_PORT_DST, flow->key.dest_port);
 
-    struct nfct_get_cb_args args = { conntrack_h, flow };
+    struct nfct_get_cb_args args = { .conntrack_h = conntrack_h, .flow = flow };
+    int rc;
 
     // Register the callback for retrieving single conntrack entries
     if (nfct_callback_register(conntrack_h->ct_handle, NFCT_T_ALL, nfct_get_cb, &args) != 0) {
-        FW_ERROR("Error registering conntrack callback: %s (-%d).\n",
-            strerror(errno), errno);
+        FW_ERROR("Error registering conntrack callback: %s (-%d).\n", strerror(errno), errno);
+        rc = -errno;
+
+        goto nfct_destroy;
     }
 
     // Try to find the connection inside nf_conntrack
-    int rc = nfct_query(conntrack_h->ct_handle, NFCT_Q_GET, ct) == 0 ?
-        args.state : errno == ENOENT ? CONNECTION_NOT_ESTABLISHED : -errno;
+    if (nfct_query(conntrack_h->ct_handle, NFCT_Q_GET, ct) != 0) {
+        if (errno != ENOENT) {
+            FW_ERROR("Conntrack lookup error: %s (-%d).\n", strerror(errno), errno);
+            rc = -errno;
+        }
+        else
+            rc = CONNECTION_NOT_FOUND;
+    }
+    else
+        rc = args.state;
 
     // Unregister the callback
     nfct_callback_unregister(conntrack_h->ct_handle);
 
+nfct_destroy:
     // Free the conntrack object
     nfct_destroy(ct);
 

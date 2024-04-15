@@ -124,10 +124,10 @@ int flowtrack_update(struct flowtrack_handle* flowtrack_h) {
     struct flow_key_value flow;
 
     // Retrieve the first key of the BPF flow map
-    int rc = bpf_map_get_next_key(flowtrack_h->flow_map_fd, NULL, &flow.key);
+    int bpf_rc = bpf_map_get_next_key(flowtrack_h->flow_map_fd, NULL, &flow.key);
 
     // Iterate through all the flow entries
-    while (rc == 0) {
+    while (bpf_rc == 0) {
         // Retrieve the flow value of the current key
         if (bpf_map_lookup_elem(flowtrack_h->flow_map_fd, &flow.key, &flow.value) != 0) {
             FW_ERROR("Error looking up flow entry: %s (-%d).\n", strerror(errno), errno);
@@ -136,11 +136,10 @@ int flowtrack_update(struct flowtrack_handle* flowtrack_h) {
 
         __u32 idle = flow.value.idle + flowtrack_h->map_poll_sec;
 
-        if (flow.key.l4_proto == IPPROTO_TCP && idle >= flowtrack_h->tcp_flow_timeout ||
-            flow.key.l4_proto == IPPROTO_UDP && idle >= flowtrack_h->udp_flow_timeout)
+        if (flow.key.proto == IPPROTO_TCP && idle >= flowtrack_h->tcp_flow_timeout ||
+            flow.key.proto == IPPROTO_UDP && idle >= flowtrack_h->udp_flow_timeout)
         {
-            // If no flow could be found, it is finished or a timeout occured
-            // So delete it from the BPF flow map
+            // Flow timeout occured, so delete it from the BPF map
             if (bpf_map_delete_elem(flowtrack_h->flow_map_fd, &flow.key) != 0) {
                 FW_ERROR("Error deleting flow entry: %s (-%d).\n", strerror(errno), errno);
                 return errno;
@@ -149,8 +148,9 @@ int flowtrack_update(struct flowtrack_handle* flowtrack_h) {
             goto get_next_key;
         }
 
-        rc = conntrack_lookup(flowtrack_h->conntrack_h, &flow);
-        switch (rc) {
+        int ct_rc = conntrack_lookup(flowtrack_h->conntrack_h, &flow);
+        switch (ct_rc) {
+            case CONNECTION_NOT_FOUND:
             case CONNECTION_NOT_ESTABLISHED:
                 /* It could be possible that we have received the package here through the BPF map
                 *  before it was processed by nf_conntrack, or it has been dropped
@@ -160,15 +160,14 @@ int flowtrack_update(struct flowtrack_handle* flowtrack_h) {
 
             case CONNECTION_ESTABLISHED:
                 if (flow.value.action == ACTION_NONE) {
-                    rc = netlink_get_next_hop(flowtrack_h->netlink_h, &flow);
-                    if (rc != 0)
-                        return rc;
+                    int nl_rc = netlink_get_next_hop(flowtrack_h->netlink_h, &flow);
+                    if (nl_rc != 0)
+                        return nl_rc;
                 }
             break;
 
             default:
-                FW_ERROR("Conntrack lookup error: %s (-%d).\n", strerror(errno), errno);
-                return rc;
+                return -ct_rc;
         }
 
         flow.value.idle = idle;
@@ -181,10 +180,10 @@ int flowtrack_update(struct flowtrack_handle* flowtrack_h) {
 
 get_next_key:
         // Retrieve the next key of the flows map
-        rc = bpf_map_get_next_key(flowtrack_h->flow_map_fd, &flow.key, &flow.key);
+        bpf_rc = bpf_map_get_next_key(flowtrack_h->flow_map_fd, &flow.key, &flow.key);
     }
 
-    if (rc != -ENOENT) {
+    if (bpf_rc != -ENOENT) {
         FW_ERROR("Error retrieving flow key: %s (-%d).\n", strerror(errno), errno);
         return errno;
     }

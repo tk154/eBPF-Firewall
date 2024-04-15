@@ -2,21 +2,21 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <linux/if_ether.h>
 #include <linux/rtnetlink.h>
+
+#include <net/if.h>
 #include <libmnl/libmnl.h>
 
 #include "../common_user.h"
 
 
-// Size of the dynamically allocated Netlink Buffer
-#define NL_BUFFER_SIZE MNL_SOCKET_BUFFER_SIZE
-
-
 struct netlink_handle {
     struct mnl_socket *nl_socket;
-    
-    // Dynamically allocated buffer for all Netlink requests and responses
-    void *nl_buffer;
+    size_t nl_buffer_size;
+
+    // Flexible buffer for all Netlink requests and responses
+    char nl_buffer[];
 };
 
 
@@ -24,35 +24,36 @@ static int get_link(struct netlink_handle* netlink_h, struct flow_value *f_value
 
 static void log_next_hop(struct next_hop *next_h) {
     if (fw_log_level >= FW_LOG_LEVEL_VERBOSE) {
-        char src_mac[18], dest_mac[18];
-        snprintf(src_mac, sizeof(src_mac), "%02x:%02x:%02x:%02x:%02x:%02x", 
-            next_h->src_mac[0], next_h->src_mac[1], next_h->src_mac[2],
-            next_h->src_mac[3], next_h->src_mac[4], next_h->src_mac[5]);
-        snprintf(dest_mac, sizeof(dest_mac), "%02x:%02x:%02x:%02x:%02x:%02x", 
-            next_h->dest_mac[0], next_h->dest_mac[1], next_h->dest_mac[2],
-            next_h->dest_mac[3], next_h->dest_mac[4], next_h->dest_mac[5]);
+        char ifname[IF_NAMESIZE];
+        if_indextoname(next_h->ifindex, ifname);
 
-        FW_VERBOSE("Hop: %u %s %s", next_h->ifindex, src_mac, dest_mac);
+        FW_VERBOSE("Hop: %s", ifname);
 
         if (next_h->vlan_id)
-            FW_VERBOSE(" %hu\n", next_h->vlan_id);
-        else
-            FW_VERBOSE("\n");
+            FW_VERBOSE(" %hu", next_h->vlan_id);
+
+        FW_VERBOSE(" %02x:%02x:%02x:%02x:%02x:%02x"
+                   " %02x:%02x:%02x:%02x:%02x:%02x\n",
+            next_h->src_mac[0], next_h->src_mac[1], next_h->src_mac[2],
+            next_h->src_mac[3], next_h->src_mac[4], next_h->src_mac[5], 
+            next_h->dest_mac[0], next_h->dest_mac[1], next_h->dest_mac[2],
+            next_h->dest_mac[3], next_h->dest_mac[4], next_h->dest_mac[5]);
+    }
+}
+
+
+void mnl_attr_put_ip(struct nlmsghdr *nlh, uint16_t type, void *ip, __u8 family) {
+    switch (family) {
+        case AF_INET:
+            return mnl_attr_put(nlh, type, 4, ip);
+        case AF_INET6:
+            return mnl_attr_put(nlh, type, 16, ip);
     }
 }
 
 static int mnl_attr_parse_cb(const struct nlattr *attr, void *data) {
     const struct nlattr **tb = data;
     tb[mnl_attr_get_type(attr)] = attr;
-
-    return MNL_CB_OK;
-}
-
-static int mnl_attr_parse_cb_test(const struct nlattr *attr, void *data) {
-    const struct nlattr **tb = data;
-    tb[mnl_attr_get_type(attr)] = attr;
-
-    FW_VERBOSE("%hu\n", mnl_attr_get_type(attr));
 
     return MNL_CB_OK;
 }
@@ -68,7 +69,7 @@ static int send_request(struct netlink_handle* netlink_h) {
     }
 
     // Receive and parse the response
-    ssize_t nbytes = mnl_socket_recvfrom(netlink_h->nl_socket, netlink_h->nl_buffer, NL_BUFFER_SIZE);
+    ssize_t nbytes = mnl_socket_recvfrom(netlink_h->nl_socket, netlink_h->nl_buffer, netlink_h->nl_buffer_size);
     if (nbytes < 0) {
         FW_ERROR("Error receiving netlink response: %s (-%d).\n", strerror(errno), errno);
         return errno;
@@ -133,16 +134,16 @@ static int get_route(struct netlink_handle* netlink_h, struct flow_key_value* fl
     nlh->nlmsg_type = RTM_GETROUTE;
 
     struct rtmsg *rtm = mnl_nlmsg_put_extra_header(nlh, sizeof(struct rtmsg));
-    rtm->rtm_family = AF_INET;
+    rtm->rtm_family = flow->key.family;
 
     // Add attributes
-    mnl_attr_put_u32(nlh, RTA_IIF, flow->key.ifindex);
-    mnl_attr_put_u32(nlh, RTA_SRC, flow->key.src_ip);
-    mnl_attr_put_u32(nlh, RTA_DST, *dest_ip);
+    mnl_attr_put_u8 (nlh, RTA_IP_PROTO, flow->key.proto);
+    mnl_attr_put_ip (nlh, RTA_SRC, flow->key.src_ip, flow->key.family);
+    mnl_attr_put_ip (nlh, RTA_DST, dest_ip, flow->key.family);
     mnl_attr_put_u16(nlh, RTA_SPORT, flow->key.src_port);
     mnl_attr_put_u16(nlh, RTA_DPORT, flow->value.n_entry.rewrite_flag & REWRITE_DEST_PORT ?
                                      flow->value.n_entry.dest_port : flow->key.dest_port);
-    mnl_attr_put_u8(nlh, RTA_IP_PROTO, flow->key.l4_proto);
+    mnl_attr_put_u32(nlh, RTA_IIF, flow->key.ifindex);
 
     // Send request and receive response
     int rc = send_request(netlink_h);
@@ -174,8 +175,10 @@ static int get_route(struct netlink_handle* netlink_h, struct flow_key_value* fl
 
     *ifindex = mnl_attr_get_u32(attr[RTA_OIF]);
 
-    if (attr[RTA_GATEWAY])
-        *dest_ip = mnl_attr_get_u32(attr[RTA_GATEWAY]);
+    if (attr[RTA_GATEWAY]) {
+        void *gateway = mnl_attr_get_payload(attr[RTA_GATEWAY]);
+        ipcpy(dest_ip, gateway, flow->key.family);
+    }
 
     flow->value.action = ACTION_REDIRECT;
 
@@ -188,11 +191,11 @@ static int get_neigh(struct netlink_handle* netlink_h, struct flow_key_value* fl
     nlh->nlmsg_type = RTM_GETNEIGH;
 
     struct ndmsg *ndm = mnl_nlmsg_put_extra_header(nlh, sizeof(struct ndmsg));
-    ndm->ndm_family  = AF_INET;
+    ndm->ndm_family  = flow->key.family;
     ndm->ndm_ifindex = ifindex;
 
     // Set the destination IP (of Receiver or Gateway)
-    mnl_attr_put_u32(nlh, NDA_DST, dest_ip);
+    mnl_attr_put_ip(nlh, RTA_DST, dest_ip, flow->key.family);
 
     // Send request and receive response
     int rc = send_request(netlink_h);
@@ -210,7 +213,7 @@ static int get_neigh(struct netlink_handle* netlink_h, struct flow_key_value* fl
     }
 
     void *dest_mac = mnl_attr_get_payload(attr[NDA_LLADDR]);
-    memcpy(f_value->next_h.dest_mac, dest_mac, ETH_ALEN);
+    memcpy(flow->value.next_h.dest_mac, dest_mac, ETH_ALEN);
 
     return 0;
 }
@@ -264,10 +267,12 @@ static int get_link(struct netlink_handle* netlink_h, struct flow_value *f_value
 
 int netlink_get_next_hop(struct netlink_handle* netlink_h, struct flow_key_value* flow) {
     __u32 ifindex;
-    __be32 dest_ip = flow->value.n_entry.rewrite_flag & REWRITE_DEST_IP ?
-                     flow->value.n_entry.dest_ip : flow->key.dest_ip;
+    __u8 dest_ip[flow->key.family == AF_INET ? 4 : 16];
 
-    int rc = get_route(netlink_h, flow, &ifindex, &dest_ip);
+    ipcpy(dest_ip, flow->value.n_entry.rewrite_flag & REWRITE_DEST_IP ?
+        flow->value.n_entry.dest_ip : flow->key.dest_ip, flow->key.family);
+
+    int rc = get_route(netlink_h, flow, &ifindex, dest_ip);
     if (rc != 0 || flow->value.action != ACTION_REDIRECT)
         return rc;
 
@@ -285,11 +290,15 @@ int netlink_get_next_hop(struct netlink_handle* netlink_h, struct flow_key_value
 }
 
 struct netlink_handle* netlink_init() {
-    struct netlink_handle *netlink_h = (struct netlink_handle*)malloc(sizeof(struct netlink_handle));
+    size_t nl_buffer_size = MNL_SOCKET_BUFFER_SIZE;
+
+    struct netlink_handle *netlink_h = malloc(sizeof(struct netlink_handle) + nl_buffer_size);
     if (!netlink_h) {
         FW_ERROR("Error allocating netlink handle: %s (-%d).\n", strerror(errno), errno);
         return NULL;
     }
+
+    netlink_h->nl_buffer_size = nl_buffer_size;
 
     // Open a Netlink socket
     netlink_h->nl_socket = mnl_socket_open(NETLINK_ROUTE);
@@ -301,13 +310,6 @@ struct netlink_handle* netlink_init() {
     // Bind the socket
     if (mnl_socket_bind(netlink_h->nl_socket, 0, MNL_SOCKET_AUTOPID) != 0) {
         FW_ERROR("Error binding netlink socket: %s (-%d).\n", strerror(errno), errno);
-        goto mnl_socket_close;
-    }
-
-    // Allocate the netlink buffer
-    netlink_h->nl_buffer = malloc(NL_BUFFER_SIZE);
-    if (!netlink_h->nl_buffer) {
-        FW_ERROR("Error allocating netlink buffer: %s (-%d).\n", strerror(errno), errno);
         goto mnl_socket_close;
     }
 
@@ -326,6 +328,5 @@ void netlink_destroy(struct netlink_handle* netlink_h) {
     // Close the socket
     mnl_socket_close(netlink_h->nl_socket);
 
-    free(netlink_h->nl_buffer);
     free(netlink_h);
 }
