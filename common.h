@@ -12,32 +12,30 @@
 
 
 struct flow_key {
-	//__u8 src_mac[ETH_ALEN];
-	//__u8 dest_mac[ETH_ALEN];
-	__u8   src_ip[16];
-	__u8   dest_ip[16];
 	__u32  ifindex;
+	__u16  vlan_id;
 	__be16 src_port;
 	__be16 dest_port;
-	__u16  vlan_id;
+	__u8   src_ip[16];
+	__u8   dest_ip[16];
 	__u8   family;
 	__u8   proto;
 };
 
 
 struct next_hop {
-	__u8  src_mac[6];
-	__u8  dest_mac[6];
 	__u32 ifindex;
 	__u16 vlan_id;
+	__u8  src_mac[6];
+	__u8  dest_mac[6];
 };
 
 struct nat_entry {
-	__u8 	src_ip[16];
-	__u8 	dest_ip[16];
+	__sum16 l4_cksum_diff;
 	__be16  src_port;
 	__be16  dest_port;
-	__sum16 l4_cksum_diff;
+	__u8 	src_ip[16];
+	__u8 	dest_ip[16];
 	__u8    rewrite_flag;
 };
 
@@ -75,9 +73,9 @@ static void* ipcpy(void *dest, const void* src, __u8 family) {
             return memcpy(dest, src, 4);
         case AF_INET6:
             return memcpy(dest, src, 16);
+		default:
+			return NULL;
     }
-
-    return NULL;
 }
 
 

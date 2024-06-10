@@ -117,68 +117,83 @@ __always_inline void apply_nat(struct nat_entry *n_entry, __u8 family, void *src
 	cksum_add(l4_cksum, n_entry->l4_cksum_diff);
 }
 
-__always_inline int check_vlan(struct BPFW_CTX *ctx, struct ethhdr **ethh, __be16 h_proto, __u16 packet_vlan, __u16 next_hop_vlan) {
+__always_inline void* check_vlan(struct BPFW_CTX *ctx, __be16 h_proto, __u16 packet_vlan, __u16 next_hop_vlan) {
 	if (!packet_vlan && next_hop_vlan) {
 		BPF_DEBUG("Add VLAN Tag %u", next_hop_vlan);
 
 #if defined(XDP_PROGRAM)
-		if (bpf_xdp_adjust_head(ctx, -(int)sizeof(struct vlan_hdr)) != 0) {
-			BPF_WARN("bpf_xdp_adjust_head error");
-			return -1;
+		int rc = bpf_xdp_adjust_head(ctx, -(int)sizeof(struct vlan_hdr));
+		if (rc != 0) {
+			BPF_ERROR("bpf_xdp_adjust_head error: %d", rc);
+			return NULL;
 		}
 
-		if (ctx->data + sizeof(struct ethhdr) + sizeof(struct vlan_hdr) > ctx->data_end)
-			return -1;
+		void* data 	   = (void*)(long)ctx->data;
+		void* data_end = (void*)(long)ctx->data_end;
 
-		*ethh = (void*)(long)ctx->data;
-		(*ethh)->h_proto = bpf_htons(ETH_P_8021Q);
+		if (data + sizeof(struct ethhdr) + sizeof(struct vlan_hdr) > data_end)
+			return NULL;
 
-		struct vlan_hdr *vlan_h = (struct vlan_hdr*)(*ethh + 1);
+		struct ethhdr *ethh = data;
+		ethh->h_proto = bpf_htons(ETH_P_8021Q);
+		data += sizeof(struct ethhdr);
+
+		struct vlan_hdr *vlan_h = data;
 		vlan_h->h_vlan_TCI = bpf_htons(next_hop_vlan);
 		vlan_h->h_vlan_encapsulated_proto = h_proto;
 		
 #elif defined(TC_PROGRAM)
-		if (bpf_skb_vlan_push(ctx, ETH_P_8021Q, next_hop_vlan) != 0) {
-			BPF_WARN("bpf_skb_vlan_push error");
-			return -1;
+		int rc = bpf_skb_vlan_push(ctx, ETH_P_8021Q, next_hop_vlan);
+		if (rc != 0) {
+			BPF_ERROR("bpf_skb_vlan_push error: %d", rc);
+			return NULL;
 		}
 
-		if (ctx->data + sizeof(struct ethhdr) > ctx->data_end)
-			return -1;
+		void* data 	   = (void*)(long)ctx->data;
+		void* data_end = (void*)(long)ctx->data_end;
 
-		*ethh = (void*)(long)ctx->data;
+		if (data + sizeof(struct ethhdr) > data_end)
+			return NULL;
 #endif
+		return data;
 	}
 
-	else if (packet_vlan && !next_hop_vlan) {
+	if (packet_vlan && !next_hop_vlan) {
 		BPF_DEBUG("Remove VLAN Tag");
 
 #if defined(XDP_PROGRAM)
-		if (bpf_xdp_adjust_head(ctx, sizeof(struct vlan_hdr)) != 0) {
-			BPF_WARN("bpf_xdp_adjust_head error");
-			return -1;
+		int rc = bpf_xdp_adjust_head(ctx, sizeof(struct vlan_hdr));
+		if (rc != 0) {
+			BPF_ERROR("bpf_xdp_adjust_head error: %d", rc);
+			return NULL;
 		}
 
-		if (ctx->data + sizeof(struct ethhdr) > ctx->data_end)
-			return -1;
+		void* data 	   = (void*)(long)ctx->data;
+		void* data_end = (void*)(long)ctx->data_end;
 
-		*ethh = (void*)(long)ctx->data;
-		(*ethh)->h_proto = h_proto;
+		if (data + sizeof(struct ethhdr) > data_end)
+			return NULL;
+
+		struct ethhdr *ethh = data;
+		ethh->h_proto = h_proto;
 		
 #elif defined(TC_PROGRAM)
-		if (bpf_skb_vlan_pop(ctx) != 0) {
-			BPF_WARN("bpf_skb_vlan_pop error");
-			return -1;
+		int rc = bpf_skb_vlan_pop(ctx);
+		if (rc != 0) {
+			BPF_ERROR("bpf_skb_vlan_pop error: %d", rc);
+			return NULL;
 		}
 
-		if (ctx->data + sizeof(struct ethhdr) > ctx->data_end)
-			return -1;
+		void* data 	   = (void*)(long)ctx->data;
+		void* data_end = (void*)(long)ctx->data_end;
 
-		*ethh = (void*)(long)ctx->data;
+		if (data + sizeof(struct ethhdr) > data_end)
+			return NULL;
 #endif
+		return data;
 	}
 
-	return 0;
+	return (void*)(long)ctx->data;
 }
 
 /**
@@ -373,7 +388,8 @@ int fw_func(struct BPFW_CTX *ctx) {
 			// Apply NAT
 			apply_nat(&f_value->n_entry, family, src_ip, dest_ip, sport, dport, l4_cksum);
 
-			if (check_vlan(ctx, &ethh, h_proto, vlan_id, f_value->next_h.vlan_id) != 0)
+			ethh = check_vlan(ctx, h_proto, vlan_id, f_value->next_h.vlan_id);
+			if (!ethh)
 				return BPFW_DROP;
 
 			// Redirect the package

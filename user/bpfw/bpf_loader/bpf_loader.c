@@ -18,6 +18,11 @@
 struct bpf_object_program {
     struct bpf_object  *obj;    // BPF object pointer
     struct bpf_program *prog;   // BPF program pointer
+
+    /*struct {
+        __u32 handle;
+        __u32 priority;
+    } tc;*/
 };
 
 
@@ -155,6 +160,9 @@ int bpf_if_attach_program(struct bpf_object_program* bpf, char* ifname, __u32 xd
 
                 return errno;
             }
+
+            /*bpf->tc.handle   = opts.handle;
+            bpf->tc.priority = opts.priority;*/
         break;
 
         // If the program is not of type XDP or TC
@@ -183,11 +191,12 @@ void bpf_if_detach_program(struct bpf_object_program* bpf, char* ifname, __u32 x
 
         case BPF_PROG_TYPE_SCHED_CLS:
             DECLARE_LIBBPF_OPTS(bpf_tc_hook, hook, .ifindex = ifindex, .attach_point = BPF_TC_INGRESS);
-            //DECLARE_LIBBPF_OPTS(bpf_tc_opts, opts, .prog_fd = bpf_program__fd(bpf->prog));
+            //DECLARE_LIBBPF_OPTS(bpf_tc_opts, opts, .handle = bpf->tc.handle, .priority = bpf->tc.priority);
 
-            //printf("detach: %d\n", bpf_tc_detach(&hook, &opts));
+            // Detach the TC prgram
+            //bpf_tc_detach(&hook, &opts);
 
-            //if (bpf_tc_query(&hook, &opts) == -ENOENT) {
+            //if (bpf_tc_query(&hook, NULL) == -ENOENT) {
                 // Needed to really destroy the qdisc hook and not just detaching the programs from it
                 hook.attach_point |= BPF_TC_EGRESS;
                 bpf_tc_hook_destroy(&hook);
