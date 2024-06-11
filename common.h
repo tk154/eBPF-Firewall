@@ -18,6 +18,7 @@ struct flow_key {
 	__be16 dest_port;
 	__u8   src_ip[16];
 	__u8   dest_ip[16];
+	__u8   src_mac[6];
 	__u8   family;
 	__u8   proto;
 };

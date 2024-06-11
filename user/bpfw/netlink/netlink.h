@@ -10,6 +10,7 @@ struct netlink_handle* netlink_init();
 void netlink_destroy(struct netlink_handle* netlink_h);
 
 int netlink_get_next_hop(struct netlink_handle* netlink_h, struct flow_key_value* flow);
+int netlink_get_route(struct netlink_handle *netlink_h, struct flow_key_value* flow);
 
 
 #endif

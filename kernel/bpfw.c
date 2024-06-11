@@ -355,6 +355,7 @@ int fw_func(struct BPFW_CTX *ctx) {
 
 	ipcpy(f_key.src_ip, src_ip, family);
 	ipcpy(f_key.dest_ip, dest_ip, family);
+	memcpy(f_key.src_mac, ethh->h_source, ETH_ALEN);
 
 	// Check if a conntrack entry exists
 	struct flow_value* f_value = bpf_map_lookup_elem(&FLOW_MAP, &f_key);

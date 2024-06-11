@@ -289,6 +289,13 @@ int netlink_get_next_hop(struct netlink_handle* netlink_h, struct flow_key_value
     return 0;
 }
 
+int netlink_get_route(struct netlink_handle *netlink_h, struct flow_key_value* flow) {
+    __u8 dest_ip[flow->key.family == AF_INET ? 4 : 16];
+    ipcpy(dest_ip, flow->key.dest_ip, flow->key.family);
+
+    return get_route(netlink_h, flow, &flow->value.next_h.ifindex, dest_ip);
+}
+
 struct netlink_handle* netlink_init() {
     size_t nl_buffer_size = MNL_SOCKET_BUFFER_SIZE;
 

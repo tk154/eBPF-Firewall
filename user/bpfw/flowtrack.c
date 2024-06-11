@@ -14,6 +14,10 @@
 
 #include "common_user.h"
 
+#ifdef OPENWRT_UCODE
+#include "ucode/ucode.h"
+#endif
+
 
 struct flowtrack_handle {
     int flow_map_fd;
@@ -22,6 +26,10 @@ struct flowtrack_handle {
     struct bpf_object_program *bpf;
     struct netlink_handle *netlink_h;
     struct conntrack_handle *conntrack_h;
+
+#ifdef OPENWRT_UCODE
+    struct ucode_handle *ucode_h;
+#endif
 
     // Timeouts from /proc/sys/net/netfilter
     __u32 tcp_flow_timeout;
@@ -90,14 +98,27 @@ struct flowtrack_handle* flowtrack_init(struct cmd_args *args) {
     if (!flowtrack_h->netlink_h)
         goto conntrack_destroy;
 
+#ifdef OPENWRT_UCODE
+    FW_INFO("Initializing ucode ...\n");
+
+    flowtrack_h->ucode_h = ucode_init();
+    if (!flowtrack_h->ucode_h)
+        goto netlink_destroy;
+#endif
+
     // Read TCP and UDP flow timeout values
     if (read_flowtable_timeout("tcp_timeout", &flowtrack_h->tcp_flow_timeout) != 0 ||
         read_flowtable_timeout("udp_timeout", &flowtrack_h->udp_flow_timeout) != 0)
     {
-        goto netlink_destroy;
+        goto ucode_destroy;
     }
 
     return flowtrack_h;
+
+ucode_destroy:
+#ifdef OPENWRT_UCODE
+    ucode_destroy(flowtrack_h->ucode_h);
+#endif
 
 netlink_destroy:
     netlink_destroy(flowtrack_h->netlink_h);
@@ -151,6 +172,21 @@ int flowtrack_update(struct flowtrack_handle* flowtrack_h) {
         int ct_rc = conntrack_lookup(flowtrack_h->conntrack_h, &flow);
         switch (ct_rc) {
             case CONNECTION_NOT_FOUND:
+#ifdef OPENWRT_UCODE
+                if (flow.value.action == ACTION_NONE) {
+                    int nl_rc = netlink_get_route(flowtrack_h->netlink_h, &flow);
+                    if (nl_rc != 0)
+                        return nl_rc;
+
+                    if (flow.value.action != ACTION_DROP) {
+                        int uc_rc = ucode_match_rule(flowtrack_h->ucode_h, &flow);
+                        if (uc_rc != 0)
+                            return uc_rc;
+                    }
+                }
+            break;
+#endif
+
             case CONNECTION_NOT_ESTABLISHED:
                 /* It could be possible that we have received the package here through the BPF map
                 *  before it was processed by nf_conntrack, or it has been dropped
@@ -204,6 +240,11 @@ void flowtrack_destroy(struct flowtrack_handle* flowtrack_h, struct cmd_args *ar
 
     // De-Init netlink
     netlink_destroy(flowtrack_h->netlink_h);
+
+#ifdef OPENWRT_UCODE
+    // De-Init ucode
+    ucode_destroy(flowtrack_h->ucode_h);
+#endif
 
     free(flowtrack_h);
 }
