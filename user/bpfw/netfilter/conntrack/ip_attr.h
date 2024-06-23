@@ -38,9 +38,9 @@ static const void* nfct_get_attr_ip(struct nf_conntrack *ct, const enum conntrac
             return nfct_get_attr(ct, ipv4_attr[type]);
         case AF_INET6:
             return nfct_get_attr(ct, ipv6_attr[type]);
+        default:
+            return NULL;
     }
-
-    return NULL;
 }
 
 static void nfct_set_attr_ip(struct nf_conntrack *ct, const enum conntrack_ip_attr type, void* ip, __u8 family) {

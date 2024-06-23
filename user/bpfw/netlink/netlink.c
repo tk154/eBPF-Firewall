@@ -11,6 +11,9 @@
 #include "../common_user.h"
 
 
+#define ARRAY_ALL_ZEROS(a, n) (a[0] == 0 && memcmp(a, a + 1, n * sizeof(a[0])) == 0)
+
+
 struct netlink_handle {
     struct mnl_socket *nl_socket;
     size_t nl_buffer_size;
@@ -20,40 +23,46 @@ struct netlink_handle {
 };
 
 
-static int get_link(struct netlink_handle* netlink_h, struct flow_value *f_value, __u32 ifindex);
+static int get_link(struct netlink_handle* netlink_h, struct flow_key_value *flow, __u32 ifindex, void *dest_ip);
 
 static void log_next_hop(struct next_hop *next_h) {
-    if (fw_log_level >= FW_LOG_LEVEL_VERBOSE) {
-        char ifname[IF_NAMESIZE];
-        if_indextoname(next_h->ifindex, ifname);
+    if (fw_log_level < FW_LOG_LEVEL_VERBOSE)
+        return;
 
-        FW_VERBOSE("Hop: %s", ifname);
+    char ifname[IF_NAMESIZE];
+    if_indextoname(next_h->ifindex, ifname);
 
-        if (next_h->vlan_id)
-            FW_VERBOSE(" %hu", next_h->vlan_id);
+    printf("-> %s", ifname);
 
-        FW_VERBOSE(" %02x:%02x:%02x:%02x:%02x:%02x"
-                   " %02x:%02x:%02x:%02x:%02x:%02x\n",
-            next_h->src_mac[0], next_h->src_mac[1], next_h->src_mac[2],
-            next_h->src_mac[3], next_h->src_mac[4], next_h->src_mac[5], 
-            next_h->dest_mac[0], next_h->dest_mac[1], next_h->dest_mac[2],
-            next_h->dest_mac[3], next_h->dest_mac[4], next_h->dest_mac[5]);
-    }
+    if (next_h->vlan_id)
+        printf(" vlan=%hu", next_h->vlan_id);
+
+    if (next_h->pppoe_id)
+        printf(" pppoe=0x%hx", ntohs(next_h->pppoe_id));
+
+    printf(" %02x:%02x:%02x:%02x:%02x:%02x"
+                " %02x:%02x:%02x:%02x:%02x:%02x\n",
+        next_h->src_mac[0], next_h->src_mac[1], next_h->src_mac[2],
+        next_h->src_mac[3], next_h->src_mac[4], next_h->src_mac[5], 
+        next_h->dest_mac[0], next_h->dest_mac[1], next_h->dest_mac[2],
+        next_h->dest_mac[3], next_h->dest_mac[4], next_h->dest_mac[5]);
 }
 
 
 void mnl_attr_put_ip(struct nlmsghdr *nlh, uint16_t type, void *ip, __u8 family) {
     switch (family) {
         case AF_INET:
-            return mnl_attr_put(nlh, type, 4, ip);
+            return mnl_attr_put(nlh, type, IPV4_ALEN, ip);
         case AF_INET6:
-            return mnl_attr_put(nlh, type, 16, ip);
+            return mnl_attr_put(nlh, type, IPV6_ALEN, ip);
     }
 }
 
 static int mnl_attr_parse_cb(const struct nlattr *attr, void *data) {
     const struct nlattr **tb = data;
     tb[mnl_attr_get_type(attr)] = attr;
+
+    //printf("%hu\n", mnl_attr_get_type(attr));
 
     return MNL_CB_OK;
 }
@@ -64,29 +73,76 @@ static int send_request(struct netlink_handle* netlink_h) {
 
     // Send the request
     if (mnl_socket_sendto(netlink_h->nl_socket, nlh, nlh->nlmsg_len) < 0) {
-        FW_ERROR("Error sending netlink request: %s (-%d).\n", strerror(errno), errno);
-        return errno;
+        FW_ERROR("\nError sending netlink request: %s (-%d).\n", strerror(errno), errno);
+        return -errno;
     }
 
     // Receive and parse the response
     ssize_t nbytes = mnl_socket_recvfrom(netlink_h->nl_socket, netlink_h->nl_buffer, netlink_h->nl_buffer_size);
     if (nbytes < 0) {
-        FW_ERROR("Error receiving netlink response: %s (-%d).\n", strerror(errno), errno);
-        return errno;
+        FW_ERROR("\nError receiving netlink response: %s (-%d).\n", strerror(errno), errno);
+        return -errno;
     }
 
     // If there was an error
     if (nlh->nlmsg_type == NLMSG_ERROR) {
         struct nlmsgerr *err = mnl_nlmsg_get_payload(nlh);
-        FW_ERROR("Netlink request error: %s (-%d).\n", strerror(-err->error), -err->error);
-
         return -err->error;
     }
 
     return 0;
 }
 
-static int bridge_get_lower(struct netlink_handle* netlink_h, struct flow_value *f_value, __u32 ifindex) {
+static int get_neigh(struct netlink_handle* netlink_h, struct flow_key_value* flow, __u32 ifindex, void *dest_ip) {
+    // Prepare a Netlink request message
+    struct nlmsghdr *nlh = mnl_nlmsg_put_header(netlink_h->nl_buffer);
+    nlh->nlmsg_type = RTM_GETNEIGH;
+
+    struct ndmsg *ndm = mnl_nlmsg_put_extra_header(nlh, sizeof(struct ndmsg));
+    ndm->ndm_family  = flow->key.family;
+    ndm->ndm_ifindex = ifindex;
+
+    // Set the destination IP (of Receiver or Gateway)
+    mnl_attr_put_ip(nlh, RTA_DST, dest_ip, flow->key.family);
+
+    // Send request and receive response
+    int rc = send_request(netlink_h);
+    if (rc < 0)
+        return rc;
+
+    if (rc != 0) {
+        FW_WARN("\n%s error: %s (-%d).\n", STRINGIFY(RTM_GETNEIGH), strerror(rc), rc);
+        log_key(FW_LOG_LEVEL_WARN, "Key: ", &flow->key);
+
+        return rc;
+    }
+
+    struct nlattr *attr[NDA_MAX + 1] = {};
+    mnl_attr_parse(nlh, sizeof(*ndm), mnl_attr_parse_cb, attr);
+
+    if (!attr[NDA_LLADDR]) {
+        FW_WARN("%s didn't return destination MAC address.\n", STRINGIFY(RTM_GETNEIGH));
+        log_key(FW_LOG_LEVEL_WARN, "Key: ", &flow->key);
+
+        return 1;
+    }
+
+    void *dest_mac = mnl_attr_get_payload(attr[NDA_LLADDR]);
+    memcpy(flow->value.next_h.dest_mac, dest_mac, ETH_ALEN);
+
+    return 0;
+}
+
+static int bridge_get_lower(struct netlink_handle* netlink_h, struct flow_key_value *flow, __u32 ifindex, void *dest_ip) {
+    int rc = get_neigh(netlink_h, flow, ifindex, dest_ip);
+    if (rc < 0)
+        return rc;
+
+    if (rc != 0) {
+        flow->value.action = ACTION_PASS;
+        return 0;
+    }
+
     // Prepare a Netlink request message
     struct nlmsghdr *nlh = mnl_nlmsg_put_header(netlink_h->nl_buffer);
     nlh->nlmsg_type = RTM_GETNEIGH;
@@ -95,22 +151,83 @@ static int bridge_get_lower(struct netlink_handle* netlink_h, struct flow_value 
     ndm->ndm_family = PF_BRIDGE;
 
     // Set the destination IP (of Receiver or Gateway)
-    mnl_attr_put(nlh, NDA_LLADDR, ETH_ALEN, f_value->next_h.dest_mac);
+    mnl_attr_put(nlh, NDA_LLADDR, ETH_ALEN, flow->value.next_h.dest_mac);
     mnl_attr_put_u32(nlh, NDA_MASTER, ifindex);
 
     // Send request and receive response
-    int rc = send_request(netlink_h);
+    rc = send_request(netlink_h);
+    if (rc < 0)
+        return rc;
+
     if (rc != 0) {
-        FW_ERROR("%s request error.\n", STRINGIFY(RTM_GETNEIGH));
+        FW_WARN("\n%s error: %s (-%d).\n", STRINGIFY(RTM_GETNEIGH), strerror(rc), rc);
+        log_key(FW_LOG_LEVEL_WARN, "Key: ", &flow->key);
+
         return rc;
     }
 
-    return get_link(netlink_h, f_value, ndm->ndm_ifindex);
+    return get_link(netlink_h, flow, ndm->ndm_ifindex, dest_ip);
 }
 
-static int parse_vlan_if(struct netlink_handle* netlink_h, struct nlattr **ifla_info, __u32 phy_ifindex, struct flow_value *f_value) {
-    if (f_value->next_h.vlan_id) {
-        f_value->action = ACTION_PASS;
+static int parse_ppp_if(struct netlink_handle* netlink_h, struct flow_key_value *flow, void *dest_ip) {
+    const char *pppoe_file_path = "/proc/net/pppoe";
+
+    FILE *pppoe_file = fopen(pppoe_file_path, "r");
+    if (!pppoe_file) {
+        FW_ERROR("Error opening '%s': %s (-%d).\n", pppoe_file_path, strerror(errno), errno);
+        return errno;
+    }
+
+    char pppoe_line[64];
+    fgets(pppoe_line, sizeof(pppoe_line), pppoe_file);
+
+    if (!fgets(pppoe_line, sizeof(pppoe_line), pppoe_file)) {
+        FW_ERROR("Error reading '%s': %s (-%d).\n", pppoe_file_path, strerror(errno), errno);
+        fclose(pppoe_file);
+
+        return errno;
+    }
+
+    fclose(pppoe_file);
+
+    const char *delim = " ";
+    char *pppoe_str = strtok(pppoe_line, delim);
+
+    __u32 session_id = strtoul(pppoe_str, NULL, 16);
+    if (!session_id) {
+        FW_ERROR("Error parsing session ID from '%s'\n", pppoe_file);
+        return -1;
+    }
+
+    pppoe_str = strtok(NULL, delim);
+
+    __u8 dest_mac[ETH_ALEN];
+    if (sscanf(pppoe_str, "%02x:%02x:%02x:%02x:%02x:%02x",
+        &dest_mac[0], &dest_mac[1], &dest_mac[2],
+        &dest_mac[3], &dest_mac[4], &dest_mac[5]) != ETH_ALEN) {
+            FW_ERROR("Error parsing destination MAC from '%s'\n", pppoe_file);
+            return -1;
+        }
+
+    memcpy(flow->value.next_h.dest_mac, dest_mac, ETH_ALEN);
+
+    pppoe_str = strtok(NULL, delim);
+    pppoe_str[strcspn(pppoe_str, "\n")] = '\0';
+
+    __u32 ifindex = if_nametoindex(pppoe_str);
+    if (!ifindex) {
+        FW_ERROR("Error parsing interface from '%s'\n", pppoe_file);
+        return -1;
+    }
+
+    flow->value.next_h.pppoe_id = session_id;
+
+    return get_link(netlink_h, flow, ifindex, dest_ip);
+}
+
+static int parse_vlan_if(struct netlink_handle* netlink_h, struct nlattr **ifla_info, struct flow_key_value *flow, __u32 phy_ifindex, void *dest_ip) {
+    if (flow->value.next_h.vlan_id) {
+        flow->value.action = ACTION_PASS;
         return 0;
     }
 
@@ -118,14 +235,15 @@ static int parse_vlan_if(struct netlink_handle* netlink_h, struct nlattr **ifla_
     mnl_attr_parse_nested(ifla_info[IFLA_INFO_DATA], mnl_attr_parse_cb, ifla_vlan);
 
     __u16 vlan_proto = mnl_attr_get_u16(ifla_vlan[IFLA_VLAN_PROTOCOL]);
-    if (vlan_proto != ntohs(ETH_P_8021Q)) {
-        f_value->action = ACTION_PASS;
+    if (vlan_proto != htons(ETH_P_8021Q)) {
+        flow->value.action = ACTION_PASS;
         return 0;
     }
 
-    f_value->next_h.vlan_id = mnl_attr_get_u16(ifla_vlan[IFLA_VLAN_ID]);
+    __u16 vlan_id = mnl_attr_get_u16(ifla_vlan[IFLA_VLAN_ID]);
+    flow->value.next_h.vlan_id = vlan_id;
 
-    return get_link(netlink_h, f_value, phy_ifindex);
+    return get_link(netlink_h, flow, phy_ifindex, dest_ip);
 }
 
 static int get_route(struct netlink_handle* netlink_h, struct flow_key_value* flow, __u32 *ifindex, void *dest_ip) {
@@ -147,9 +265,15 @@ static int get_route(struct netlink_handle* netlink_h, struct flow_key_value* fl
 
     // Send request and receive response
     int rc = send_request(netlink_h);
-    if (rc != 0) {
-        FW_ERROR("%s request error.\n", STRINGIFY(RTM_GETROUTE));
+    if (rc < 0)
         return rc;
+
+    if (rc != 0) {
+        FW_ERROR("\n%s error: %s (-%d).\n", STRINGIFY(RTM_GETROUTE), strerror(rc), rc);
+        log_key(FW_LOG_LEVEL_WARN, "Key: ", &flow->key);
+
+        flow->value.action = ACTION_PASS;
+        return 0;
     }
 
     switch (rtm->rtm_type) {
@@ -185,40 +309,7 @@ static int get_route(struct netlink_handle* netlink_h, struct flow_key_value* fl
     return 0;
 }
 
-static int get_neigh(struct netlink_handle* netlink_h, struct flow_key_value* flow, __u32 ifindex, void *dest_ip) {
-    // Prepare a Netlink request message
-    struct nlmsghdr *nlh = mnl_nlmsg_put_header(netlink_h->nl_buffer);
-    nlh->nlmsg_type = RTM_GETNEIGH;
-
-    struct ndmsg *ndm = mnl_nlmsg_put_extra_header(nlh, sizeof(struct ndmsg));
-    ndm->ndm_family  = flow->key.family;
-    ndm->ndm_ifindex = ifindex;
-
-    // Set the destination IP (of Receiver or Gateway)
-    mnl_attr_put_ip(nlh, RTA_DST, dest_ip, flow->key.family);
-
-    // Send request and receive response
-    int rc = send_request(netlink_h);
-    if (rc != 0) {
-        FW_ERROR("%s request error.\n", STRINGIFY(RTM_GETNEIGH));
-        return rc;
-    }
-
-    struct nlattr *attr[NDA_MAX + 1] = {};
-    mnl_attr_parse(nlh, sizeof(*ndm), mnl_attr_parse_cb, attr);
-
-    if (!attr[NDA_LLADDR]) {
-        FW_ERROR("%s didn't return destination MAC address.\n", STRINGIFY(RTM_GETNEIGH));
-        return -1;
-    }
-
-    void *dest_mac = mnl_attr_get_payload(attr[NDA_LLADDR]);
-    memcpy(flow->value.next_h.dest_mac, dest_mac, ETH_ALEN);
-
-    return 0;
-}
-
-static int get_link(struct netlink_handle* netlink_h, struct flow_value *f_value, __u32 ifindex) {
+static int get_link(struct netlink_handle* netlink_h, struct flow_key_value *flow, __u32 ifindex, void *dest_ip) {
     // Prepare a Netlink request message
     struct nlmsghdr *nlh = mnl_nlmsg_put_header(netlink_h->nl_buffer);
     nlh->nlmsg_type = RTM_GETLINK;
@@ -229,7 +320,7 @@ static int get_link(struct netlink_handle* netlink_h, struct flow_value *f_value
     // Send request and receive response
     int rc = send_request(netlink_h);
     if (rc != 0) {
-        FW_ERROR("%s request error.\n", STRINGIFY(RTM_GETLINK));
+        FW_ERROR("\n%s error: %s (-%d).\n", STRINGIFY(RTM_GETLINK), strerror(rc), rc);
         return rc;
     }
 
@@ -242,12 +333,17 @@ static int get_link(struct netlink_handle* netlink_h, struct flow_value *f_value
 
         if (ifla_info[IFLA_INFO_KIND]) {
             const char *if_type = mnl_attr_get_str(ifla_info[IFLA_INFO_KIND]);
+            FW_VERBOSE("-> %s (%s) ", mnl_attr_get_str(attr[IFLA_IFNAME]), if_type);
+
             if (strcmp(if_type, "bridge") == 0)
-                return bridge_get_lower(netlink_h, f_value, ifindex);
+                return bridge_get_lower(netlink_h, flow, ifindex, dest_ip);
+
+            if (strcmp(if_type, "ppp") == 0)
+                return parse_ppp_if(netlink_h, flow, dest_ip);
 
             if (strcmp(if_type, "vlan") == 0) {
                 __u32 phy_ifindex = mnl_attr_get_u32(attr[IFLA_LINK]);
-                return parse_vlan_if(netlink_h, ifla_info, phy_ifindex, f_value);
+                return parse_vlan_if(netlink_h, ifla_info, flow, phy_ifindex, dest_ip);
             }
         }
     }
@@ -258,9 +354,9 @@ static int get_link(struct netlink_handle* netlink_h, struct flow_value *f_value
     }
 
     void *if_mac = mnl_attr_get_payload(attr[IFLA_ADDRESS]);
-    memcpy(f_value->next_h.src_mac, if_mac, ETH_ALEN);
+    memcpy(flow->value.next_h.src_mac, if_mac, ETH_ALEN);
 
-    f_value->next_h.ifindex = ifindex;
+    flow->value.next_h.ifindex = ifindex;
 
     return 0;
 }
@@ -276,13 +372,15 @@ int netlink_get_next_hop(struct netlink_handle* netlink_h, struct flow_key_value
     if (rc != 0 || flow->value.action != ACTION_REDIRECT)
         return rc;
 
-    rc = get_neigh(netlink_h, flow, ifindex, dest_ip);
-    if (rc != 0)
-        return rc;
-
-    rc = get_link(netlink_h, &flow->value, ifindex);
+    rc = get_link(netlink_h, flow, ifindex, dest_ip);
     if (rc != 0 || flow->value.action != ACTION_REDIRECT)
         return rc;
+
+    if (ARRAY_ALL_ZEROS(flow->value.next_h.dest_mac, ETH_ALEN)) {
+        rc = get_neigh(netlink_h, flow, ifindex, dest_ip);
+        if (rc != 0)
+            return rc;
+    }
 
     log_next_hop(&flow->value.next_h);
 

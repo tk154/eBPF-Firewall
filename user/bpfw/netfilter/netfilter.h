@@ -8,7 +8,8 @@
  * @param timeout Where to store the timeout value
  * @returns 0 on success, errno otherwise
  * **/
-int read_netfilter_sysfs_timeout(const char *filename, unsigned int *timeout);
+int netfilter_sysfs_read(const char *filename, unsigned int *value);
+int netfilter_sysfs_write(const char *filename, unsigned int value);
 
 
 #endif

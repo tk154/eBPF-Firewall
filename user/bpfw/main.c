@@ -15,7 +15,7 @@
 #include "common_user.h"
 #include "flowtrack.h"
 
-#define BPF_DEFAULT_MAP_POLL_SEC 5
+#define BPF_DEFAULT_MAP_POLL_SEC 2
 
 
 int fw_log_level = FW_LOG_LEVEL_INFO;

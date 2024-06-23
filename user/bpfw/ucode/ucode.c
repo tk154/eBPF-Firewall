@@ -106,7 +106,7 @@ static void log_rule(struct flow_key *f_key, const char *target, const char *nam
         inet_ntop(f_key->family, &f_key->src_ip, src_ip, sizeof(src_ip));
         inet_ntop(f_key->family, &f_key->dest_ip, dest_ip, sizeof(dest_ip));
 
-        FW_DEBUG("\n%s (%s): %s %02x:%02x:%02x:%02x:%02x:%02x"
+        FW_DEBUG("\n%s (%s): %s %02x:%02x:%02x:%02x:%02x:%02x "
 				 "%s %s %hu %s %hu\n", target, name, ifname,
 			f_key->src_mac[0], f_key->src_mac[1], f_key->src_mac[2],
 			f_key->src_mac[3], f_key->src_mac[4], f_key->src_mac[5],

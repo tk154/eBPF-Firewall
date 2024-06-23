@@ -2,6 +2,8 @@
 #define BPFW_COMMON_KERN_H
 
 #include <linux/bpf.h>
+#include <bpf/bpf_endian.h>
+
 #include "../common.h"
 
 
@@ -62,21 +64,19 @@
 #endif
 
 
-// Helper macro to make the out-of-bounds check on a packet header and drop the package on failure
-#define parse_header(header_type, header_ptr, data_ptr, data_end) \
-    header_type header_ptr = data_ptr; \
-	data_ptr += sizeof(header_type); \
-    if (data_ptr > data_end) { \
-        BPF_WARN(#header_type" > data_end"); \
-        return BPFW_PASS; \
-    }
-
-
 // Declare the VLAN header struct because it's only included in the kernel source header <linux/if_vlan.h>
-struct vlan_hdr {
+struct vlanhdr {
 	__be16 h_vlan_TCI;					// priority and VLAN ID
 	__be16 h_vlan_encapsulated_proto;	// packet type ID or len
 };
+
+struct pppoehdr {
+	__u8 vertype;
+	__u8 code;
+	__be16 sid;
+	__be16 length;
+    __be16 proto;
+} __attribute__((packed));
 
 // tcphdr from <linux/tcp.h> uses the host endianness, instead of the compiler endianness
 struct tcp_flags {
@@ -87,6 +87,37 @@ struct tcp_flags {
 #endif
 };
 #define TCP_FLAGS_OFFSET 13
+
+
+struct packet_data {
+    void *data;
+    void *data_end;
+    void *p;
+};
+
+struct l2_header {
+    void *src_mac;
+    __u16  vlan_id;
+    __be16 pppoe_id;
+    __u16  pppoe_len;
+    __be16 proto;
+};
+
+struct l3_header {
+    void *src_ip, *dest_ip;
+    __sum16 *cksum;
+    __u8 *ttl;
+    __u8 family, proto;
+};
+
+struct l4_header {
+	// Pointers for possible NAT adjustments
+	__be16  *sport, *dport;
+	__sum16 *cksum;
+
+	// TCP Flags
+	struct tcp_flags tcp;
+};
 
 
 void bpf_print_ipv4(const char *prefix, void *ip_addr) {

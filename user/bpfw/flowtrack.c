@@ -37,6 +37,14 @@ struct flowtrack_handle {
 };
 
 
+static char* action2str[] = {
+    "None", "Pass", "Drop", "Redirect"
+};
+
+static void log_action(__u8 action) {
+    FW_DEBUG("Act: %s\n", action2str[action]);
+}
+
 /**
  * Reads timeout values from /proc/sys/net/netfilter/nf_flowtable_<filename>
  * @param filename The timeout value to read
@@ -44,12 +52,12 @@ struct flowtrack_handle {
  * @returns 0 on success, errno otherwise
  * **/
 static int read_flowtable_timeout(const char *filename, __u32 *timeout) {
-    const char* base_path = "nf_flowtable_%s";
+    const char* base_path = "flowtable_%s";
 
     char path[64];
     snprintf(path, sizeof(path), base_path, filename);
 
-    return read_netfilter_sysfs_timeout(path, timeout);
+    return netfilter_sysfs_read(path, timeout);
 }
 
 
@@ -199,6 +207,8 @@ int flowtrack_update(struct flowtrack_handle* flowtrack_h) {
                     int nl_rc = netlink_get_next_hop(flowtrack_h->netlink_h, &flow);
                     if (nl_rc != 0)
                         return nl_rc;
+
+                    log_action(flow.value.action);
                 }
             break;
 

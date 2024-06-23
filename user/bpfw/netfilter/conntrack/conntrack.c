@@ -34,40 +34,28 @@ struct nfct_get_cb_args {
 };
 
 
-static void log_new_conn(struct flow_key *f_key) {
-    if (fw_log_level >= FW_LOG_LEVEL_DEBUG) {
-        char ifname[IF_NAMESIZE];
-        if_indextoname(f_key->ifindex, ifname);
-
-        size_t ip_str_len = f_key->family == AF_INET ? INET_ADDRSTRLEN : INET6_ADDRSTRLEN;
-        char src_ip[ip_str_len], dest_ip[ip_str_len];
-
-        inet_ntop(f_key->family, &f_key->src_ip, src_ip, sizeof(src_ip));
-        inet_ntop(f_key->family, &f_key->dest_ip, dest_ip, sizeof(dest_ip));
-
-        FW_DEBUG("\nNew: %s", ifname);
-
-        if (f_key->vlan_id)
-            FW_DEBUG(" %hu", f_key->vlan_id);
-
-        FW_DEBUG(" %s %s %hu %s %hu\n", f_key->proto == IPPROTO_TCP ? "tcp" : "udp",
-            src_ip, ntohs(f_key->src_port), dest_ip, ntohs(f_key->dest_port));
-    }
-}
-
 /**
  * Reads timeout values from /proc/sys/net/netfilter/nf_conntrack_<filename>
  * @param filename The timeout value to read
  * @param timeout Where to store the timeout value
  * @returns 0 on success, errno otherwise
  * **/
-static int read_conntrack_timeout(const char *filename, __u32 *timeout) {
-    const char* base_path = "nf_conntrack_%s";
+static int read_conntrack_value(const char *filename, unsigned int *value) {
+    const char* base_path = "conntrack_%s";
 
     char path[64];
     snprintf(path, sizeof(path), base_path, filename);
 
-    return read_netfilter_sysfs_timeout(path, timeout);
+    return netfilter_sysfs_read(path, value);
+}
+
+static int write_conntrack_value(const char *filename, unsigned int value) {
+    const char* base_path = "conntrack_%s";
+
+    char path[64];
+    snprintf(path, sizeof(path), base_path, filename);
+
+    return netfilter_sysfs_write(path, value);
 }
 
 /**
@@ -118,7 +106,7 @@ static int nfct_get_cb(enum nf_conntrack_msg_type type, struct nf_conntrack *ct,
 
     switch (flow->value.action) {
         case ACTION_NONE:
-            log_new_conn(&flow->key);
+            log_key(FW_LOG_LEVEL_DEBUG, "\nNew: ", &flow->key);
 
             memset(&flow->value, 0, sizeof(flow->value));
             
@@ -153,12 +141,15 @@ struct conntrack_handle* conntrack_init() {
     }
 
     // Read TCP and UDP timeout values
-    if (read_conntrack_timeout("tcp_timeout_established", &conntrack_h->tcp_timeout) != 0 ||
-        read_conntrack_timeout("udp_timeout"            , &conntrack_h->udp_timeout) != 0 ||
-        read_conntrack_timeout("udp_timeout_stream"     , &conntrack_h->udp_stream_timeout) != 0)
+    if (read_conntrack_value("tcp_timeout_established", &conntrack_h->tcp_timeout) != 0 ||
+        read_conntrack_value("udp_timeout"            , &conntrack_h->udp_timeout) != 0 ||
+        read_conntrack_value("udp_timeout_stream"     , &conntrack_h->udp_stream_timeout) != 0)
     {
         goto free;
     }
+
+    if (write_conntrack_value("tcp_be_liberal", 1) != 0)
+        goto free;
 
     // Open a new conntrack handle
 	conntrack_h->ct_handle = nfct_open(CONNTRACK, 0);
