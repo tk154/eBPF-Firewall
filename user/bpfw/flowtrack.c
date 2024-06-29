@@ -23,7 +23,7 @@ struct flowtrack_handle {
     int flow_map_fd;
     unsigned int map_poll_sec;
 
-    struct bpf_object_program *bpf;
+    struct bpf_handle *bpf;
     struct netlink_handle *netlink_h;
     struct conntrack_handle *conntrack_h;
 
@@ -70,12 +70,18 @@ struct flowtrack_handle* flowtrack_init(struct cmd_args *args) {
 
     flowtrack_h->map_poll_sec = args->map_poll_sec;
 
+    FW_INFO("Initializing netlink ...\n");
+
+    flowtrack_h->netlink_h = netlink_init();
+    if (!flowtrack_h->netlink_h)
+        goto free;
+
     // Load the BPF object (including program and maps) into the kernel
     FW_INFO("Loading BPF program into kernel ...\n");
 
-    flowtrack_h->bpf = bpf_load_program(args->prog_path, args->prog_type);
+    flowtrack_h->bpf = bpf_load_program(args->prog_path, args->prog_type, flowtrack_h->netlink_h, args->dsa);
     if (!flowtrack_h->bpf)
-        goto free;
+        goto netlink_destroy;
 
     // Get the file descriptor of the BPF flow map
     flowtrack_h->flow_map_fd = bpf_get_map_fd(flowtrack_h->bpf, FLOW_MAP_NAME);
@@ -87,7 +93,7 @@ struct flowtrack_handle* flowtrack_init(struct cmd_args *args) {
     FW_INFO("Attaching BPF program to network interfaces ...\n");
 
     // Attach the program to the specified interface names
-    int rc = args->if_count == 0 ? bpf_attach_program(flowtrack_h->bpf, args->xdp_flags) :
+    int rc = args->if_count == 0 ? bpf_attach_program(flowtrack_h->bpf, args->xdp_flags, flowtrack_h->netlink_h) :
         bpf_ifs_attach_program(flowtrack_h->bpf, args->if_names, args->if_count, args->xdp_flags);
 
     if (rc != 0)
@@ -100,18 +106,12 @@ struct flowtrack_handle* flowtrack_init(struct cmd_args *args) {
     if (!flowtrack_h->conntrack_h)
         goto bpf_ifs_detach_program;
 
-    FW_INFO("Initializing netlink ...\n");
-
-    flowtrack_h->netlink_h = netlink_init();
-    if (!flowtrack_h->netlink_h)
-        goto conntrack_destroy;
-
 #ifdef OPENWRT_UCODE
     FW_INFO("Initializing ucode ...\n");
 
     flowtrack_h->ucode_h = ucode_init();
     if (!flowtrack_h->ucode_h)
-        goto netlink_destroy;
+        goto conntrack_destroy;
 #endif
 
     // Read TCP and UDP flow timeout values
@@ -128,20 +128,21 @@ ucode_destroy:
     ucode_destroy(flowtrack_h->ucode_h);
 #endif
 
-netlink_destroy:
-    netlink_destroy(flowtrack_h->netlink_h);
-
 conntrack_destroy:
     // De-Init conntrack
     conntrack_destroy(flowtrack_h->conntrack_h);
 
 bpf_ifs_detach_program:
     // Detach the program from the specified interface names
-    bpf_ifs_detach_program(flowtrack_h->bpf, args->if_names, args->if_count, args->xdp_flags);
+    args->if_count == 0 ? bpf_detach_program(flowtrack_h->bpf, args->xdp_flags, flowtrack_h->netlink_h) :
+        bpf_ifs_detach_program(flowtrack_h->bpf, args->if_names, args->if_count, args->xdp_flags);
 
 bpf_unload_program:
     // Unload the BPF object from the kernel
     bpf_unload_program(flowtrack_h->bpf);
+
+netlink_destroy:
+    netlink_destroy(flowtrack_h->netlink_h);
 
 free:
     free(flowtrack_h);
@@ -238,23 +239,23 @@ get_next_key:
 }
 
 void flowtrack_destroy(struct flowtrack_handle* flowtrack_h, struct cmd_args *args) {
-    // Detach the program from the specified interface names
-    args->if_count == 0 ? bpf_detach_program(flowtrack_h->bpf, args->xdp_flags) :
-        bpf_ifs_detach_program(flowtrack_h->bpf, args->if_names, args->if_count, args->xdp_flags);
-
-    // Unload the BPF object from the kernel
-    bpf_unload_program(flowtrack_h->bpf);
-
-    // De-Init conntrack
-    conntrack_destroy(flowtrack_h->conntrack_h);
-
-    // De-Init netlink
-    netlink_destroy(flowtrack_h->netlink_h);
-
 #ifdef OPENWRT_UCODE
     // De-Init ucode
     ucode_destroy(flowtrack_h->ucode_h);
 #endif
+
+    // De-Init conntrack
+    conntrack_destroy(flowtrack_h->conntrack_h);
+
+    // Unload the BPF object from the kernel
+    bpf_unload_program(flowtrack_h->bpf);
+
+    // Detach the program from the specified interface names
+    args->if_count == 0 ? bpf_detach_program(flowtrack_h->bpf, args->xdp_flags, flowtrack_h->netlink_h) :
+        bpf_ifs_detach_program(flowtrack_h->bpf, args->if_names, args->if_count, args->xdp_flags);
+
+    // De-Init netlink
+    netlink_destroy(flowtrack_h->netlink_h);
 
     free(flowtrack_h);
 }

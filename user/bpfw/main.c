@@ -15,13 +15,14 @@
 #include "common_user.h"
 #include "flowtrack.h"
 
-#define BPF_DEFAULT_MAP_POLL_SEC 2
+#define BPF_DEFAULT_MAP_POLL_SEC 5
 
 
 int fw_log_level = FW_LOG_LEVEL_INFO;
 struct flowtrack_handle* flowtrack_h;
 
 struct cmd_args args = {
+    .dsa = false,
     .map_poll_sec = BPF_DEFAULT_MAP_POLL_SEC
 };
 
@@ -44,6 +45,7 @@ static void print_usage(char* prog) {
 // Checks if the given arguments are valid and determines the BPF hook
 static bool check_cmd_args(int argc, char* argv[]) {
     struct option options[] = {
+        { "dsa",       no_argument,       0, 'd' },
         { "interval",  required_argument, 0, 'i' },
         { "log-level", required_argument, 0, 'l' },
         { 0,           0,                 0,  0  }
@@ -52,6 +54,10 @@ static bool check_cmd_args(int argc, char* argv[]) {
     int opt, opt_index;
     while ((opt = getopt_long(argc, argv, "i:l:", options, &opt_index)) != -1) {
         switch (opt) {
+            case 'd':
+                args.dsa = true;
+            break;
+
             case 'i':
                 char *endptr = NULL;
                 args.map_poll_sec = strtoul(optarg, &endptr, 10);

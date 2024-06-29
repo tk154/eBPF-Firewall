@@ -10,9 +10,12 @@ SOURCES  := flowtrack.c bpf_loader/bpf_loader.c netlink/netlink.c \
 
 ifdef OPENWRT_DIR
 include ../OpenWrt.mk
+OUT_DIR  := $(OUT_DIR)/$(TARGET)
+endif
+
+ifdef OPENWRT_UCODE
 CPPFLAGS += -DOPENWRT_UCODE
 LDLIBS   += -lucode -ljson-c
-OUT_DIR  := $(OUT_DIR)/$(TARGET)
 SOURCES  += ucode/ucode.c
 endif
 

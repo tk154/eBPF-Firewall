@@ -34,6 +34,34 @@ struct nfct_get_cb_args {
 };
 
 
+static void log_key(struct flow_key *f_key) {
+    if (fw_log_level < FW_LOG_LEVEL_DEBUG)
+        return;
+
+    char ifname[IF_NAMESIZE];
+    if_indextoname(f_key->ifindex, ifname);
+
+    char src_ip[INET6_ADDRSTRLEN], dest_ip[INET6_ADDRSTRLEN];
+    inet_ntop(f_key->family, &f_key->src_ip, src_ip, sizeof(src_ip));
+    inet_ntop(f_key->family, &f_key->dest_ip, dest_ip, sizeof(dest_ip));
+
+    const char *proto = f_key->proto == IPPROTO_TCP ? "tcp" : "udp";
+
+    FW_DEBUG("\nNew: %s", ifname);
+
+    if (f_key->dsa_port)
+        FW_DEBUG("@p%hhu", f_key->dsa_port & ~DSA_PORT_SET);
+
+    if (f_key->vlan_id)
+        FW_DEBUG(" vlan=%hu", f_key->vlan_id);
+
+    if (f_key->pppoe_id)
+        FW_DEBUG(" pppoe=0x%hx", ntohs(f_key->pppoe_id));
+
+    FW_DEBUG(" %s %s %hu %s %hu\n", proto,
+        src_ip, ntohs(f_key->src_port), dest_ip, ntohs(f_key->dest_port));
+}
+
 /**
  * Reads timeout values from /proc/sys/net/netfilter/nf_conntrack_<filename>
  * @param filename The timeout value to read
@@ -106,7 +134,7 @@ static int nfct_get_cb(enum nf_conntrack_msg_type type, struct nf_conntrack *ct,
 
     switch (flow->value.action) {
         case ACTION_NONE:
-            log_key(FW_LOG_LEVEL_DEBUG, "\nNew: ", &flow->key);
+            log_key(&flow->key);
 
             memset(&flow->value, 0, sizeof(flow->value));
             
@@ -144,12 +172,11 @@ struct conntrack_handle* conntrack_init() {
     if (read_conntrack_value("tcp_timeout_established", &conntrack_h->tcp_timeout) != 0 ||
         read_conntrack_value("udp_timeout"            , &conntrack_h->udp_timeout) != 0 ||
         read_conntrack_value("udp_timeout_stream"     , &conntrack_h->udp_stream_timeout) != 0)
-    {
-        goto free;
-    }
+            goto free;
 
-    if (write_conntrack_value("tcp_be_liberal", 1) != 0)
-        goto free;
+    if (write_conntrack_value("tcp_be_liberal", 1) != 0 ||
+        write_conntrack_value("acct", 0) != 0)
+            goto free;
 
     // Open a new conntrack handle
 	conntrack_h->ct_handle = nfct_open(CONNTRACK, 0);

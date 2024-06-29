@@ -6,24 +6,23 @@
 #include <linux/rtnetlink.h>
 
 #include <net/if.h>
+#include <net/if_arp.h>
 #include <libmnl/libmnl.h>
 
 #include "../common_user.h"
 
 
-#define ARRAY_ALL_ZEROS(a, n) (a[0] == 0 && memcmp(a, a + 1, n * sizeof(a[0])) == 0)
-
-
 struct netlink_handle {
     struct mnl_socket *nl_socket;
     size_t nl_buffer_size;
+    __u32 nl_seq;
 
     // Flexible buffer for all Netlink requests and responses
     char nl_buffer[];
 };
 
 
-static int get_link(struct netlink_handle* netlink_h, struct flow_key_value *flow, __u32 ifindex, void *dest_ip);
+static int get_link(struct netlink_handle *netlink_h, struct flow_key_value *flow, __u32 ifindex, void *dest_ip);
 
 static void log_next_hop(struct next_hop *next_h) {
     if (fw_log_level < FW_LOG_LEVEL_VERBOSE)
@@ -33,6 +32,9 @@ static void log_next_hop(struct next_hop *next_h) {
     if_indextoname(next_h->ifindex, ifname);
 
     printf("-> %s", ifname);
+
+    if (next_h->dsa_port & DSA_PORT_SET)
+        printf("@p%hhu", next_h->dsa_port & ~DSA_PORT_SET);
 
     if (next_h->vlan_id)
         printf(" vlan=%hu", next_h->vlan_id);
@@ -49,7 +51,15 @@ static void log_next_hop(struct next_hop *next_h) {
 }
 
 
-void mnl_attr_put_ip(struct nlmsghdr *nlh, uint16_t type, void *ip, __u8 family) {
+static bool mac_empty(__u8 *mac) {
+    for (int i = 0; i < ETH_ALEN; i++)
+        if (mac[i])
+            return false;
+
+    return true;
+}
+
+static void mnl_attr_put_ip(struct nlmsghdr *nlh, uint16_t type, void *ip, __u8 family) {
     switch (family) {
         case AF_INET:
             return mnl_attr_put(nlh, type, IPV4_ALEN, ip);
@@ -67,9 +77,30 @@ static int mnl_attr_parse_cb(const struct nlattr *attr, void *data) {
     return MNL_CB_OK;
 }
 
+static int get_dsa_switch_cb(const struct nlmsghdr *nlh, void *dsa_switch) {
+    // If there was an error
+    if (nlh->nlmsg_type == NLMSG_ERROR)
+        return MNL_CB_ERROR;
+
+    if (nlh->nlmsg_type == NLMSG_DONE)
+        return MNL_CB_STOP;
+
+    if (!(nlh->nlmsg_flags & NLM_F_DUMP_FILTERED))
+        return MNL_CB_OK;
+
+    struct nlattr *ifla[IFLA_MAX + 1] = {};
+    mnl_attr_parse(nlh, sizeof(struct ifinfomsg), mnl_attr_parse_cb, ifla);
+
+    if (ifla[IFLA_LINK])
+        *(__u32*)dsa_switch = mnl_attr_get_u32(ifla[IFLA_LINK]);
+
+    return MNL_CB_OK;
+}
+
 static int send_request(struct netlink_handle* netlink_h) {
     struct nlmsghdr *nlh = (struct nlmsghdr*)netlink_h->nl_buffer;
     nlh->nlmsg_flags = NLM_F_REQUEST;
+    nlh->nlmsg_seq = netlink_h->nl_seq++;
 
     // Send the request
     if (mnl_socket_sendto(netlink_h->nl_socket, nlh, nlh->nlmsg_len) < 0) {
@@ -93,6 +124,136 @@ static int send_request(struct netlink_handle* netlink_h) {
     return 0;
 }
 
+static int send_dump_request(struct netlink_handle *netlink_h, mnl_cb_t cb_func, void *cb_data) {
+    unsigned int seq = netlink_h->nl_seq++;
+    unsigned int portid = mnl_socket_get_portid(netlink_h->nl_socket);
+
+    struct nlmsghdr *nlh = (struct nlmsghdr*)netlink_h->nl_buffer;
+    nlh->nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
+    nlh->nlmsg_seq = seq;
+
+    // Send the request
+    if (mnl_socket_sendto(netlink_h->nl_socket, nlh, nlh->nlmsg_len) < 0) {
+        FW_ERROR("\nError sending netlink request: %s (-%d).\n", strerror(errno), errno);
+        return -errno;
+    }
+
+    // Receive and parse the response
+    ssize_t nbytes = mnl_socket_recvfrom(netlink_h->nl_socket, netlink_h->nl_buffer, netlink_h->nl_buffer_size);
+    while (nbytes > 0) {
+        int rc = mnl_cb_run(netlink_h->nl_buffer, nbytes, seq, portid, cb_func, cb_data);
+        if (rc == MNL_CB_ERROR) {
+            struct nlmsgerr *err = mnl_nlmsg_get_payload(nlh);
+            return -err->error;
+        }
+
+        if (rc == MNL_CB_STOP)
+            break;
+
+        nbytes = mnl_socket_recvfrom(netlink_h->nl_socket, netlink_h->nl_buffer, netlink_h->nl_buffer_size);
+    }
+
+    if (nbytes == -1) {
+        FW_ERROR("\nError receiving netlink response: %s (-%d).\n", strerror(errno), errno);
+        return -errno;
+    }
+
+    return 0;
+}
+
+static int request_interface(struct netlink_handle *netlink_h, __u32 ifindex) {
+    // Prepare a Netlink request message
+    struct nlmsghdr *nlh = mnl_nlmsg_put_header(netlink_h->nl_buffer);
+    nlh->nlmsg_type = RTM_GETLINK;
+
+    struct ifinfomsg *ifinfom = mnl_nlmsg_put_extra_header(nlh, sizeof(struct ifinfomsg));
+    ifinfom->ifi_index = ifindex;
+
+    // Send request and receive response
+    int rc = send_request(netlink_h);
+    if (rc != 0) {
+        char ifname[IF_NAMESIZE];
+        if_indextoname(ifindex, ifname);
+
+        FW_ERROR("Error retrieving %s link information: %s (-%d).\n",
+            ifname, strerror(rc), rc);
+
+        return rc;
+    }
+
+    return 0;
+}
+
+static int get_route(struct netlink_handle* netlink_h, struct flow_key_value* flow, __u32 *ifindex, void *dest_ip) {
+    // Prepare a Netlink request message
+    struct nlmsghdr *nlh = mnl_nlmsg_put_header(netlink_h->nl_buffer);
+    nlh->nlmsg_type = RTM_GETROUTE;
+
+    struct rtmsg *rtm = mnl_nlmsg_put_extra_header(nlh, sizeof(struct rtmsg));
+    rtm->rtm_family = flow->key.family;
+
+    // Add attributes
+    mnl_attr_put_u8 (nlh, RTA_IP_PROTO, flow->key.proto);
+    mnl_attr_put_ip (nlh, RTA_SRC, flow->key.src_ip, flow->key.family);
+    mnl_attr_put_ip (nlh, RTA_DST, dest_ip, flow->key.family);
+    mnl_attr_put_u16(nlh, RTA_SPORT, flow->key.src_port);
+    mnl_attr_put_u16(nlh, RTA_DPORT, flow->value.n_entry.rewrite_flag & REWRITE_DEST_PORT ?
+                                     flow->value.n_entry.dest_port : flow->key.dest_port);
+    mnl_attr_put_u32(nlh, RTA_IIF, flow->key.ifindex);
+
+    // Send request and receive response
+    int rc = send_request(netlink_h);
+    if (rc < 0)
+        return rc;
+
+    if (rc != 0) {
+        char dst_ip[INET6_ADDRSTRLEN];
+        inet_ntop(flow->key.family, flow->key.src_ip, dst_ip, sizeof(dst_ip));
+
+        FW_WARN("Couldn't retrieve route for %s: %s (-%d).\n", dst_ip, strerror(rc), rc);
+
+        flow->value.action = ACTION_PASS;
+        return 0;
+    }
+
+    switch (rtm->rtm_type) {
+        case RTN_UNICAST:
+            break;
+
+        case RTN_BLACKHOLE:
+            flow->value.action = ACTION_DROP;
+            return 0;
+
+        default:
+            flow->value.action = ACTION_PASS;
+            return 0;
+    }
+
+    struct nlattr *attr[RTA_MAX + 1] = {};
+    mnl_attr_parse(nlh, sizeof(*rtm), mnl_attr_parse_cb, attr);
+
+    if (!attr[RTA_OIF]) {
+        char dst_ip[INET6_ADDRSTRLEN];
+        inet_ntop(flow->key.family, flow->key.src_ip, dst_ip, sizeof(dst_ip));
+
+        FW_ERROR("%s didn't return output ifindex for %s.\n",
+            STRINGIFY(RTM_GETROUTE), dst_ip);
+
+        return -1;
+    }
+
+    *ifindex = mnl_attr_get_u32(attr[RTA_OIF]);
+
+    if (attr[RTA_GATEWAY]) {
+        void *gateway = mnl_attr_get_payload(attr[RTA_GATEWAY]);
+        ipcpy(dest_ip, gateway, flow->key.family);
+    }
+
+    flow->value.action = ACTION_REDIRECT;
+
+    return 0;
+}
+
 static int get_neigh(struct netlink_handle* netlink_h, struct flow_key_value* flow, __u32 ifindex, void *dest_ip) {
     // Prepare a Netlink request message
     struct nlmsghdr *nlh = mnl_nlmsg_put_header(netlink_h->nl_buffer);
@@ -111,8 +272,14 @@ static int get_neigh(struct netlink_handle* netlink_h, struct flow_key_value* fl
         return rc;
 
     if (rc != 0) {
-        FW_WARN("\n%s error: %s (-%d).\n", STRINGIFY(RTM_GETNEIGH), strerror(rc), rc);
-        log_key(FW_LOG_LEVEL_WARN, "Key: ", &flow->key);
+        char ifname[IF_NAMESIZE];
+        if_indextoname(ifindex, ifname);
+
+        char dst_ip[INET6_ADDRSTRLEN];
+        inet_ntop(flow->key.family, flow->key.src_ip, dst_ip, sizeof(dst_ip));
+
+        FW_WARN("Couldn't retrieve MAC address of %s on %s: %s (-%d).\n",
+            dst_ip, ifname, strerror(rc), rc);
 
         return rc;
     }
@@ -121,8 +288,14 @@ static int get_neigh(struct netlink_handle* netlink_h, struct flow_key_value* fl
     mnl_attr_parse(nlh, sizeof(*ndm), mnl_attr_parse_cb, attr);
 
     if (!attr[NDA_LLADDR]) {
-        FW_WARN("%s didn't return destination MAC address.\n", STRINGIFY(RTM_GETNEIGH));
-        log_key(FW_LOG_LEVEL_WARN, "Key: ", &flow->key);
+        char ifname[IF_NAMESIZE];
+        if_indextoname(ifindex, ifname);
+
+        char dst_ip[INET6_ADDRSTRLEN];
+        inet_ntop(flow->key.family, flow->key.src_ip, dst_ip, sizeof(dst_ip));
+
+        FW_ERROR("%s didn't return MAC address of %s on %s.\n",
+            STRINGIFY(RTM_GETROUTE), dst_ip, ifname);
 
         return 1;
     }
@@ -133,7 +306,7 @@ static int get_neigh(struct netlink_handle* netlink_h, struct flow_key_value* fl
     return 0;
 }
 
-static int bridge_get_lower(struct netlink_handle* netlink_h, struct flow_key_value *flow, __u32 ifindex, void *dest_ip) {
+static int parse_bridge_if(struct netlink_handle* netlink_h, struct flow_key_value *flow, __u32 ifindex, void *dest_ip) {
     int rc = get_neigh(netlink_h, flow, ifindex, dest_ip);
     if (rc < 0)
         return rc;
@@ -160,13 +333,29 @@ static int bridge_get_lower(struct netlink_handle* netlink_h, struct flow_key_va
         return rc;
 
     if (rc != 0) {
-        FW_WARN("\n%s error: %s (-%d).\n", STRINGIFY(RTM_GETNEIGH), strerror(rc), rc);
-        log_key(FW_LOG_LEVEL_WARN, "Key: ", &flow->key);
+        char ifname[IF_NAMESIZE];
+        if_indextoname(ifindex, ifname);
 
-        return rc;
+        char dst_ip[INET6_ADDRSTRLEN];
+        inet_ntop(flow->key.family, flow->key.src_ip, dst_ip, sizeof(dst_ip));
+
+        FW_WARN("Couldn't retrieve %s port for %s: %s (-%d).\n",
+            ifname, dst_ip, strerror(rc), rc);
+
+        flow->value.action = ACTION_PASS;
+        return 0;
     }
 
     return get_link(netlink_h, flow, ndm->ndm_ifindex, dest_ip);
+}
+
+static int parse_dsa_if(struct netlink_handle* netlink_h, struct nlattr **ifla, struct flow_key_value *flow, void *dest_ip) {
+    const char *port_name = mnl_attr_get_str(ifla[IFLA_PHYS_PORT_NAME]);
+    __u8 dsa_port = strtoul(port_name + 1, NULL, 10);
+    flow->value.next_h.dsa_port = dsa_port | DSA_PORT_SET;
+
+    __u32 dsa_switch = mnl_attr_get_u32(ifla[IFLA_LINK]);
+    return get_link(netlink_h, flow, dsa_switch, dest_ip);
 }
 
 static int parse_ppp_if(struct netlink_handle* netlink_h, struct flow_key_value *flow, void *dest_ip) {
@@ -225,7 +414,7 @@ static int parse_ppp_if(struct netlink_handle* netlink_h, struct flow_key_value 
     return get_link(netlink_h, flow, ifindex, dest_ip);
 }
 
-static int parse_vlan_if(struct netlink_handle* netlink_h, struct nlattr **ifla_info, struct flow_key_value *flow, __u32 phy_ifindex, void *dest_ip) {
+static int parse_vlan_if(struct netlink_handle* netlink_h, struct nlattr **ifla, struct nlattr **ifla_info, struct flow_key_value *flow, void *dest_ip) {
     if (flow->value.next_h.vlan_id) {
         flow->value.action = ACTION_PASS;
         return 0;
@@ -243,70 +432,8 @@ static int parse_vlan_if(struct netlink_handle* netlink_h, struct nlattr **ifla_
     __u16 vlan_id = mnl_attr_get_u16(ifla_vlan[IFLA_VLAN_ID]);
     flow->value.next_h.vlan_id = vlan_id;
 
-    return get_link(netlink_h, flow, phy_ifindex, dest_ip);
-}
-
-static int get_route(struct netlink_handle* netlink_h, struct flow_key_value* flow, __u32 *ifindex, void *dest_ip) {
-    // Prepare a Netlink request message
-    struct nlmsghdr *nlh = mnl_nlmsg_put_header(netlink_h->nl_buffer);
-    nlh->nlmsg_type = RTM_GETROUTE;
-
-    struct rtmsg *rtm = mnl_nlmsg_put_extra_header(nlh, sizeof(struct rtmsg));
-    rtm->rtm_family = flow->key.family;
-
-    // Add attributes
-    mnl_attr_put_u8 (nlh, RTA_IP_PROTO, flow->key.proto);
-    mnl_attr_put_ip (nlh, RTA_SRC, flow->key.src_ip, flow->key.family);
-    mnl_attr_put_ip (nlh, RTA_DST, dest_ip, flow->key.family);
-    mnl_attr_put_u16(nlh, RTA_SPORT, flow->key.src_port);
-    mnl_attr_put_u16(nlh, RTA_DPORT, flow->value.n_entry.rewrite_flag & REWRITE_DEST_PORT ?
-                                     flow->value.n_entry.dest_port : flow->key.dest_port);
-    mnl_attr_put_u32(nlh, RTA_IIF, flow->key.ifindex);
-
-    // Send request and receive response
-    int rc = send_request(netlink_h);
-    if (rc < 0)
-        return rc;
-
-    if (rc != 0) {
-        FW_ERROR("\n%s error: %s (-%d).\n", STRINGIFY(RTM_GETROUTE), strerror(rc), rc);
-        log_key(FW_LOG_LEVEL_WARN, "Key: ", &flow->key);
-
-        flow->value.action = ACTION_PASS;
-        return 0;
-    }
-
-    switch (rtm->rtm_type) {
-        case RTN_UNICAST:
-            break;
-
-        case RTN_BLACKHOLE:
-            flow->value.action = ACTION_DROP;
-            return 0;
-
-        default:
-            flow->value.action = ACTION_PASS;
-            return 0;
-    }
-
-    struct nlattr *attr[RTA_MAX + 1] = {};
-    mnl_attr_parse(nlh, sizeof(*rtm), mnl_attr_parse_cb, attr);
-
-    if (!attr[RTA_OIF]) {
-        FW_ERROR("%s didn't return output ifindex.\n", STRINGIFY(RTM_GETROUTE));
-        return -1;
-    }
-
-    *ifindex = mnl_attr_get_u32(attr[RTA_OIF]);
-
-    if (attr[RTA_GATEWAY]) {
-        void *gateway = mnl_attr_get_payload(attr[RTA_GATEWAY]);
-        ipcpy(dest_ip, gateway, flow->key.family);
-    }
-
-    flow->value.action = ACTION_REDIRECT;
-
-    return 0;
+    __u32 ifindex = mnl_attr_get_u32(ifla[IFLA_LINK]);
+    return get_link(netlink_h, flow, ifindex, dest_ip);
 }
 
 static int get_link(struct netlink_handle* netlink_h, struct flow_key_value *flow, __u32 ifindex, void *dest_ip) {
@@ -320,40 +447,49 @@ static int get_link(struct netlink_handle* netlink_h, struct flow_key_value *flo
     // Send request and receive response
     int rc = send_request(netlink_h);
     if (rc != 0) {
-        FW_ERROR("\n%s error: %s (-%d).\n", STRINGIFY(RTM_GETLINK), strerror(rc), rc);
+        char ifname[IF_NAMESIZE];
+        if_indextoname(ifindex, ifname);
+
+        FW_ERROR("Error retrieving %s link information: %s (-%d).\n",
+            ifname, strerror(rc), rc);
+
         return rc;
     }
 
-    struct nlattr *attr[IFLA_MAX + 1] = {};
-    mnl_attr_parse(nlh, sizeof(*ifinfom), mnl_attr_parse_cb, attr);
+    struct nlattr *ifla[IFLA_MAX + 1] = {};
+    mnl_attr_parse(nlh, sizeof(*ifinfom), mnl_attr_parse_cb, ifla);
 
-    if (attr[IFLA_LINKINFO]) {
+    if (ifla[IFLA_LINKINFO]) {
         struct nlattr *ifla_info[IFLA_INFO_MAX + 1] = {};
-        mnl_attr_parse_nested(attr[IFLA_LINKINFO], mnl_attr_parse_cb, ifla_info);
+        mnl_attr_parse_nested(ifla[IFLA_LINKINFO], mnl_attr_parse_cb, ifla_info);
 
         if (ifla_info[IFLA_INFO_KIND]) {
             const char *if_type = mnl_attr_get_str(ifla_info[IFLA_INFO_KIND]);
-            FW_VERBOSE("-> %s (%s) ", mnl_attr_get_str(attr[IFLA_IFNAME]), if_type);
+            FW_VERBOSE("-> %s (%s) ", mnl_attr_get_str(ifla[IFLA_IFNAME]), if_type);
 
             if (strcmp(if_type, "bridge") == 0)
-                return bridge_get_lower(netlink_h, flow, ifindex, dest_ip);
+                return parse_bridge_if(netlink_h, flow, ifindex, dest_ip);
 
             if (strcmp(if_type, "ppp") == 0)
                 return parse_ppp_if(netlink_h, flow, dest_ip);
 
-            if (strcmp(if_type, "vlan") == 0) {
-                __u32 phy_ifindex = mnl_attr_get_u32(attr[IFLA_LINK]);
-                return parse_vlan_if(netlink_h, ifla_info, flow, phy_ifindex, dest_ip);
-            }
+            if (strcmp(if_type, "vlan") == 0)
+                return parse_vlan_if(netlink_h, ifla, ifla_info, flow, dest_ip);
+
+            if (strcmp(if_type, "dsa") == 0)
+                if (flow->key.dsa_port)
+                    return parse_dsa_if(netlink_h, ifla, flow, dest_ip);
         }
     }
 
-    if (!attr[IFLA_ADDRESS]) {
-        FW_ERROR("%s didn't return interface MAC address.\n", STRINGIFY(RTM_GETLINK));
+    if (!ifla[IFLA_ADDRESS]) {
+        FW_ERROR("%s didn't return %s MAC address.\n",
+            STRINGIFY(RTM_GETLINK), mnl_attr_get_str(ifla[IFLA_IFNAME]));
+
         return -1;
     }
 
-    void *if_mac = mnl_attr_get_payload(attr[IFLA_ADDRESS]);
+    void *if_mac = mnl_attr_get_payload(ifla[IFLA_ADDRESS]);
     memcpy(flow->value.next_h.src_mac, if_mac, ETH_ALEN);
 
     flow->value.next_h.ifindex = ifindex;
@@ -363,7 +499,7 @@ static int get_link(struct netlink_handle* netlink_h, struct flow_key_value *flo
 
 int netlink_get_next_hop(struct netlink_handle* netlink_h, struct flow_key_value* flow) {
     __u32 ifindex;
-    __u8 dest_ip[flow->key.family == AF_INET ? 4 : 16];
+    __u8 dest_ip[flow->key.family == AF_INET ? IPV4_ALEN : IPV6_ALEN];
 
     ipcpy(dest_ip, flow->value.n_entry.rewrite_flag & REWRITE_DEST_IP ?
         flow->value.n_entry.dest_ip : flow->key.dest_ip, flow->key.family);
@@ -376,10 +512,12 @@ int netlink_get_next_hop(struct netlink_handle* netlink_h, struct flow_key_value
     if (rc != 0 || flow->value.action != ACTION_REDIRECT)
         return rc;
 
-    if (ARRAY_ALL_ZEROS(flow->value.next_h.dest_mac, ETH_ALEN)) {
+    if (mac_empty(flow->value.next_h.dest_mac)) {
         rc = get_neigh(netlink_h, flow, ifindex, dest_ip);
-        if (rc != 0)
-            return rc;
+        if (rc != 0) {
+            flow->value.action = ACTION_PASS;
+            return 0;
+        }
     }
 
     log_next_hop(&flow->value.next_h);
@@ -394,6 +532,51 @@ int netlink_get_route(struct netlink_handle *netlink_h, struct flow_key_value* f
     return get_route(netlink_h, flow, &flow->value.next_h.ifindex, dest_ip);
 }
 
+int netlink_if_should_attach(struct netlink_handle *netlink_h, __u32 ifindex, bool dsa) {
+    int rc = request_interface(netlink_h, ifindex);
+    if (rc != 0)
+        return -rc;
+
+    struct nlmsghdr *nlh = (struct nlmsghdr*)netlink_h->nl_buffer;
+    struct ifinfomsg *ifinfo = mnl_nlmsg_get_payload(nlh);
+    if (ifinfo->ifi_type == ARPHRD_LOOPBACK)
+        return 0;
+
+    struct nlattr *ifla[IFLA_MAX + 1] = {};
+    mnl_attr_parse(nlh, sizeof(*ifinfo), mnl_attr_parse_cb, ifla);
+
+    if (ifla[IFLA_LINKINFO]) {
+        struct nlattr *ifla_info[IFLA_INFO_MAX + 1] = {};
+        mnl_attr_parse_nested(ifla[IFLA_LINKINFO], mnl_attr_parse_cb, ifla_info);
+
+        if (ifla_info[IFLA_INFO_KIND]) {
+            if (dsa)
+                return 0;
+
+            const char *if_type = mnl_attr_get_str(ifla_info[IFLA_INFO_KIND]);
+            if (strcmp(if_type, "dsa") == 0)
+                return 1;
+
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+int netlink_get_dsa_switch(struct netlink_handle *netlink_h, __u32 *dsa_switch) {
+    struct nlmsghdr *nlh = mnl_nlmsg_put_header(netlink_h->nl_buffer);
+    nlh->nlmsg_type = RTM_GETLINK;
+
+    struct ifinfomsg *ifinfo = mnl_nlmsg_put_extra_header(nlh, sizeof(struct ifinfomsg));
+
+    struct nlattr *ifla_info = mnl_attr_nest_start(nlh, IFLA_LINKINFO);
+    mnl_attr_put_str(nlh, IFLA_INFO_KIND, "dsa");
+    mnl_attr_nest_end(nlh, ifla_info);
+
+    return send_dump_request(netlink_h, get_dsa_switch_cb, dsa_switch);
+}
+
 struct netlink_handle* netlink_init() {
     size_t nl_buffer_size = MNL_SOCKET_BUFFER_SIZE;
 
@@ -404,6 +587,7 @@ struct netlink_handle* netlink_init() {
     }
 
     netlink_h->nl_buffer_size = nl_buffer_size;
+    netlink_h->nl_seq = 0;
 
     // Open a Netlink socket
     netlink_h->nl_socket = mnl_socket_open(NETLINK_ROUTE);

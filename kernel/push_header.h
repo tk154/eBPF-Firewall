@@ -9,6 +9,13 @@
 __always_inline static __s8 calc_l2_diff(struct flow_key *f_key, struct next_hop *next_h) {
 	__s8 diff = 0;
 
+#ifdef BPFW_DSA
+	if (next_h->dsa_port & DSA_PORT_SET)
+		diff += sizeof(struct ethhdr_dsa_tx) - sizeof(struct ethhdr_dsa_rx);
+	else
+		diff += sizeof(struct ethhdr) - sizeof(struct ethhdr_dsa_rx);
+#endif
+
 #ifdef XDP_PROGRAM
 	if (!f_key->vlan_id && next_h->vlan_id)
 		diff += sizeof(struct vlanhdr);
@@ -43,8 +50,10 @@ __always_inline static bool adjust_l2_size(struct BPFW_CTX *ctx, __s8 diff, stru
 	pkt->data 	   = (void*)(long)ctx->data;
 	pkt->data_end  = (void*)(long)ctx->data_end;
 
+#ifndef BPFW_DSA
 	if (pkt->data + sizeof(struct ethhdr) > pkt->data_end)
 		return false;
+#endif
 
 	return true;
 }
@@ -66,7 +75,32 @@ __always_inline static __be16 proto_eth2ppp(__be16 eth_proto) {
  * @param next_h The source and destination MAC and ifindex for the next hop
  * @returns BPF_REDIRECT on success, BPF_DROP otherwise
  * **/
-__always_inline static void set_ethhdr(struct packet_data *pkt, struct next_hop *next_h) {
+__always_inline static bool set_ethhdr(struct packet_data *pkt, struct next_hop *next_h) {
+#ifdef BPFW_DSA
+	if (next_h->dsa_port) {
+		if (pkt->p + sizeof(struct ethhdr_dsa_tx) > pkt->data_end)
+			return false;
+
+		struct ethhdr_dsa_tx *ethh = pkt->p;
+
+		__u8 dsa_port = next_h->dsa_port & ~DSA_PORT_SET;
+		ethh->dsa_tag = dsa_get_tag(dsa_port);
+
+		// Adjust the MAC addresses
+		memcpy(ethh->h_source, next_h->src_mac,  ETH_ALEN);
+		memcpy(ethh->h_dest,   next_h->dest_mac, ETH_ALEN);
+
+		BPF_DEBUG("DSA Port: %u", dsa_port);
+		BPF_DEBUG_MAC("Dst MAC: ", next_h->dest_mac);
+
+		pkt->p += sizeof(struct ethhdr_dsa_tx);
+		return true;
+	}
+
+	if (pkt->p + sizeof(struct ethhdr) > pkt->data_end)
+		return false;
+#endif
+
 	struct ethhdr *ethh = pkt->p;
 
 	// Adjust the MAC addresses
@@ -76,6 +110,7 @@ __always_inline static void set_ethhdr(struct packet_data *pkt, struct next_hop 
 	BPF_DEBUG_MAC("Dst MAC: ", next_h->dest_mac);
 
 	pkt->p += sizeof(struct ethhdr);
+	return true;
 }
 
 __always_inline static bool check_vlan(struct BPFW_CTX *ctx, struct packet_data *pkt, __be16 proto, __u16 packet_vlan, __u16 next_hop_vlan) {
@@ -169,7 +204,8 @@ __always_inline static bool push_l2_header(struct BPFW_CTX *ctx, struct packet_d
 		
     pkt->p = pkt->data;
 
-    set_ethhdr(pkt, next_h);
+    if (!set_ethhdr(pkt, next_h))
+		return false;
 
     if (!check_vlan(ctx, pkt, l2->proto, l2->vlan_id, next_h->vlan_id))
         return false;

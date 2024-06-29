@@ -11,6 +11,10 @@
 #include <stdbool.h>
 #include "common_kern.h"
 
+#ifdef BPFW_DSA
+#include "dsa.h"
+#endif
+
 
 // Helper macro to make the out-of-bounds check on a packet header and drop the package on failure
 #define parse_header(header_type, header_ptr, pkt) \
@@ -35,13 +39,25 @@ __always_inline static __be16 proto_ppp2eth(__be16 ppp_proto) {
 
 __always_inline static bool parse_l2_header(struct BPFW_CTX *ctx, struct packet_data *pkt, struct l2_header *l2) {
 	// Parse the Ethernet header, will drop the package if out-of-bounds
-	parse_header(struct ethhdr, *ethh, pkt);
+#ifdef BPFW_DSA
+	if (ctx->ingress_ifindex == dsa_switch) {
+		parse_header(struct ethhdr_dsa_rx, *ethh, pkt);
 
-    BPF_DEBUG_MAC("Src MAC: ", ethh->h_source);
-	BPF_DEBUG_MAC("Dst MAC: ", ethh->h_dest);
+		l2->src_mac = ethh->h_source;
+    	l2->proto = ethh->h_proto;
+		l2->dsa_port = dsa_get_port(ethh->dsa_tag) | DSA_PORT_SET;
+	}
+	else
+#endif
+	{
+		parse_header(struct ethhdr, *ethh, pkt);
 
-    l2->src_mac = ethh->h_source;
-    l2->proto = ethh->h_proto;
+		l2->src_mac = ethh->h_source;
+		l2->proto = ethh->h_proto;
+		l2->dsa_port = 0;
+	}
+
+    BPF_DEBUG_MAC("Src MAC: ", l2->src_mac);
 
 	// Check if there is a VLAN header
 #if defined(XDP_PROGRAM)

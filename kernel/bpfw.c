@@ -51,7 +51,7 @@ __always_inline static void reverse_flow_key(struct flow_key *f_key, struct flow
 }
 
 __always_inline static bool tcp_finished(struct flow_key *f_key, struct flow_value *f_value, struct tcp_flags flags) {
-	if (f_key->proto != IPPROTO_TCP || !flags.fin && !flags.rst)
+	if (f_key->proto != IPPROTO_TCP || (!flags.fin && !flags.rst))
 		return false;
 
 	// Mark the flow as finished
@@ -106,6 +106,7 @@ int fw_func(struct BPFW_CTX *ctx) {
 	f_key.pppoe_id = l2.pppoe_id;
 	f_key.src_port = *l4.sport;
 	f_key.dest_port = *l4.dport;
+	f_key.dsa_port = l2.dsa_port;
 	f_key.family = l3.family;
 	f_key.proto = l3.proto;
 

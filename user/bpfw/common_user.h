@@ -20,8 +20,11 @@ struct cmd_args {
     enum bpf_prog_type prog_type;
     __u32 xdp_flags;
     char* prog_path;
+    bool dsa;
+
     char** if_names;
     unsigned int if_count;
+
     unsigned int map_poll_sec;
 };
 
@@ -53,34 +56,6 @@ extern int fw_log_level;
 #define FW_VERBOSE(format, ...) \
     do { if (fw_log_level >= FW_LOG_LEVEL_VERBOSE) \
         printf(format, ##__VA_ARGS__); } while (0)
-
-
-static void log_key(int l_level, const char *prefix, struct flow_key *f_key) {
-    if (fw_log_level < l_level)
-        return;
-
-    char ifname[IF_NAMESIZE];
-    if_indextoname(f_key->ifindex, ifname);
-
-    size_t ip_str_len = f_key->family == AF_INET ? INET_ADDRSTRLEN : INET6_ADDRSTRLEN;
-    char src_ip[ip_str_len], dest_ip[ip_str_len];
-
-    inet_ntop(f_key->family, &f_key->src_ip, src_ip, sizeof(src_ip));
-    inet_ntop(f_key->family, &f_key->dest_ip, dest_ip, sizeof(dest_ip));
-
-    char *proto = f_key->proto == IPPROTO_TCP ? "tcp" : "udp";
-
-    printf("%s%s", prefix, ifname);
-
-    if (f_key->vlan_id)
-        printf(" vlan=%hu", f_key->vlan_id);
-
-    if (f_key->pppoe_id)
-        printf(" pppoe=0x%hx", ntohs(f_key->pppoe_id));
-
-    printf(" %s %s %hu %s %hu\n", proto,
-        src_ip, ntohs(f_key->src_port), dest_ip, ntohs(f_key->dest_port));
-}
 
 
 #endif

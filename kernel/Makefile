@@ -7,15 +7,19 @@ OBJ_DIR := obj
 BPF_NAME := bpfw
 SRC_FILE := $(SRC_DIR)/$(BPF_NAME).c
 
+XDP_FLAGS := -DXDP_PROGRAM
+TC_FLAGS  := -DTC_PROGRAM
+LE_FLAGS  := -mlittle-endian
+BE_FLAGS  := -mbig-endian
+
 XDP_LE_OBJ_FILE := $(OBJ_DIR)/xdp_le_$(BPF_NAME).o
 TC_LE_OBJ_FILE  := $(OBJ_DIR)/tc_le_$(BPF_NAME).o
 XDP_BE_OBJ_FILE := $(OBJ_DIR)/xdp_be_$(BPF_NAME).o
 TC_BE_OBJ_FILE  := $(OBJ_DIR)/tc_be_$(BPF_NAME).o
 
-XDP_ARGS := -DXDP_PROGRAM
-TC_ARGS  := -DTC_PROGRAM
+all: generic dsa
 
-all: xdp-le tc-le xdp-be tc-be
+generic: xdp-le tc-le xdp-be tc-be
 
 xdp: xdp-le xdp-be
 
@@ -36,17 +40,19 @@ tc-be: $(TC_BE_OBJ_FILE)
 clean:
 	@rm -rf $(OBJ_DIR)
 
-$(XDP_LE_OBJ_FILE): $(SRC_FILE) | $(OBJ_DIR)
-	$(CLANG) $(CFLAGS) -mlittle-endian $(XDP_ARGS) -c $< -o $@
-
-$(TC_LE_OBJ_FILE): $(SRC_FILE) | $(OBJ_DIR)
-	$(CLANG) $(CFLAGS) -mlittle-endian $(TC_ARGS) -c $< -o $@
-
-$(XDP_BE_OBJ_FILE): $(SRC_FILE) | $(OBJ_DIR)
-	$(CLANG) $(CFLAGS) -mbig-endian $(XDP_ARGS) -c $< -o $@
-
-$(TC_BE_OBJ_FILE): $(SRC_FILE) | $(OBJ_DIR)
-	$(CLANG) $(CFLAGS) -mbig-endian $(TC_ARGS) -c $< -o $@
-
 $(OBJ_DIR):
 	@mkdir -p $(OBJ_DIR)
+
+define BPF_COMPILE
+$(1): CUSTOM_FLAGS := $(2)
+$(1): $(SRC_FILE) | $(OBJ_DIR)
+	$(CLANG) $(CFLAGS) $$(CUSTOM_FLAGS) -c $$< -o $$@
+endef
+
+$(eval $(call BPF_COMPILE,$(XDP_LE_OBJ_FILE),$(LE_FLAGS) $(XDP_FLAGS)))
+$(eval $(call BPF_COMPILE,$(TC_LE_OBJ_FILE),$(LE_FLAGS) $(TC_FLAGS)))
+$(eval $(call BPF_COMPILE,$(XDP_BE_OBJ_FILE),$(BE_FLAGS) $(XDP_FLAGS)))
+$(eval $(call BPF_COMPILE,$(TC_BE_OBJ_FILE),$(BE_FLAGS) $(TC_FLAGS)))
+
+
+include dsa.mk

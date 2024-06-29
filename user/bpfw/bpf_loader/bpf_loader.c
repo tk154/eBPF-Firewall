@@ -1,23 +1,31 @@
 #include "bpf_loader.h"
 
 #include <errno.h>
-#include <glob.h>
 #include <stdlib.h>
 #include <unistd.h>
 
+#include <linux/ethtool.h>
+#include <linux/if.h>
 #include <linux/if_link.h>
+#include <linux/sockios.h>
+
 #include <net/if.h>
+#include <sys/ioctl.h>
 
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
 
 #include "../common_user.h"
+#include "../netlink/netlink.h"
 
 
 // Struct to keep BPF object and program pointers together
-struct bpf_object_program {
+struct bpf_handle {
     struct bpf_object  *obj;    // BPF object pointer
     struct bpf_program *prog;   // BPF program pointer
+
+    bool  dsa;
+    __u32 dsa_switch;
 
     /*struct {
         __u32 handle;
@@ -26,62 +34,69 @@ struct bpf_object_program {
 };
 
 
-/**
- * Used to check if a network interface is virtual
- * @param ifname Name of the network interface
- * @returns true if it is a virtual interface, false if it is physical
- * **/
-static bool if_is_virtual(char* ifname) {
-    char path[64];
-    snprintf(path, sizeof(path), "/sys/class/net/%s/device", ifname);
+static int check_dsa(struct bpf_handle *bpf, struct netlink_handle *netlink_h) {
+    bpf->dsa_switch = 0;
 
-    // Check if the device file is present, if not, the interface is virtual
-    return access(path, F_OK) != 0;
-}
+    int rc = netlink_get_dsa_switch(netlink_h, &bpf->dsa_switch);
+    if (rc < 0)
+        return rc;
 
-/**
- * Used to check if a network interface has any physical upper
- * @param ifname Name of the network interface
- * @returns true if it has, false if not
- * **/
-static bool if_any_upper_physical(char* ifname) {
-    const char base_path[] = "/sys/class/net/";
-    const char upper[] = "/upper_";
+    if (!bpf->dsa)
+        return 0;
 
-    char path[64];
-    snprintf(path, sizeof(path), "%s%s%s*", base_path, ifname, upper);
-
-    glob_t globbuf;
-    glob(path, 0, NULL, &globbuf);
-
-    unsigned int offset = sizeof(base_path) + strlen(ifname) + sizeof(upper) - 2;
-    bool any_physical = false;
-
-    for (int i = 0; i < globbuf.gl_pathc; i++) {
-        if (!if_is_virtual(globbuf.gl_pathv[i] + offset)) {
-            any_physical = true;
-            break;
-        }
+    if (!bpf->dsa_switch) {
+        //FW_ERROR("Error retrieving DSA interfaces: %s (-%d).\n", strerror(rc), rc);
+        FW_ERROR("Error: Couldn't find a DSA interface.\n");
+        return -1;
     }
 
-    globfree(&globbuf);
+    const char* rodata_dsa_sec = ".rodata.dsa";
+    const char* bss_dsa_sec    = ".bss.dsa";
 
-    return any_physical;
+    // Find the .rodata section
+    struct bpf_map *rodata_dsa = bpf_object__find_map_by_name(bpf->obj, rodata_dsa_sec);
+    if (!rodata_dsa) {
+        FW_ERROR("Error: BPF program wasn't built with DSA support (Couldn't find BPF section %s).\n",
+            rodata_dsa_sec);
+
+        return -1;
+    }
+
+    size_t rodata_dsa_size;
+    struct dsa_info *dsa_info = bpf_map__initial_value(rodata_dsa, &rodata_dsa_size);
+    if (!dsa_info) {
+        FW_ERROR("Error: Failed to get DSA information from BPF %s.\n", rodata_dsa_sec);
+        return -1;
+    }
+
+    // Find the .bss section
+    struct bpf_map *bss_dsa = bpf_object__find_map_by_name(bpf->obj, bss_dsa_sec);
+    if (!bss_dsa) {
+        FW_ERROR("Error: Couldn't find BPF section %s.\n", bss_dsa_sec);
+        return -1;
+    }
+
+    size_t bss_dsa_size;
+    __u32 *dsa_switch = bpf_map__initial_value(bss_dsa, &bss_dsa_size);
+    if (!dsa_info) {
+        FW_ERROR("Error: Couldn't set DSA switch in BPF section %s.\n", bss_dsa_sec);
+        return -1;
+    }
+
+    *dsa_switch = bpf->dsa_switch;
+
+    return 0;
 }
 
-static bool if_should_attach(char* ifname) {
-    return !if_is_virtual(ifname) && !if_any_upper_physical(ifname);
-}
-
-struct bpf_object_program* bpf_load_program(const char* prog_path, enum bpf_prog_type prog_type) {
-    struct bpf_object_program* bpf = (struct bpf_object_program*)malloc(sizeof(struct bpf_object_program));
+struct bpf_handle* bpf_load_program(const char *obj_path, enum bpf_prog_type prog_type, struct netlink_handle *netlink_h, bool dsa) {
+    struct bpf_handle* bpf = (struct bpf_handle*)malloc(sizeof(struct bpf_handle));
     if (!bpf) {
         FW_ERROR("Error allocating BPF handle: %s (-%d).\n", strerror(errno), errno);
         return NULL;
     }
 
     // Try to open the BPF object file, return on error
-    bpf->obj = bpf_object__open_file(prog_path, NULL);
+    bpf->obj = bpf_object__open_file(obj_path, NULL);
     if (!bpf->obj) {
         FW_ERROR("Error opening BPF object file: %s (-%d).\n", strerror(errno), errno);
         goto free;
@@ -89,11 +104,15 @@ struct bpf_object_program* bpf_load_program(const char* prog_path, enum bpf_prog
 
     bpf->prog = bpf_object__next_program(bpf->obj, NULL);
     if (!bpf->prog) {
-        FW_ERROR("Couldn't find a BPF program in %s.\n", prog_path);
+        FW_ERROR("Couldn't find a BPF program in %s.\n", obj_path);
         goto bpf_object__close;
     }
     
     bpf_program__set_type(bpf->prog, prog_type);
+
+    bpf->dsa = dsa;
+    if (check_dsa(bpf, netlink_h) != 0)
+        goto bpf_object__close;
 
     // Try to load the BPF object into the kernel, return on error
     if (bpf_object__load(bpf->obj) != 0) {
@@ -112,7 +131,7 @@ free:
     return NULL;
 }
 
-void bpf_unload_program(struct bpf_object_program* bpf) {
+void bpf_unload_program(struct bpf_handle* bpf) {
     // Unpin the maps from /sys/fs/bpf
     bpf_object__unpin_maps(bpf->obj, NULL);
     bpf_object__close(bpf->obj);
@@ -120,13 +139,16 @@ void bpf_unload_program(struct bpf_object_program* bpf) {
     free(bpf);
 }
 
-int bpf_if_attach_program(struct bpf_object_program* bpf, char* ifname, __u32 xdp_flags) {
+int bpf_if_attach_program(struct bpf_handle* bpf, char* ifname, __u32 xdp_flags) {
     // Get the interface index from the interface name
-    unsigned int ifindex = if_nametoindex(ifname);
-    if (ifindex == 0) {
+    __u32 ifindex = if_nametoindex(ifname);
+    if (!ifindex) {
         FW_ERROR("Error finding network interface %s: %s (-%d).\n", ifname, strerror(errno), errno);
         return errno;
     }
+
+    if (ifindex == bpf->dsa_switch && !bpf->dsa)
+        return 0;
     
     enum bpf_prog_type prog_type = bpf_program__type(bpf->prog);
     switch (prog_type) {
@@ -174,13 +196,16 @@ int bpf_if_attach_program(struct bpf_object_program* bpf, char* ifname, __u32 xd
     return 0;
 }
 
-void bpf_if_detach_program(struct bpf_object_program* bpf, char* ifname, __u32 xdp_flags) {
+void bpf_if_detach_program(struct bpf_handle* bpf, char* ifname, __u32 xdp_flags) {
     // Get the interface index from the interface name
-    unsigned int ifindex = if_nametoindex(ifname);
-    if (ifindex == 0) {
+    __u32 ifindex = if_nametoindex(ifname);
+    if (!ifindex) {
         FW_ERROR("Error finding network interface %s: %s (-%d).\n", ifname, strerror(errno), errno);
         return;
     }
+
+    if (ifindex == bpf->dsa_switch && !bpf->dsa)
+        return;
 
     enum bpf_prog_type prog_type = bpf_program__type(bpf->prog);
     switch (prog_type) {
@@ -209,7 +234,7 @@ void bpf_if_detach_program(struct bpf_object_program* bpf, char* ifname, __u32 x
     }
 }
 
-int bpf_ifs_attach_program(struct bpf_object_program* bpf, char* ifnames[], unsigned int ifname_size, __u32 xdp_flags) {
+int bpf_ifs_attach_program(struct bpf_handle* bpf, char* ifnames[], unsigned int ifname_size, __u32 xdp_flags) {
     // Iterate to all the given interfaces and attache the program to them
     for (int i = 0; i < ifname_size; i++) {
         int rc = bpf_if_attach_program(bpf, ifnames[i], xdp_flags);
@@ -225,13 +250,13 @@ int bpf_ifs_attach_program(struct bpf_object_program* bpf, char* ifnames[], unsi
     return 0;
 }
 
-void bpf_ifs_detach_program(struct bpf_object_program* bpf, char* ifnames[], unsigned int ifname_size, __u32 xdp_flags) {
+void bpf_ifs_detach_program(struct bpf_handle* bpf, char* ifnames[], unsigned int ifname_size, __u32 xdp_flags) {
     // Iterate to all the given interfaces and detache the program from them
     for (int i = 0; i < ifname_size; i++)
         bpf_if_detach_program(bpf, ifnames[i], xdp_flags);
 }
 
-int bpf_attach_program(struct bpf_object_program* bpf, __u32 xdp_flags) {
+int bpf_attach_program(struct bpf_handle* bpf, __u32 xdp_flags, struct netlink_handle *netlink_h) {
     // Retrieve the name and index of all network interfaces
     struct if_nameindex* ifaces = if_nameindex();
     if (!ifaces) {
@@ -241,14 +266,19 @@ int bpf_attach_program(struct bpf_object_program* bpf, __u32 xdp_flags) {
 
     int rc = 0;
     for (struct if_nameindex* iface = ifaces; iface->if_index && iface->if_name; iface++) {
-        if (!if_should_attach(iface->if_name))
+        rc = netlink_if_should_attach(netlink_h, iface->if_index, bpf->dsa);
+        if (rc < 0)
+            goto error;
+
+        if (rc == 0)
             continue;
 
         rc = bpf_if_attach_program(bpf, iface->if_name, xdp_flags);
         if (rc != 0) {
+error:
             // If an error occured while attaching to one interface, detach all the already attached programs
             while (--iface >= ifaces)
-                if (if_should_attach(iface->if_name))
+                if (netlink_if_should_attach(netlink_h, iface->if_index, bpf->dsa) == 1)
                     bpf_if_detach_program(bpf, iface->if_name, xdp_flags);
 
             break;
@@ -261,7 +291,7 @@ int bpf_attach_program(struct bpf_object_program* bpf, __u32 xdp_flags) {
     return rc;
 }
 
-int bpf_detach_program(struct bpf_object_program* bpf, __u32 xdp_flags) {
+int bpf_detach_program(struct bpf_handle* bpf, __u32 xdp_flags, struct netlink_handle *netlink_h) {
     // Retrieve the name and index of all network interfaces
     struct if_nameindex* ifaces = if_nameindex();
     if (!ifaces) {
@@ -270,7 +300,7 @@ int bpf_detach_program(struct bpf_object_program* bpf, __u32 xdp_flags) {
     }
 
     for (struct if_nameindex* iface = ifaces; iface->if_index && iface->if_name; iface++)
-        if (if_should_attach(iface->if_name))
+        if (netlink_if_should_attach(netlink_h, iface->if_index, bpf->dsa) == 1)
             bpf_if_detach_program(bpf, iface->if_name, xdp_flags);
 
     // Retrieved interfaces are dynamically allocated, so they must be freed
@@ -279,6 +309,6 @@ int bpf_detach_program(struct bpf_object_program* bpf, __u32 xdp_flags) {
     return 0;
 }
 
-int bpf_get_map_fd(struct bpf_object_program* bpf, const char *map_name) {
+int bpf_get_map_fd(struct bpf_handle* bpf, const char *map_name) {
     return bpf_object__find_map_fd_by_name(bpf->obj, map_name);
 }

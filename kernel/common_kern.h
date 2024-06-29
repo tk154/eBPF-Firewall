@@ -101,6 +101,7 @@ struct l2_header {
     __be16 pppoe_id;
     __u16  pppoe_len;
     __be16 proto;
+    __u8   dsa_port;
 };
 
 struct l3_header {
