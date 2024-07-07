@@ -7,43 +7,6 @@
 #include <arpa/inet.h>
 
 
-static void log_nat(struct nat_entry *n_entry, __u8 family) {
-    if (fw_log_level >= FW_LOG_LEVEL_VERBOSE) {
-        if (!n_entry->rewrite_flag)
-            return;
-
-        FW_VERBOSE("Nat:");
-
-        if (n_entry->rewrite_flag & REWRITE_SRC_IP) {
-            char src_ip[family == AF_INET ? INET_ADDRSTRLEN : INET6_ADDRSTRLEN];
-            inet_ntop(family, &n_entry->src_ip, src_ip, sizeof(src_ip));
-            FW_VERBOSE(" %s", src_ip);
-        }
-        else
-            FW_VERBOSE(" -");
-
-        if (n_entry->rewrite_flag & REWRITE_SRC_PORT)
-            FW_VERBOSE(" %hu", ntohs(n_entry->src_port));
-        else
-            FW_VERBOSE(" -");
-
-        if (n_entry->rewrite_flag & REWRITE_DEST_IP) {
-            char dest_ip[family == AF_INET ? INET_ADDRSTRLEN : INET6_ADDRSTRLEN];
-            inet_ntop(family, &n_entry->dest_ip, dest_ip, sizeof(dest_ip));
-            FW_VERBOSE(" %s", dest_ip);
-        }
-        else
-            FW_VERBOSE(" -");
-
-        if (n_entry->rewrite_flag & REWRITE_DEST_PORT)
-            FW_VERBOSE(" %hu", ntohs(n_entry->dest_port));
-        else
-            FW_VERBOSE(" -");
-
-        FW_VERBOSE("\n");
-    }
-}
-
 void check_nat(struct nf_conntrack *ct, struct flow_key_value *flow) {
     __u8 family = flow->key.family;
     size_t ip_len = family == AF_INET ? 4 : 16;
@@ -158,5 +121,5 @@ void check_nat(struct nf_conntrack *ct, struct flow_key_value *flow) {
         csum_replace(&flow->value.n_entry.l4_cksum_diff, &old_port, &new_port, 1);
     }
 
-    log_nat(&flow->value.n_entry, family);
+    bpfw_verbose_nat("Nat:", &flow->value.n_entry, family);
 }

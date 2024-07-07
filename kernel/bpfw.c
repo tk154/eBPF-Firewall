@@ -8,12 +8,16 @@
 #include "push_header.h"
 #include "mangle.h"
 
+#ifndef FLOW_MAP_MAX_ENTRIES
+#define FLOW_MAP_MAX_ENTRIES 1024
+#endif
+
 
 struct {
 	__uint(type, BPF_MAP_TYPE_LRU_HASH);
 	__type(key, struct flow_key);
 	__type(value, struct flow_value);
-	__uint(max_entries, 1024);
+	__uint(max_entries, FLOW_MAP_MAX_ENTRIES);
 	//__uint(map_flags, BPF_F_NO_PREALLOC);
 	__uint(pinning, LIBBPF_PIN_BY_NAME);
 } FLOW_MAP SEC(".maps");
@@ -78,7 +82,6 @@ SEC("bpfw")
 **/
 int fw_func(struct BPFW_CTX *ctx) {
 	BPF_DEBUG("---------- New Package ----------");
-	BPF_DEBUG("ifindex: %u", ctx->ingress_ifindex);
 
 	// Save pointer to the first and last Byte of the received package
 	struct packet_data pkt = {
@@ -121,8 +124,10 @@ int fw_func(struct BPFW_CTX *ctx) {
 
 		// If there is none, create a new one
 		struct flow_value f_value = {};
-		if (bpf_map_update_elem(&FLOW_MAP, &f_key, &f_value, BPF_NOEXIST) != 0)
-			BPF_WARN("bpf_map_update_elem error");
+
+		int rc = bpf_map_update_elem(&FLOW_MAP, &f_key, &f_value, BPF_NOEXIST);
+		if (rc != 0)
+			BPF_WARN("bpf_map_update_elem error: %d", rc);
 
 		return BPFW_PASS;
 	}
@@ -134,22 +139,20 @@ int fw_func(struct BPFW_CTX *ctx) {
 		case ACTION_REDIRECT:
 			// Pass the package to the network stack if 
 			// there is a FIN or RST or the TTL expired
-			if (tcp_finished(&f_key, f_value, l4.tcp) || *l3.ttl <= 1)
+			if (tcp_finished(&f_key, f_value, l4.tcp_flags) || *l3.ttl <= 1)
 				return BPFW_PASS;
 
-			__s8 l2_diff = calc_l2_diff(&f_key, &f_value->next_h);
-
-#ifdef TC_PROGRAM
-			if (l2_diff < 0)
-				return BPFW_PASS;
-#endif
 			mangle_packet(&l3, &l4, f_value);
 
-			if (!push_l2_header(ctx, &pkt, l2_diff, &l2, &f_value->next_h))
+			if (!push_l2_header(ctx, &pkt, &l2, &f_value->next_h))
 				return BPFW_DROP;
 
 			BPF_DEBUG("Redirect to ifindex %u", f_value->next_h.ifindex);
 
+#ifdef XDP_PROGRAM
+			if (ctx->ingress_ifindex == f_value->next_h.ifindex)
+				return XDP_TX;
+#endif
 			// Redirect the package
 			return bpf_redirect(f_value->next_h.ifindex, 0);
 

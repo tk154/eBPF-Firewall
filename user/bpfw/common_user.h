@@ -1,14 +1,11 @@
 #ifndef BPFW_COMMON_USER_H
 #define BPFW_COMMON_USER_H
 
-#include <stdio.h>
 
-#include <linux/bpf.h>
-
-#include <arpa/inet.h>
-#include <net/if.h>
+#include <stdbool.h>
 
 #include "../../common.h"
+#include "logging/logging.h"
 
 
 struct flow_key_value {
@@ -16,46 +13,30 @@ struct flow_key_value {
     struct flow_value value;
 };
 
+
+enum bpfw_hook {
+    BPFW_HOOK_TC          = (1U << 0),
+
+    BPFW_HOOK_XDP_GENERIC = (1U << 1),
+    BPFW_HOOK_XDP_DRIVER  = (1U << 2),
+    BPFW_HOOK_XDP_OFFLOAD = (1U << 3),
+
+    BPFW_HOOK_XDP         = ( BPFW_HOOK_XDP_GENERIC | BPFW_HOOK_XDP_DRIVER | BPFW_HOOK_XDP_OFFLOAD )
+};
+
 struct cmd_args {
-    enum bpf_prog_type prog_type;
-    __u32 xdp_flags;
     char* prog_path;
-    bool dsa;
+    enum bpfw_hook hook;
 
     char** if_names;
     unsigned int if_count;
 
+    bool dsa;
+
     unsigned int map_poll_sec;
+    unsigned int tcp_flow_timeout;
+    unsigned int udp_flow_timeout;
 };
-
-
-extern int fw_log_level;
-
-#define FW_LOG_LEVEL_ERROR   0
-#define FW_LOG_LEVEL_WARN    1
-#define FW_LOG_LEVEL_INFO    2
-#define FW_LOG_LEVEL_DEBUG   3
-#define FW_LOG_LEVEL_VERBOSE 4
-
-#define FW_ERROR(format, ...) \
-    do { if (fw_log_level >= FW_LOG_LEVEL_ERROR) \
-        fprintf(stderr, format, ##__VA_ARGS__); } while (0)
-
-#define FW_WARN(format, ...) \
-    do { if (fw_log_level >= FW_LOG_LEVEL_WARN) \
-        fprintf(stderr, format, ##__VA_ARGS__); } while (0)
-
-#define FW_INFO(format, ...) \
-    do { if (fw_log_level >= FW_LOG_LEVEL_INFO) \
-        printf(format, ##__VA_ARGS__); } while (0)
-
-#define FW_DEBUG(format, ...) \
-    do { if (fw_log_level >= FW_LOG_LEVEL_DEBUG) \
-        printf(format, ##__VA_ARGS__); } while (0)
-
-#define FW_VERBOSE(format, ...) \
-    do { if (fw_log_level >= FW_LOG_LEVEL_VERBOSE) \
-        printf(format, ##__VA_ARGS__); } while (0)
 
 
 #endif

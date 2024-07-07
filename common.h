@@ -1,11 +1,11 @@
 #ifndef BPFW_COMMON_H
 #define BPFW_COMMON_H
 
-#include <stdbool.h>
-#include <linux/types.h>
+#include <stddef.h>
 
+#include <linux/types.h>
 #include <linux/if_ether.h>
-#include <arpa/inet.h>
+#include <sys/socket.h>
 
 
 #define STRINGIFY(x)  #x
@@ -13,6 +13,12 @@
 
 #define FLOW_MAP      flow_map
 #define FLOW_MAP_NAME MAP_NAME(FLOW_MAP)
+
+#define DSA_PROTO_MAX_LEN 16
+
+#define DSA_PROTO_SECTION	".rodata.dsa.proto"
+#define DSA_TAG_SECTION   	".rodata.dsa.tag"
+#define DSA_SWITCH_SECTION 	".bss.dsa.switch"
 
 #define IPV4_ALEN 4
 #define IPV6_ALEN 16
@@ -40,6 +46,7 @@ struct next_hop {
 	__u8   src_mac[ETH_ALEN];
 	__u8   dest_mac[ETH_ALEN];
 	__u8   dsa_port;
+	__s8   l2_diff;
 };
 
 struct nat_entry {
@@ -59,10 +66,24 @@ struct flow_value {
 	__u8    action;
 };
 
-struct dsa_info {
-	__u8 ethhdr_dsa_rx_size;
-	__u8 ethhdr_dsa_tx_size;
+
+struct dsa_tag {
+	__u8 rx_size;
+	__u8 tx_size;
 };
+
+struct vlanhdr {
+	__be16 tci;
+	__be16 proto;
+};
+
+struct pppoehdr {
+	__u8 vertype;
+	__u8 code;
+	__be16 sid;
+	__be16 length;
+    __be16 proto;
+} __attribute__((packed));
 
 
 #define DSA_PORT_SET	(1U << 7)

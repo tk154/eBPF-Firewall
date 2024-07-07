@@ -5,17 +5,22 @@ SRC_DIR := .
 OBJ_DIR := obj
 
 BPF_NAME := bpfw
-SRC_FILE := $(SRC_DIR)/$(BPF_NAME).c
+SOURCE   := $(SRC_DIR)/$(BPF_NAME).c
+HEADERS  := $(wildcard $(SRC_DIR)/*.h)
+
+XDP_LE_OBJ_FILE := $(OBJ_DIR)/xdp_le_$(BPF_NAME).o
+XDP_BE_OBJ_FILE := $(OBJ_DIR)/xdp_be_$(BPF_NAME).o
+TC_LE_OBJ_FILE  := $(OBJ_DIR)/tc_le_$(BPF_NAME).o
+TC_BE_OBJ_FILE  := $(OBJ_DIR)/tc_be_$(BPF_NAME).o
 
 XDP_FLAGS := -DXDP_PROGRAM
 TC_FLAGS  := -DTC_PROGRAM
 LE_FLAGS  := -mlittle-endian
 BE_FLAGS  := -mbig-endian
 
-XDP_LE_OBJ_FILE := $(OBJ_DIR)/xdp_le_$(BPF_NAME).o
-TC_LE_OBJ_FILE  := $(OBJ_DIR)/tc_le_$(BPF_NAME).o
-XDP_BE_OBJ_FILE := $(OBJ_DIR)/xdp_be_$(BPF_NAME).o
-TC_BE_OBJ_FILE  := $(OBJ_DIR)/tc_be_$(BPF_NAME).o
+ifdef FLOW_MAP_MAX_ENTRIES
+OPTIONS += -DFLOW_MAP_MAX_ENTRIES=$(FLOW_MAP_MAX_ENTRIES)
+endif
 
 all: generic dsa
 
@@ -45,14 +50,14 @@ $(OBJ_DIR):
 
 define BPF_COMPILE
 $(1): CUSTOM_FLAGS := $(2)
-$(1): $(SRC_FILE) | $(OBJ_DIR)
+$(1): $(SOURCE) $(HEADERS) | $(OBJ_DIR)
 	$(CLANG) $(CFLAGS) $$(CUSTOM_FLAGS) -c $$< -o $$@
 endef
 
-$(eval $(call BPF_COMPILE,$(XDP_LE_OBJ_FILE),$(LE_FLAGS) $(XDP_FLAGS)))
-$(eval $(call BPF_COMPILE,$(TC_LE_OBJ_FILE),$(LE_FLAGS) $(TC_FLAGS)))
-$(eval $(call BPF_COMPILE,$(XDP_BE_OBJ_FILE),$(BE_FLAGS) $(XDP_FLAGS)))
-$(eval $(call BPF_COMPILE,$(TC_BE_OBJ_FILE),$(BE_FLAGS) $(TC_FLAGS)))
+$(eval $(call BPF_COMPILE,$(XDP_LE_OBJ_FILE),$(LE_FLAGS) $(XDP_FLAGS) $(OPTIONS)))
+$(eval $(call BPF_COMPILE,$(XDP_BE_OBJ_FILE),$(BE_FLAGS) $(XDP_FLAGS) $(OPTIONS)))
+$(eval $(call BPF_COMPILE,$(TC_LE_OBJ_FILE),$(LE_FLAGS) $(TC_FLAGS) $(OPTIONS)))
+$(eval $(call BPF_COMPILE,$(TC_BE_OBJ_FILE),$(BE_FLAGS) $(TC_FLAGS) $(OPTIONS)))
 
 
 include dsa.mk

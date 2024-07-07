@@ -2,7 +2,7 @@
 #define BPFW_CONNTRACK_NAT_H
 
 #include <libnetfilter_conntrack/libnetfilter_conntrack.h>
-#include "../../common_user.h"
+#include "../common_user.h"
 
 
 /**

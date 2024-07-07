@@ -10,58 +10,64 @@
 #include <limits.h>
 #include <unistd.h>
 
-#include <linux/if_link.h>
-
 #include "common_user.h"
 #include "flowtrack.h"
+#include "logging/logging.h"
 
-#define BPF_DEFAULT_MAP_POLL_SEC 5
+#define DEFAULT_BPF_MAP_POLL_SEC 5
+#define DEFAULT_TCP_FLOW_TIMEOUT 30
+#define DEFAULT_UDP_FLOW_TIMEOUT 30
 
 
-int fw_log_level = FW_LOG_LEVEL_INFO;
 struct flowtrack_handle* flowtrack_h;
 
 struct cmd_args args = {
     .dsa = false,
-    .map_poll_sec = BPF_DEFAULT_MAP_POLL_SEC
+    .map_poll_sec = DEFAULT_BPF_MAP_POLL_SEC,
+    .tcp_flow_timeout = DEFAULT_TCP_FLOW_TIMEOUT,
+    .udp_flow_timeout = DEFAULT_UDP_FLOW_TIMEOUT
 };
 
 
 static void print_usage(char* prog) {
-    FW_ERROR("Usage: %s hook bpf_object_path [network_interface(s)...] [options]\n\n", prog);
+    bpfw_error("Usage: %s <hook> <bpf_object_path> [network_interface(s)...] [options]\n\n", prog);
 
-    FW_ERROR("Hooks:\n");
-    FW_ERROR("  xdp       \tXDP hook\n");
-    FW_ERROR("  xdpgeneric\tGeneric/SKB XDP hook\n");
-    FW_ERROR("  xdpdrv    \tDriver/Native XDP hook\n");
-    FW_ERROR("  xdpoffload\tXDP offloaded into hardware\n");
-    FW_ERROR("  tc        \tTC hoook\n\n");
+    bpfw_error("Hooks:\n");
+    bpfw_error("  xdp       \tXDP hook\n");
+    bpfw_error("  xdpgeneric\tGeneric/SKB XDP hook\n");
+    bpfw_error("  xdpdriver \tDriver/Native XDP hook\n");
+    bpfw_error("  xdpoffload\tXDP offloaded into hardware\n");
+    bpfw_error("  tc        \tTC hoook\n\n");
 
-    FW_ERROR("Options:\n");
-    FW_ERROR("  -i, --interval \tBPF map poll interval in seconds (Default: %u)\n", BPF_DEFAULT_MAP_POLL_SEC);
-    FW_ERROR("  -l, --log-level\tLog level, can be error, warning, info, debug, verbose (Default: info)\n");
+    bpfw_error("Options:\n");
+    bpfw_error("  -d, --dsa        \tTry to attach the BPF program to the DSA switch, if there is one\n");
+    bpfw_error("  -i, --interval   \tBPF map poll interval in seconds (Default: %u)\n", DEFAULT_BPF_MAP_POLL_SEC);
+    bpfw_error("  -l, --log-level  \tLog level, can be error, warning, info, debug, verbose (Default: info)\n");
+    bpfw_error("  -t, --tcp-timeout\tBPF offload timeout for TCP flows in seconds (Default: %u)\n", DEFAULT_TCP_FLOW_TIMEOUT);
+    bpfw_error("  -u, --udp-timeout\tBPF offload timeout for UDP flows in seconds (Default: %u)\n", DEFAULT_UDP_FLOW_TIMEOUT);
 }
 
 // Checks if the given arguments are valid and determines the BPF hook
 static bool check_cmd_args(int argc, char* argv[]) {
     struct option options[] = {
-        { "dsa",       no_argument,       0, 'd' },
-        { "interval",  required_argument, 0, 'i' },
-        { "log-level", required_argument, 0, 'l' },
-        { 0,           0,                 0,  0  }
+        { "dsa",         no_argument,       0, 'd' },
+        { "interval",    required_argument, 0, 'i' },
+        { "log-level",   required_argument, 0, 'l' },
+        { "tcp-timeout", required_argument, 0, 't' },
+        { "udp-timeout", required_argument, 0, 'u' },
+        { 0,             0,                 0,  0  }
     };
 
     int opt, opt_index;
-    while ((opt = getopt_long(argc, argv, "i:l:", options, &opt_index)) != -1) {
+    while ((opt = getopt_long(argc, argv, "d:i:l:t:u:", options, &opt_index)) != -1) {
         switch (opt) {
             case 'd':
                 args.dsa = true;
             break;
 
             case 'i':
-                char *endptr = NULL;
-                args.map_poll_sec = strtoul(optarg, &endptr, 10);
-                if (optarg == endptr)
+                args.map_poll_sec = strtoul(optarg, NULL, 10);
+                if (!args.map_poll_sec)
                     return false;
             break;
 
@@ -69,16 +75,28 @@ static bool check_cmd_args(int argc, char* argv[]) {
                 size_t arg_len = strlen(optarg);
 
                 if (strncmp(optarg, "error", arg_len) == 0)
-                    fw_log_level = FW_LOG_LEVEL_ERROR;
+                    bpfw_set_log_level(BPFW_ERROR);
                 else if (strncmp(optarg, "warning", arg_len) == 0)
-                    fw_log_level = FW_LOG_LEVEL_WARN;
+                    bpfw_set_log_level(BPFW_WARN);
                 else if (strncmp(optarg, "info", arg_len) == 0)
-                    fw_log_level = FW_LOG_LEVEL_INFO;
+                    bpfw_set_log_level(BPFW_INFO);
                 else if (strncmp(optarg, "debug", arg_len) == 0)
-                    fw_log_level = FW_LOG_LEVEL_DEBUG;
+                    bpfw_set_log_level(BPFW_DEBUG);
                 else if (strncmp(optarg, "verbose", arg_len) == 0)
-                    fw_log_level = FW_LOG_LEVEL_VERBOSE;
+                    bpfw_set_log_level(BPFW_VERBOSE);
                 else
+                    return false;
+            break;
+
+            case 't':
+                args.tcp_flow_timeout = strtoul(optarg, NULL, 10);
+                if (!args.tcp_flow_timeout)
+                    return false;
+            break;
+
+            case 'u':
+                args.udp_flow_timeout = strtoul(optarg, NULL, 10);
+                if (!args.udp_flow_timeout)
                     return false;
             break;
 
@@ -93,26 +111,18 @@ static bool check_cmd_args(int argc, char* argv[]) {
 
     // Check the hook argument
     char* prog_hook = argv[optind];
-    int xdp_cmp = strcmp(prog_hook, "xdp");
+    size_t arg_len = strlen(prog_hook);
 
-    if (xdp_cmp >= 0) {
-        args.prog_type = BPF_PROG_TYPE_XDP;
-
-        if (xdp_cmp > 0) {
-            size_t arg_len = strlen(prog_hook);
-
-            if (strncmp(prog_hook, "xdpgeneric", arg_len) == 0)
-                args.xdp_flags = XDP_FLAGS_SKB_MODE;
-            else if (strncmp(prog_hook, "xdpdrv", arg_len) == 0)
-                args.xdp_flags = XDP_FLAGS_DRV_MODE;
-            else if (strncmp(prog_hook, "xdpoffload", arg_len) == 0)
-                args.xdp_flags = XDP_FLAGS_HW_MODE;
-            else
-                return false;
-        }
-    }
+    if (strcmp(prog_hook, "xdp") == 0)
+        args.hook = BPFW_HOOK_XDP;
+    else if (strncmp(prog_hook, "xdpgeneric", arg_len) == 0)
+        args.hook = BPFW_HOOK_XDP_GENERIC;
+    else if (strncmp(prog_hook, "xdpdriver",  arg_len) == 0)
+        args.hook = BPFW_HOOK_XDP_DRIVER;
+    else if (strncmp(prog_hook, "xdpoffload", arg_len) == 0)
+        args.hook = BPFW_HOOK_XDP_OFFLOAD;
     else if (strcmp(prog_hook, "tc") == 0)
-        args.prog_type = BPF_PROG_TYPE_SCHED_CLS;
+        args.hook = BPFW_HOOK_TC;
     else
         return false;
 
@@ -128,7 +138,7 @@ static bool check_cmd_args(int argc, char* argv[]) {
 // Interrupt and terminate signal handler
 static void signal_handler(int sig) {
     // On SIGINT or SIGTERM, the main loop should exit
-    FW_INFO("\nUnloading ...\n");
+    bpfw_info("\nUnloading ...\n");
 
     flowtrack_destroy(flowtrack_h, &args);
     exit(EXIT_SUCCESS);
@@ -151,7 +161,7 @@ int main(int argc, char* argv[]) {
     sigaction(SIGINT, &act, NULL);
     sigaction(SIGTERM, &act, NULL);
 
-    FW_INFO("Successfully loaded BPF program. Press CTRL+C to unload.\n");
+    bpfw_info("Successfully loaded BPF program. Press CTRL+C to unload.\n");
 
     while (1) {
         sleep(args.map_poll_sec);

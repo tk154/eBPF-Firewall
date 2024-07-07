@@ -106,7 +106,7 @@ static void log_rule(struct flow_key *f_key, const char *target, const char *nam
         inet_ntop(f_key->family, &f_key->src_ip, src_ip, sizeof(src_ip));
         inet_ntop(f_key->family, &f_key->dest_ip, dest_ip, sizeof(dest_ip));
 
-        FW_DEBUG("\n%s (%s): %s %02x:%02x:%02x:%02x:%02x:%02x "
+        bpfw_debug("\n%s (%s): %s %02x:%02x:%02x:%02x:%02x:%02x "
 				 "%s %s %hu %s %hu\n", target, name, ifname,
 			f_key->src_mac[0], f_key->src_mac[1], f_key->src_mac[2],
 			f_key->src_mac[3], f_key->src_mac[4], f_key->src_mac[5],
@@ -118,7 +118,8 @@ static void log_rule(struct flow_key *f_key, const char *target, const char *nam
 struct ucode_handle *ucode_init() {
     struct ucode_handle *ucode_h = malloc(sizeof(struct ucode_handle));
     if (!ucode_h) {
-        FW_ERROR("Error allocating ucode handle: %s (-%d).\n", strerror(errno), errno);
+        bpfw_error("Error allocating ucode handle: %s (-%d).\n", strerror(errno), errno);
+        bpfw_error("Error allocating ucode handle: %s (-%d).\n", strerror(errno), errno);
         return NULL;
     }
 
@@ -139,7 +140,8 @@ struct ucode_handle *ucode_init() {
 
 	/* check if compilation failed */
 	if (!ucode_h->program) {
-		FW_ERROR("Failed to compile ucode program: %s.\n", syntax_error);
+		bpfw_error("Failed to compile ucode program: %s.\n", syntax_error);
+		bpfw_error("Failed to compile ucode program: %s.\n", syntax_error);
 		goto free;
 	}
 
@@ -221,15 +223,18 @@ int ucode_match_rule(struct ucode_handle *ucode_h, struct flow_key_value *flow) 
 
 		case STATUS_EXIT:
 			rc = (int)ucv_int64_get(last_expression_result);
-			FW_ERROR("The ucode program exited with code: %d.\n", rc);
+			bpfw_error("The ucode program exited with code: %d.\n", rc);
+			bpfw_error("The ucode program exited with code: %d.\n", rc);
 		break;
 
 		case ERROR_COMPILE:
-			FW_ERROR("A compilation error occurred while running the ucode program.\n");
+			bpfw_error("A compilation error occurred while running the ucode program.\n");
+			bpfw_error("A compilation error occurred while running the ucode program.\n");
 		break;
 
 		case ERROR_RUNTIME:
-			FW_ERROR("A runtime error occurred while running the ucode program.\n");
+			bpfw_error("A runtime error occurred while running the ucode program.\n");
+			bpfw_error("A runtime error occurred while running the ucode program.\n");
 		break;
 	}
 

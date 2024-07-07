@@ -1,22 +1,14 @@
 #include "bpf_loader.h"
 
 #include <errno.h>
+#include <glob.h>
 #include <stdlib.h>
-#include <unistd.h>
-
-#include <linux/ethtool.h>
-#include <linux/if.h>
-#include <linux/if_link.h>
-#include <linux/sockios.h>
-
-#include <net/if.h>
-#include <sys/ioctl.h>
 
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
 
-#include "../common_user.h"
-#include "../netlink/netlink.h"
+#include <net/if.h>
+#include <linux/if_link.h>
 
 
 // Struct to keep BPF object and program pointers together
@@ -24,99 +16,144 @@ struct bpf_handle {
     struct bpf_object  *obj;    // BPF object pointer
     struct bpf_program *prog;   // BPF program pointer
 
+    enum bpfw_hook hook;
+
     bool  dsa;
     __u32 dsa_switch;
 
-    /*struct {
-        __u32 handle;
-        __u32 priority;
-    } tc;*/
+    //struct {
+    //    __u32 handle;
+    //    __u32 priority;
+    //} tc;
 };
 
 
-static int check_dsa(struct bpf_handle *bpf, struct netlink_handle *netlink_h) {
-    bpf->dsa_switch = 0;
+#define SYSFS_SYS_CLASS_NET "/sys/class/net/"
 
-    int rc = netlink_get_dsa_switch(netlink_h, &bpf->dsa_switch);
-    if (rc < 0)
-        return rc;
+static int get_dsa_switch(__u32 *dsa_switch, char *tag_proto) {
+    const char *glob_path = SYSFS_SYS_CLASS_NET"*/dsa/tagging";
+    int rc = 0;
+
+    glob_t globbuf;
+    glob(glob_path, 0, NULL, &globbuf);
+
+    size_t sw_count = globbuf.gl_pathc;
+    if (sw_count == 0)
+        goto globfree;
+
+    char* tag_file_path = globbuf.gl_pathv[0];
+    FILE *tag_file = fopen(tag_file_path, "r");
+    if (!tag_file) {
+        bpfw_error("Error opening '%s': %s (-%d).\n", tag_file_path, strerror(errno), errno);
+        rc = -1;
+
+        goto globfree;
+    }
+
+    if (!fgets(tag_proto, DSA_PROTO_MAX_LEN, tag_file)) {
+        bpfw_error("Error reading '%s': %s (-%d).\n", tag_file_path, strerror(errno), errno);
+        rc = -1;
+
+        goto fclose;
+    }
+
+    tag_proto[strcspn(tag_proto, "\n")] = '\0';
+
+    char *sw_name = tag_file_path + sizeof(SYSFS_SYS_CLASS_NET) - 1;
+    sw_name[strcspn(sw_name, "/")] = '\0';
+    *dsa_switch = if_nametoindex(sw_name);
+
+fclose:
+    fclose(tag_file);
+
+globfree:
+    globfree(&globbuf);
+
+    return rc;
+}
+
+static int check_dsa(struct bpf_handle *bpf) {
+    bpf->dsa_switch = 0;
+    char switch_proto[DSA_PROTO_MAX_LEN];
+
+    if (get_dsa_switch(&bpf->dsa_switch, switch_proto) != 0)
+        return -1;
 
     if (!bpf->dsa)
         return 0;
 
     if (!bpf->dsa_switch) {
-        //FW_ERROR("Error retrieving DSA interfaces: %s (-%d).\n", strerror(rc), rc);
-        FW_ERROR("Error: Couldn't find a DSA interface.\n");
+        bpfw_error("Error: Couldn't find a DSA switch.\n");
         return -1;
     }
 
-    const char* rodata_dsa_sec = ".rodata.dsa";
-    const char* bss_dsa_sec    = ".bss.dsa";
+    const char *bpf_proto = bpf_get_section_data(bpf, DSA_PROTO_SECTION, NULL);
+    if (!bpf_proto) {
+        bpfw_error("BPF program wasn't built with DSA support.\n");
+        return -1;
+    }
 
-    // Find the .rodata section
-    struct bpf_map *rodata_dsa = bpf_object__find_map_by_name(bpf->obj, rodata_dsa_sec);
-    if (!rodata_dsa) {
-        FW_ERROR("Error: BPF program wasn't built with DSA support (Couldn't find BPF section %s).\n",
-            rodata_dsa_sec);
+    if (strncmp(switch_proto, bpf_proto, DSA_PROTO_MAX_LEN) != 0) {
+        bpfw_error("Error: DSA protocol of the DSA switch (%s) and the BPF program (%s) don't match.\n",
+            switch_proto, bpf_proto);
 
         return -1;
     }
 
-    size_t rodata_dsa_size;
-    struct dsa_info *dsa_info = bpf_map__initial_value(rodata_dsa, &rodata_dsa_size);
-    if (!dsa_info) {
-        FW_ERROR("Error: Failed to get DSA information from BPF %s.\n", rodata_dsa_sec);
+    __u32 *dsa_switch = bpf_get_section_data(bpf, DSA_SWITCH_SECTION, NULL);
+    if (!dsa_switch)
         return -1;
-    }
-
-    // Find the .bss section
-    struct bpf_map *bss_dsa = bpf_object__find_map_by_name(bpf->obj, bss_dsa_sec);
-    if (!bss_dsa) {
-        FW_ERROR("Error: Couldn't find BPF section %s.\n", bss_dsa_sec);
-        return -1;
-    }
-
-    size_t bss_dsa_size;
-    __u32 *dsa_switch = bpf_map__initial_value(bss_dsa, &bss_dsa_size);
-    if (!dsa_info) {
-        FW_ERROR("Error: Couldn't set DSA switch in BPF section %s.\n", bss_dsa_sec);
-        return -1;
-    }
 
     *dsa_switch = bpf->dsa_switch;
 
     return 0;
 }
 
-struct bpf_handle* bpf_load_program(const char *obj_path, enum bpf_prog_type prog_type, struct netlink_handle *netlink_h, bool dsa) {
+static __u32 get_xdp_flag(enum bpfw_hook hook) {
+    switch (hook) {
+        case BPFW_HOOK_XDP_GENERIC:
+            return XDP_FLAGS_SKB_MODE;
+        case BPFW_HOOK_XDP_DRIVER:
+            return XDP_FLAGS_DRV_MODE;
+        case BPFW_HOOK_XDP_OFFLOAD:
+            return XDP_FLAGS_HW_MODE;
+        default:
+            return 0;
+    }
+}
+
+
+struct bpf_handle* bpf_load_program(const char *obj_path, enum bpfw_hook hook, bool dsa) {
     struct bpf_handle* bpf = (struct bpf_handle*)malloc(sizeof(struct bpf_handle));
     if (!bpf) {
-        FW_ERROR("Error allocating BPF handle: %s (-%d).\n", strerror(errno), errno);
+        bpfw_error("Error allocating BPF handle: %s (-%d).\n", strerror(errno), errno);
         return NULL;
     }
+
+    bpf->hook = hook;
+    bpf->dsa  = dsa;
 
     // Try to open the BPF object file, return on error
     bpf->obj = bpf_object__open_file(obj_path, NULL);
     if (!bpf->obj) {
-        FW_ERROR("Error opening BPF object file: %s (-%d).\n", strerror(errno), errno);
+        bpfw_error("Error opening BPF object file %s: %s (-%d).\n", obj_path, strerror(errno), errno);
         goto free;
     }
 
     bpf->prog = bpf_object__next_program(bpf->obj, NULL);
     if (!bpf->prog) {
-        FW_ERROR("Couldn't find a BPF program in %s.\n", obj_path);
+        bpfw_error("Couldn't find a BPF program in %s.\n", obj_path);
         goto bpf_object__close;
     }
     
-    bpf_program__set_type(bpf->prog, prog_type);
+    bpf_program__set_type(bpf->prog, (hook & BPFW_HOOK_XDP) ? BPF_PROG_TYPE_XDP : BPF_PROG_TYPE_SCHED_CLS);
 
-    bpf->dsa = dsa;
-    if (check_dsa(bpf, netlink_h) != 0)
+    if (check_dsa(bpf) != 0)
         goto bpf_object__close;
 
     // Try to load the BPF object into the kernel, return on error
     if (bpf_object__load(bpf->obj) != 0) {
-        FW_ERROR("Error loading BPF program into kernel: %s (-%d).\n", strerror(errno), errno);
+        bpfw_error("Error loading BPF program into kernel: %s (-%d).\n", strerror(errno), errno);
         goto bpf_object__close;
     }
 
@@ -139,109 +176,105 @@ void bpf_unload_program(struct bpf_handle* bpf) {
     free(bpf);
 }
 
-int bpf_if_attach_program(struct bpf_handle* bpf, char* ifname, __u32 xdp_flags) {
-    // Get the interface index from the interface name
-    __u32 ifindex = if_nametoindex(ifname);
-    if (!ifindex) {
-        FW_ERROR("Error finding network interface %s: %s (-%d).\n", ifname, strerror(errno), errno);
-        return errno;
-    }
-
+int bpf_ifindex_attach_program(struct bpf_handle* bpf, __u32 ifindex) {
     if (ifindex == bpf->dsa_switch && !bpf->dsa)
         return 0;
     
-    enum bpf_prog_type prog_type = bpf_program__type(bpf->prog);
-    switch (prog_type) {
-        case BPF_PROG_TYPE_XDP:
-            // Attach the program to the XDP hook
-            if (bpf_xdp_attach(ifindex, bpf_program__fd(bpf->prog), xdp_flags, NULL) != 0) {
-                FW_ERROR("Error attaching XDP program to %s: %s (-%d).\n", ifname, strerror(errno), errno);
-                return errno;
-            }
-        break;
-
-        case BPF_PROG_TYPE_SCHED_CLS:
-            DECLARE_LIBBPF_OPTS(bpf_tc_hook, hook, .ifindex = ifindex, .attach_point = BPF_TC_INGRESS);
-            DECLARE_LIBBPF_OPTS(bpf_tc_opts, opts, .prog_fd = bpf_program__fd(bpf->prog));
-
-            // Create a TC hook on the ingress of the interface
-            // bpf_tc_hook_create will return an error and print an error message if the hook already exists
-            int rc = bpf_tc_hook_create(&hook);
-            if (rc == -EEXIST)
-                FW_ERROR("TC hook already exists on %s. You can ignore the kernel error message.\n\n", ifname);
-            else if (rc != 0) {
-                FW_ERROR("Error creating TC hook: %s (-%d).\n", strerror(errno), errno);
-                return errno;
-            }
-
-            // Attach the TC prgram to the created hook
-            if (bpf_tc_attach(&hook, &opts) != 0) {
-                FW_ERROR("Error attaching TC program to %s: %s (-%d).\n", ifname, strerror(errno), errno);
-                hook.attach_point |= BPF_TC_EGRESS;
-                bpf_tc_hook_destroy(&hook);
-
-                return errno;
-            }
-
-            /*bpf->tc.handle   = opts.handle;
-            bpf->tc.priority = opts.priority;*/
-        break;
-
-        // If the program is not of type XDP or TC
-        default:
-            FW_ERROR("Error: BPF program type %d is not supported.\n", prog_type);
+    if (bpf->hook & BPFW_HOOK_XDP) {
+        // Attach the program to the XDP hook
+        if (bpf_xdp_attach(ifindex, bpf_program__fd(bpf->prog), get_xdp_flag(bpf->hook), NULL) != 0) {
+            bpfw_error_if("Error attaching XDP program to ", ifindex, errno);
             return -1;
+        }
+    }
+    else {
+        DECLARE_LIBBPF_OPTS(bpf_tc_hook, hook, .ifindex = ifindex, .attach_point = BPF_TC_INGRESS);
+        DECLARE_LIBBPF_OPTS(bpf_tc_opts, opts, .prog_fd = bpf_program__fd(bpf->prog));
+
+        // Create a TC hook on the ingress of the interface
+        // bpf_tc_hook_create will return an error and print an error message if the hook already exists
+        int rc = bpf_tc_hook_create(&hook);
+        if (rc == -EEXIST) {
+            bpfw_error_if("TC hook already exists on ", ifindex, 0);
+            bpfw_error("You can ignore the kernel error message.\n\n");
+        }
+        else if (rc != 0) {
+            bpfw_error("Error creating TC hook: %s (-%d).\n", strerror(errno), errno);
+            return -1;
+        }
+
+        // Attach the TC prgram to the created hook
+        if (bpf_tc_attach(&hook, &opts) != 0) {
+            bpfw_error_if("Error attaching TC program to ", ifindex, errno);
+
+            hook.attach_point |= BPF_TC_EGRESS;
+            bpf_tc_hook_destroy(&hook);
+
+            return -1;
+        }
+
+        /*bpf->tc.handle   = opts.handle;
+        bpf->tc.priority = opts.priority;*/
     }
 
     return 0;
 }
 
-void bpf_if_detach_program(struct bpf_handle* bpf, char* ifname, __u32 xdp_flags) {
-    // Get the interface index from the interface name
-    __u32 ifindex = if_nametoindex(ifname);
-    if (!ifindex) {
-        FW_ERROR("Error finding network interface %s: %s (-%d).\n", ifname, strerror(errno), errno);
-        return;
-    }
-
+void bpf_ifindex_detach_program(struct bpf_handle* bpf, __u32 ifindex) {
     if (ifindex == bpf->dsa_switch && !bpf->dsa)
         return;
 
-    enum bpf_prog_type prog_type = bpf_program__type(bpf->prog);
-    switch (prog_type) {
-        case BPF_PROG_TYPE_XDP:
-            // Detach the program from the XDP hook
-            bpf_xdp_detach(ifindex, xdp_flags, NULL);
-        break;
+    if (bpf->hook & BPFW_HOOK_XDP) {
+        // Detach the program from the XDP hook
+        bpf_xdp_detach(ifindex, get_xdp_flag(bpf->hook), NULL);
+    }
+    else {
+        DECLARE_LIBBPF_OPTS(bpf_tc_hook, hook, .ifindex = ifindex, .attach_point = BPF_TC_INGRESS);
+        //DECLARE_LIBBPF_OPTS(bpf_tc_opts, opts, .handle = bpf->tc.handle, .priority = bpf->tc.priority);
 
-        case BPF_PROG_TYPE_SCHED_CLS:
-            DECLARE_LIBBPF_OPTS(bpf_tc_hook, hook, .ifindex = ifindex, .attach_point = BPF_TC_INGRESS);
-            //DECLARE_LIBBPF_OPTS(bpf_tc_opts, opts, .handle = bpf->tc.handle, .priority = bpf->tc.priority);
+        // Detach the TC prgram
+        //bpf_tc_detach(&hook, &opts);
 
-            // Detach the TC prgram
-            //bpf_tc_detach(&hook, &opts);
-
-            //if (bpf_tc_query(&hook, NULL) == -ENOENT) {
-                // Needed to really destroy the qdisc hook and not just detaching the programs from it
-                hook.attach_point |= BPF_TC_EGRESS;
-                bpf_tc_hook_destroy(&hook);
-            //}
-        break;
-
-        // If the program is not of type XDP or TC
-        default:
-            FW_ERROR("Error: BPF program type %d is not supported.\n", prog_type);
+        //if (bpf_tc_query(&hook, NULL) == -ENOENT) {
+            // Needed to really destroy the qdisc hook and not just detaching the programs from it
+            hook.attach_point |= BPF_TC_EGRESS;
+            bpf_tc_hook_destroy(&hook);
+        //}
     }
 }
 
-int bpf_ifs_attach_program(struct bpf_handle* bpf, char* ifnames[], unsigned int ifname_size, __u32 xdp_flags) {
+int bpf_ifname_attach_program(struct bpf_handle* bpf, char* ifname) {
+    // Get the interface index from the interface name
+    __u32 ifindex = if_nametoindex(ifname);
+    if (!ifindex) {
+        bpfw_error("Error finding network interface %s: %s (-%d).\n", ifname, strerror(errno), errno);
+        return -1;
+    }
+
+    return bpf_ifindex_attach_program(bpf, ifindex);
+}
+
+int bpf_ifname_detach_program(struct bpf_handle* bpf, char* ifname) {
+    // Get the interface index from the interface name
+    __u32 ifindex = if_nametoindex(ifname);
+    if (!ifindex) {
+        bpfw_error("Error finding network interface %s: %s (-%d).\n", ifname, strerror(errno), errno);
+        return -1;
+    }
+
+    bpf_ifindex_detach_program(bpf, ifindex);
+
+    return 0;
+}
+
+int bpf_ifnames_attach_program(struct bpf_handle* bpf, char* ifnames[], unsigned int ifname_size) {
     // Iterate to all the given interfaces and attache the program to them
     for (int i = 0; i < ifname_size; i++) {
-        int rc = bpf_if_attach_program(bpf, ifnames[i], xdp_flags);
+        int rc = bpf_ifname_attach_program(bpf, ifnames[i]);
         if (rc != 0) {
             // If an error occured while attaching to one interface, detach all the already attached programs
             while (--i >= 0)
-                bpf_if_detach_program(bpf, ifnames[i], xdp_flags);
+                bpf_ifname_detach_program(bpf, ifnames[i]);
 
             return rc;
         }
@@ -250,65 +283,39 @@ int bpf_ifs_attach_program(struct bpf_handle* bpf, char* ifnames[], unsigned int
     return 0;
 }
 
-void bpf_ifs_detach_program(struct bpf_handle* bpf, char* ifnames[], unsigned int ifname_size, __u32 xdp_flags) {
+void bpf_ifnames_detach_program(struct bpf_handle* bpf, char* ifnames[], unsigned int ifname_size) {
     // Iterate to all the given interfaces and detache the program from them
     for (int i = 0; i < ifname_size; i++)
-        bpf_if_detach_program(bpf, ifnames[i], xdp_flags);
+        bpf_ifname_detach_program(bpf, ifnames[i]);
 }
 
-int bpf_attach_program(struct bpf_handle* bpf, __u32 xdp_flags, struct netlink_handle *netlink_h) {
-    // Retrieve the name and index of all network interfaces
-    struct if_nameindex* ifaces = if_nameindex();
-    if (!ifaces) {
-        fprintf(stderr, "Error retrieving network interfaces: %s (-%d).\n", strerror(errno), errno);
-        return errno;
-    }
+int bpf_get_map_fd(struct bpf_handle *bpf, const char *map_name) {
+    // Get the file descriptor of the BPF flow map
+    int map_fd = bpf_object__find_map_fd_by_name(bpf->obj, map_name);
+    if (map_fd < 0)
+        bpfw_error("Error: Couldn't find BPF map %s.\n", map_name);
 
-    int rc = 0;
-    for (struct if_nameindex* iface = ifaces; iface->if_index && iface->if_name; iface++) {
-        rc = netlink_if_should_attach(netlink_h, iface->if_index, bpf->dsa);
-        if (rc < 0)
-            goto error;
-
-        if (rc == 0)
-            continue;
-
-        rc = bpf_if_attach_program(bpf, iface->if_name, xdp_flags);
-        if (rc != 0) {
-error:
-            // If an error occured while attaching to one interface, detach all the already attached programs
-            while (--iface >= ifaces)
-                if (netlink_if_should_attach(netlink_h, iface->if_index, bpf->dsa) == 1)
-                    bpf_if_detach_program(bpf, iface->if_name, xdp_flags);
-
-            break;
-        }
-    }
-
-    // Retrieved interfaces are dynamically allocated, so they must be freed
-    if_freenameindex(ifaces);
-
-    return rc;
+    return map_fd;
 }
 
-int bpf_detach_program(struct bpf_handle* bpf, __u32 xdp_flags, struct netlink_handle *netlink_h) {
-    // Retrieve the name and index of all network interfaces
-    struct if_nameindex* ifaces = if_nameindex();
-    if (!ifaces) {
-        fprintf(stderr, "Error retrieving network interfaces: %s (-%d).\n", strerror(errno), errno);
-        return errno;
+void* bpf_get_section_data(struct bpf_handle *bpf, const char *sec_name, size_t *sec_size) {
+    // Find the .rodata section
+    struct bpf_map *section = bpf_object__find_map_by_name(bpf->obj, sec_name);
+    if (!section) {
+        bpfw_error("Error: Couldn't find BPF section %s.\n", sec_name);
+        return NULL;
     }
 
-    for (struct if_nameindex* iface = ifaces; iface->if_index && iface->if_name; iface++)
-        if (netlink_if_should_attach(netlink_h, iface->if_index, bpf->dsa) == 1)
-            bpf_if_detach_program(bpf, iface->if_name, xdp_flags);
+    size_t section_size;
+    void *section_data = bpf_map__initial_value(section, &section_size);
 
-    // Retrieved interfaces are dynamically allocated, so they must be freed
-    if_freenameindex(ifaces);
+    if (!section_data) {
+        bpfw_error("Error: Failed to get data from BPF section %s.\n", sec_name);
+        return NULL;
+    }
 
-    return 0;
-}
+    if (sec_size)
+        *sec_size = section_size;
 
-int bpf_get_map_fd(struct bpf_handle* bpf, const char *map_name) {
-    return bpf_object__find_map_fd_by_name(bpf->obj, map_name);
+    return section_data;
 }

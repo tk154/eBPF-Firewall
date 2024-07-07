@@ -2,7 +2,10 @@
 #define BPFW_COMMON_KERN_H
 
 #include <linux/bpf.h>
+#include <netinet/in.h>
+
 #include <bpf/bpf_endian.h>
+#include <bpf/bpf_helpers.h>
 
 #include "../common.h"
 
@@ -64,20 +67,6 @@
 #endif
 
 
-// Declare the VLAN header struct because it's only included in the kernel source header <linux/if_vlan.h>
-struct vlanhdr {
-	__be16 h_vlan_TCI;					// priority and VLAN ID
-	__be16 h_vlan_encapsulated_proto;	// packet type ID or len
-};
-
-struct pppoehdr {
-	__u8 vertype;
-	__u8 code;
-	__be16 sid;
-	__be16 length;
-    __be16 proto;
-} __attribute__((packed));
-
 // tcphdr from <linux/tcp.h> uses the host endianness, instead of the compiler endianness
 struct tcp_flags {
 #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
@@ -99,7 +88,7 @@ struct l2_header {
     void *src_mac;
     __u16  vlan_id;
     __be16 pppoe_id;
-    __u16  pppoe_len;
+    __u16  payload_len;
     __be16 proto;
     __u8   dsa_port;
 };
@@ -117,17 +106,17 @@ struct l4_header {
 	__sum16 *cksum;
 
 	// TCP Flags
-	struct tcp_flags tcp;
+	struct tcp_flags tcp_flags;
 };
 
 
-void bpf_print_ipv4(const char *prefix, void *ip_addr) {
+__always_inline static void bpf_print_ipv4(const char *prefix, void *ip_addr) {
     __u8 *ip = ip_addr;
 
     bpf_printk("%s%u.%u.%u.%u", prefix, ip[0], ip[1], ip[2], ip[3]);
 }
 
-void bpf_print_ipv6(const char *prefix, void *ip_addr) {
+__always_inline static void bpf_print_ipv6(const char *prefix, void *ip_addr) {
     __u16 *ip = ip_addr;
 
     bpf_printk("%s%x:%x:%x:%x:%x:%x:%x:%x", prefix,
@@ -135,7 +124,7 @@ void bpf_print_ipv6(const char *prefix, void *ip_addr) {
         bpf_ntohs(ip[4]), bpf_ntohs(ip[5]), bpf_ntohs(ip[6]), bpf_ntohs(ip[7]));
 }
 
-void bpf_print_mac(const char *prefix, void *mac_addr) {
+__always_inline static void bpf_print_mac(const char *prefix, void *mac_addr) {
     __u8 *mac = mac_addr;
 
     bpf_printk("%s%02x:%02x:%02x:%02x:%02x:%02x", prefix,

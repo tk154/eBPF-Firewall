@@ -4,6 +4,7 @@
 #include "ip_attr.h"
 
 #include <errno.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -13,8 +14,7 @@
 #include <linux/netfilter/nf_conntrack_tcp.h>
 #include <libnetfilter_conntrack/libnetfilter_conntrack.h>
 
-#include "../netfilter.h"
-#include "../../common_user.h"
+#include "../common_user.h"
 
 
 struct conntrack_handle {
@@ -34,33 +34,7 @@ struct nfct_get_cb_args {
 };
 
 
-static void log_key(struct flow_key *f_key) {
-    if (fw_log_level < FW_LOG_LEVEL_DEBUG)
-        return;
-
-    char ifname[IF_NAMESIZE];
-    if_indextoname(f_key->ifindex, ifname);
-
-    char src_ip[INET6_ADDRSTRLEN], dest_ip[INET6_ADDRSTRLEN];
-    inet_ntop(f_key->family, &f_key->src_ip, src_ip, sizeof(src_ip));
-    inet_ntop(f_key->family, &f_key->dest_ip, dest_ip, sizeof(dest_ip));
-
-    const char *proto = f_key->proto == IPPROTO_TCP ? "tcp" : "udp";
-
-    FW_DEBUG("\nNew: %s", ifname);
-
-    if (f_key->dsa_port)
-        FW_DEBUG("@p%hhu", f_key->dsa_port & ~DSA_PORT_SET);
-
-    if (f_key->vlan_id)
-        FW_DEBUG(" vlan=%hu", f_key->vlan_id);
-
-    if (f_key->pppoe_id)
-        FW_DEBUG(" pppoe=0x%hx", ntohs(f_key->pppoe_id));
-
-    FW_DEBUG(" %s %s %hu %s %hu\n", proto,
-        src_ip, ntohs(f_key->src_port), dest_ip, ntohs(f_key->dest_port));
-}
+#define CONNTRACK_SYSFS_BASE_PATH "/proc/sys/net/netfilter/nf_conntrack_"
 
 /**
  * Reads timeout values from /proc/sys/net/netfilter/nf_conntrack_<filename>
@@ -68,22 +42,65 @@ static void log_key(struct flow_key *f_key) {
  * @param timeout Where to store the timeout value
  * @returns 0 on success, errno otherwise
  * **/
-static int read_conntrack_value(const char *filename, unsigned int *value) {
-    const char* base_path = "conntrack_%s";
+static int read_conntrack_sysfs_value(const char *filename, unsigned int *value) {
+    int rc = 0;
 
-    char path[64];
-    snprintf(path, sizeof(path), base_path, filename);
+    char path[128];
+    snprintf(path, sizeof(path), CONNTRACK_SYSFS_BASE_PATH"%s", filename);
 
-    return netfilter_sysfs_read(path, value);
+    FILE *file = fopen(path, "r");
+    if (!file) {
+        bpfw_error("Error opening %s: %s (-%d).\n", path, strerror(errno), errno);
+        rc = -1;
+
+        goto out;
+    }
+
+    char buffer[16];
+    if (!fgets(buffer, sizeof(buffer), file)) {
+        bpfw_error("Error reading %s value: %s (-%d).\n", filename, strerror(errno), errno);
+        rc = -1;
+
+        goto fclose;
+    }
+
+    char *endptr = NULL;
+    *value = strtoul(buffer, &endptr, 10);
+    if (buffer == endptr) {
+        bpfw_error("Error converting %s from %s to unsigned integer.\n", buffer, filename);
+        rc = -1;
+    }
+
+fclose:
+    fclose(file);
+
+out:
+    return rc;
 }
 
-static int write_conntrack_value(const char *filename, unsigned int value) {
-    const char* base_path = "conntrack_%s";
+static int write_conntrack_sysfs_value(const char *filename, unsigned int value) {
+    int rc = 0;
 
-    char path[64];
-    snprintf(path, sizeof(path), base_path, filename);
+    char path[128];
+    snprintf(path, sizeof(path), CONNTRACK_SYSFS_BASE_PATH"%s", filename);
 
-    return netfilter_sysfs_write(path, value);
+    FILE *file = fopen(path, "w");
+    if (!file) {
+        bpfw_error("Error opening %s: %s (-%d).\n", path, strerror(errno), errno);
+        rc = -1;
+
+        goto out;
+    }
+
+    if (fprintf(file, "%u", value) < 0) {
+        bpfw_error("Error writing %u to %s: %s (-%d).\n", value, filename, strerror(errno), errno);
+        rc = -1;
+    }
+
+    fclose(file);
+
+out:
+    return rc;
 }
 
 /**
@@ -101,13 +118,12 @@ static int set_timeout(struct conntrack_handle* conntrack_h, struct nf_conntrack
 
     // Update the edited nf_conntrack entry
     if (nfct_query(conntrack_h->ct_handle, NFCT_Q_UPDATE, ct) != 0) {
-        FW_ERROR("Error updating conntrack entry: %s (-%d).\n", strerror(errno), errno);
-        return errno;
+        bpfw_error("Error updating conntrack entry: %s (-%d).\n", strerror(errno), errno);
+        return -1;
     }
 
     return 0;
 }
-
 
 static bool tcp_not_established(__u8 proto, struct nf_conntrack *ct) {
     return proto == IPPROTO_TCP &&
@@ -134,7 +150,7 @@ static int nfct_get_cb(enum nf_conntrack_msg_type type, struct nf_conntrack *ct,
 
     switch (flow->value.action) {
         case ACTION_NONE:
-            log_key(&flow->key);
+            bpfw_debug_key("\nNew: ", &flow->key);
 
             memset(&flow->value, 0, sizeof(flow->value));
             
@@ -164,24 +180,25 @@ static int nfct_get_cb(enum nf_conntrack_msg_type type, struct nf_conntrack *ct,
 struct conntrack_handle* conntrack_init() {
     struct conntrack_handle *conntrack_h = (struct conntrack_handle*)malloc(sizeof(struct conntrack_handle));
     if (!conntrack_h) {
-        FW_ERROR("Error allocating conntrack handle: %s (-%d).\n", strerror(errno), errno);
+        bpfw_error("Error allocating conntrack handle: %s (-%d).\n", strerror(errno), errno);
         return NULL;
     }
 
     // Read TCP and UDP timeout values
-    if (read_conntrack_value("tcp_timeout_established", &conntrack_h->tcp_timeout) != 0 ||
-        read_conntrack_value("udp_timeout"            , &conntrack_h->udp_timeout) != 0 ||
-        read_conntrack_value("udp_timeout_stream"     , &conntrack_h->udp_stream_timeout) != 0)
-            goto free;
-
-    if (write_conntrack_value("tcp_be_liberal", 1) != 0 ||
-        write_conntrack_value("acct", 0) != 0)
-            goto free;
+    if (read_conntrack_sysfs_value ("tcp_timeout_established", &conntrack_h->tcp_timeout) != 0 ||
+        read_conntrack_sysfs_value ("udp_timeout"            , &conntrack_h->udp_timeout) != 0 ||
+        read_conntrack_sysfs_value ("udp_timeout_stream"     , &conntrack_h->udp_stream_timeout) != 0 ||
+        write_conntrack_sysfs_value("acct", 0) != 0 ||
+        write_conntrack_sysfs_value("tcp_be_liberal", 1) != 0)
+    {
+        bpfw_error("Is the nf_conntrack module loaded? (modprobe nf_conntrack)\n");
+        goto free;
+    }
 
     // Open a new conntrack handle
 	conntrack_h->ct_handle = nfct_open(CONNTRACK, 0);
 	if (!conntrack_h->ct_handle) {
-		FW_ERROR("Error opening conntrack handle: %s (-%d).\n", strerror(errno), errno);
+		bpfw_error("Error opening conntrack handle: %s (-%d).\n", strerror(errno), errno);
 		goto free;
 	}
 
@@ -198,9 +215,9 @@ int conntrack_lookup(struct conntrack_handle* conntrack_h, struct flow_key_value
     // Create a new conntrack entry object for a lookup
     struct nf_conntrack *ct = nfct_new();
     if (!ct) {
-        FW_ERROR("Error allocating conntrack object: %s (-%d).\n",
+        bpfw_error("Error allocating conntrack object: %s (-%d).\n",
             strerror(errno), errno);
-        return -errno;
+        return -1;
     }
 
     // Set the attributes accordingly
@@ -211,13 +228,13 @@ int conntrack_lookup(struct conntrack_handle* conntrack_h, struct flow_key_value
     nfct_set_attr_u16(ct, ATTR_PORT_SRC, flow->key.src_port);
     nfct_set_attr_u16(ct, ATTR_PORT_DST, flow->key.dest_port);
 
-    struct nfct_get_cb_args args = { .conntrack_h = conntrack_h, .flow = flow };
     int rc;
+    struct nfct_get_cb_args args = { .conntrack_h = conntrack_h, .flow = flow };
 
     // Register the callback for retrieving single conntrack entries
     if (nfct_callback_register(conntrack_h->ct_handle, NFCT_T_ALL, nfct_get_cb, &args) != 0) {
-        FW_ERROR("Error registering conntrack callback: %s (-%d).\n", strerror(errno), errno);
-        rc = -errno;
+        bpfw_error("Error registering conntrack callback: %s (-%d).\n", strerror(errno), errno);
+        rc = -1;
 
         goto nfct_destroy;
     }
@@ -225,8 +242,8 @@ int conntrack_lookup(struct conntrack_handle* conntrack_h, struct flow_key_value
     // Try to find the connection inside nf_conntrack
     if (nfct_query(conntrack_h->ct_handle, NFCT_Q_GET, ct) != 0) {
         if (errno != ENOENT) {
-            FW_ERROR("Conntrack lookup error: %s (-%d).\n", strerror(errno), errno);
-            rc = -errno;
+            bpfw_error("Conntrack lookup error: %s (-%d).\n", strerror(errno), errno);
+            rc = -1;
         }
         else
             rc = CONNECTION_NOT_FOUND;

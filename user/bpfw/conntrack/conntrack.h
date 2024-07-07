@@ -1,7 +1,7 @@
 #ifndef BPFW_CONNTRACK_H
 #define BPFW_CONNTRACK_H
 
-#include "../../common_user.h"
+#include "../common_user.h"
 
 
 struct conntrack_handle;
