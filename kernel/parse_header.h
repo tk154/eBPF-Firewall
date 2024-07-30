@@ -23,13 +23,13 @@ __always_inline static __be16 proto_ppp2eth(__be16 ppp_proto) {
 	}
 }
 
-__always_inline static bool parse_eth_header(struct BPFW_CTX *ctx, struct packet_data *pkt, struct l2_header *l2) {
+__always_inline static bool parse_eth_header(void *ctx, struct packet_data *pkt, struct l2_header *l2) {
 	// Parse the Ethernet header, will drop the package if out-of-bounds
-	if (ctx->ingress_ifindex == dsa.ifindex) {
+	if (pkt->ifindex == dsa.ifindex) {
 		if (!parse_dsa_header(pkt, l2))
 			return false;
 
-		BPF_DEBUG("Interface: %u@p%u", ctx->ingress_ifindex, l2->dsa_port & ~DSA_PORT_SET);
+		BPF_DEBUG("Interface: %u@p%u", pkt->ifindex, l2->dsa_port & ~DSA_PORT_SET);
 	}
 	else {
 		parse_header(struct ethhdr, *ethh, pkt);
@@ -38,7 +38,7 @@ __always_inline static bool parse_eth_header(struct BPFW_CTX *ctx, struct packet
 		l2->proto = ethh->h_proto;
 		l2->dsa_port = 0;
 
-		BPF_DEBUG("Interface: %u", ctx->ingress_ifindex);
+		BPF_DEBUG("Interface: %u", pkt->ifindex);
 	}
 
 	BPF_DEBUG_MAC("Src MAC: ", l2->src_mac);
@@ -46,39 +46,38 @@ __always_inline static bool parse_eth_header(struct BPFW_CTX *ctx, struct packet
 	return true;
 }
 
-__always_inline static bool parse_vlan_header(struct BPFW_CTX *ctx, struct packet_data *pkt, struct l2_header *l2) {
-#ifdef TC_PROGRAM
-	if (ctx->ingress_ifindex != dsa.ifindex) {
-		if (ctx->vlan_present && ctx->vlan_proto == bpf_htons(ETH_P_8021Q)) {
+__always_inline static bool parse_vlan_header(void *ctx, bool xdp, struct packet_data *pkt, struct l2_header *l2) {
+	if (xdp || pkt->ifindex == dsa.ifindex) {
+		// Check if there is a VLAN header
+		if (l2->proto == bpf_htons(ETH_P_8021Q)) {
+			// Parse the VLAN header, will drop the package if out-of-bounds
+			parse_header(struct vlanhdr, *vlan_h, pkt);
+
 			// Save the VLAN ID (last 12 Byte)
-			l2->vlan_id = ctx->vlan_tci & 0x0FFF;
+			l2->vlan_id = bpf_ntohs(vlan_h->tci) & 0x0FFF;
 
 			BPF_DEBUG("VLAN ID: %u", l2->vlan_id);
+
+			// Save the packet type ID of the next header
+			l2->proto = vlan_h->proto;
+
+			return true;
 		}
-		else
-			l2->vlan_id = 0;
-
-		return true;
 	}
-#endif
+	else {
+		struct __sk_buff *skb = ctx;
 
-#if defined(XDP_PROGRAM) || defined(BPFW_DSA)
-	// Check if there is a VLAN header
-    if (l2->proto == bpf_htons(ETH_P_8021Q)) {
-		// Parse the VLAN header, will drop the package if out-of-bounds
-		parse_header(struct vlanhdr, *vlan_h, pkt);
+		if (skb->vlan_present && skb->vlan_proto == bpf_htons(ETH_P_8021Q)) {
+			// Save the VLAN ID (last 12 Byte)
+			l2->vlan_id = skb->vlan_tci & 0x0FFF;
 
-		// Save the VLAN ID (last 12 Byte)
-        l2->vlan_id = bpf_ntohs(vlan_h->tci) & 0x0FFF;
+			BPF_DEBUG("VLAN ID: %u", l2->vlan_id);
 
-		BPF_DEBUG("VLAN ID: %u", l2->vlan_id);
+			return true;
+		}
+	}
 
-		// Save the packet type ID of the next header
-		l2->proto = vlan_h->proto;
-    }
-	else
-		l2->vlan_id = 0;
-#endif
+	l2->vlan_id = 0;
 
 	return true;
 }
@@ -104,13 +103,13 @@ __always_inline static bool parse_pppoe_header(struct packet_data *pkt, struct l
 	return true;
 }
 
-__always_inline static bool parse_l2_header(struct BPFW_CTX *ctx, struct packet_data *pkt, struct l2_header *l2) {
+__always_inline static bool parse_l2_header(void *ctx, bool xdp, struct packet_data *pkt, struct l2_header *l2) {
 	// Parse the Ethernet header, will drop the package if out-of-bounds
 	if (!parse_eth_header(ctx, pkt, l2))
 		return false;
 
 	// Check if there is a VLAN header
-	if (!parse_vlan_header(ctx, pkt, l2))
+	if (!parse_vlan_header(ctx, xdp, pkt, l2))
 		return false;
 
 	if (!parse_pppoe_header(pkt, l2))

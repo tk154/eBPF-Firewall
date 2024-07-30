@@ -87,13 +87,13 @@ static int check_dsa(struct bpf_handle *bpf, struct dsa_size *dsa_size) {
         return -1;
     }
 
-    size_t dsa_tag_size;
-    const struct dsa_tag *dsa_tag = bpf_get_section_data(bpf, DSA_RO_SECTION, &dsa_tag_size);
+    size_t dsa_tag_sec_size;
+    const struct dsa_tag *dsa_tag = bpf_get_section_data(bpf, DSA_RO_SECTION, &dsa_tag_sec_size);
     if (!dsa_tag)
         return -1;
 
     __s8 index = -1;
-    for (int i = 0; i < dsa_tag_size / sizeof(struct dsa_tag); i++) {
+    for (int i = 0; i < dsa_tag_sec_size / sizeof(struct dsa_tag); i++) {
         if (strncmp(switch_proto, dsa_tag[i].proto, DSA_PROTO_MAX_LEN) == 0) {
             index = i;
             break;
@@ -143,6 +143,18 @@ struct bpf_handle* bpf_load_program(const char *obj_path, enum bpfw_hook hook, b
     bpf->hook = hook;
     bpf->dsa  = dsa;
 
+    const char *prog_name;
+    enum bpf_prog_type prog_type;
+
+    if (hook & BPFW_HOOK_XDP) {
+        prog_name = "bpfw_xdp";
+        prog_type = BPF_PROG_TYPE_XDP;
+    }
+    else {
+        prog_name = "bpfw_tc";
+        prog_type = BPF_PROG_TYPE_SCHED_CLS;
+    }
+
     // Try to open the BPF object file, return on error
     bpf->obj = bpf_object__open_file(obj_path, NULL);
     if (!bpf->obj) {
@@ -150,13 +162,13 @@ struct bpf_handle* bpf_load_program(const char *obj_path, enum bpfw_hook hook, b
         goto free;
     }
 
-    bpf->prog = bpf_object__next_program(bpf->obj, NULL);
+    bpf->prog = bpf_object__find_program_by_name(bpf->obj, prog_name);
     if (!bpf->prog) {
-        bpfw_error("Couldn't find a BPF program in %s.\n", obj_path);
+        bpfw_error("Couldn't find %s BPF program in %s.\n", prog_name, obj_path);
         goto bpf_object__close;
     }
     
-    bpf_program__set_type(bpf->prog, (hook & BPFW_HOOK_XDP) ? BPF_PROG_TYPE_XDP : BPF_PROG_TYPE_SCHED_CLS);
+    bpf_program__set_type(bpf->prog, prog_type);
 
     if (check_dsa(bpf, dsa_size) != 0)
         goto bpf_object__close;

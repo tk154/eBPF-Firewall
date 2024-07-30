@@ -118,7 +118,7 @@ enum {
 #define memcpy(dest, src, n) __builtin_memcpy(dest, src, n)
 #endif
 
-static void* ipcpy(void *dest, const void* src, __u8 family) {
+__always_inline static void* ipcpy(void *dest, const void* src, __u8 family) {
     switch (family) {
         case AF_INET:
             return memcpy(dest, src, IPV4_ALEN);

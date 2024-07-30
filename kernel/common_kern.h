@@ -10,25 +10,6 @@
 #include "../common.h"
 
 
-#if defined(XDP_PROGRAM)
-#define BPFW_CTX         xdp_md              // User accessible metadata for XDP packet hook
-
-#define BPFW_PASS        XDP_PASS            // Let the package pass to the normal network stack
-#define BPFW_DROP        XDP_DROP            // Drop the package
-#define BPFW_REDIRECT    XDP_REDIRECT        // Redirect the package to another network interface
-
-#elif defined(TC_PROGRAM)
-#include <linux/pkt_cls.h>
-
-#define BPFW_CTX         __sk_buff           // User accessible mirror of in-kernel sk_buff
-
-#define BPFW_PASS        TC_ACT_UNSPEC       // Let the package pass to the normal network stack
-#define BPFW_DROP        TC_ACT_SHOT         // Drop the package
-#define BPFW_REDIRECT    TC_ACT_REDIRECT     // Redirect the package to another network interface
-
-#endif
-
-
 #define BPF_LOG_LEVEL_ERROR 0
 #define BPF_LOG_LEVEL_WARN  1
 #define BPF_LOG_LEVEL_INFO  2
@@ -89,8 +70,8 @@ struct tcp_flags {
 
 
 struct packet_data {
-    void *data;
-    void *data_end;
+    __u32 ifindex;
+    void *data, *data_end;
     void *p;
 };
 

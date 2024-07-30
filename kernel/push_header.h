@@ -4,7 +4,7 @@
 #include "common_kern.h"
 
 
-#define prev_proto(data) *(__be16*)(data - sizeof(__be16))
+#define prev_proto(data) *((__be16*)data - 1)
 
 __always_inline static __be16 proto_eth2ppp(__be16 eth_proto) {
 	switch (eth_proto) {
@@ -17,27 +17,42 @@ __always_inline static __be16 proto_eth2ppp(__be16 eth_proto) {
 	}
 }
 
-__always_inline static bool adjust_l2_size(struct BPFW_CTX *ctx, struct packet_data *pkt, __s8 diff) {
+__always_inline static bool tc_vlan_recheck_pointer(struct __sk_buff *skb, struct packet_data *pkt) {
+	pkt->data     = (void*)(long)skb->data;
+	pkt->data_end = (void*)(long)skb->data_end;
+	pkt->p		  = pkt->data + sizeof(struct ethhdr);
+
+	return pkt->p <= pkt->data_end;
+}
+
+__always_inline static bool adjust_l2_size(void *ctx, bool xdp, struct packet_data *pkt, __s8 diff) {
 	if (!diff)
 		return true;
 
-#if defined(XDP_PROGRAM)
-	long rc = bpf_xdp_adjust_head(ctx, -diff);
-	if (rc != 0) {
-		BPF_ERROR("bpf_xdp_adjust_head error: %d", rc);
-		return false;
-	}
+	if (xdp) {
+		struct xdp_md *xdp_md = ctx;
 
-#elif defined(TC_PROGRAM)
-	long rc = bpf_skb_change_head(ctx, diff, 0);
-	if (rc != 0) {
-		BPF_ERROR("bpf_skb_change_head error: %d", rc);
-		return false;
-	}
-#endif
+		long rc = bpf_xdp_adjust_head(xdp_md, -diff);
+		if (rc != 0) {
+			BPF_ERROR("bpf_xdp_adjust_head error: %d", rc);
+			return false;
+		}
 
-	pkt->data 	   = (void*)(long)ctx->data;
-	pkt->data_end  = (void*)(long)ctx->data_end;
+		pkt->data 	  = (void*)(long)xdp_md->data;
+		pkt->data_end = (void*)(long)xdp_md->data_end;
+	}
+	else {
+		struct __sk_buff *skb = ctx;
+
+		long rc = bpf_skb_change_head(skb, diff, 0);
+		if (rc != 0) {
+			BPF_ERROR("bpf_skb_change_head error: %d", rc);
+			return false;
+		}
+
+		pkt->data 	  = (void*)(long)skb->data;
+		pkt->data_end = (void*)(long)skb->data_end;
+	}
 
 	return true;
 }
@@ -68,61 +83,43 @@ __always_inline static bool set_eth_header(struct packet_data *pkt, struct next_
 	return true;
 }
 
-__always_inline static bool tc_vlan_recheck_pointer(struct BPFW_CTX *ctx, struct packet_data *pkt) {
-	pkt->data     = (void*)(long)ctx->data;
-	pkt->data_end = (void*)(long)ctx->data_end;
-	pkt->p		  = pkt->data + sizeof(struct ethhdr);
-
-	return pkt->p <= pkt->data_end;
-}
-
-__always_inline static bool check_vlan_header(struct BPFW_CTX *ctx, struct packet_data *pkt, struct l2_header *l2, struct next_hop *next_h) {
+__always_inline static bool check_vlan_header(void *ctx, bool xdp, struct packet_data *pkt, struct l2_header *l2, struct next_hop *next_h) {
 	if (!l2->vlan_id && next_h->vlan_id) {
 		BPF_DEBUG("Add VLAN Tag %u", next_h->vlan_id);
 
-#ifdef TC_PROGRAM
-		if (next_h->ifindex != dsa.ifindex) {
-			int rc = bpf_skb_vlan_push(ctx, ETH_P_8021Q, next_h->vlan_id);
+		if (xdp || next_h->ifindex == dsa.ifindex) {
+			parse_header(struct vlanhdr, *vlan_h, pkt);
+			vlan_h->tci = bpf_htons(next_h->vlan_id);
+			vlan_h->proto = l2->proto;
+
+			prev_proto(vlan_h) = bpf_htons(ETH_P_8021Q);
+		}
+		else {
+			long rc = bpf_skb_vlan_push(ctx, ETH_P_8021Q, next_h->vlan_id);
 			if (rc != 0) {
 				BPF_ERROR("bpf_skb_vlan_push error: %d", rc);
 				return false;
 			}
 
-			if (!tc_vlan_recheck_pointer(ctx, pkt))
-				return false;
-
-			return true;
+			return tc_vlan_recheck_pointer(ctx, pkt);
 		}
-#endif
-		if (pkt->p + sizeof(struct vlanhdr) > pkt->data_end)
-			return false;
-
-		struct vlanhdr *vlan_h = pkt->p;
-		vlan_h->tci = bpf_htons(next_h->vlan_id);
-		vlan_h->proto = l2->proto;
-
-		prev_proto(pkt->p) = bpf_htons(ETH_P_8021Q);
-		pkt->p += sizeof(struct vlanhdr);
 	}
-
 	else if (l2->vlan_id && !next_h->vlan_id) {
 		BPF_DEBUG("Remove VLAN Tag");
 
-#ifdef TC_PROGRAM
-		if (ctx->ingress_ifindex != dsa.ifindex) {
-			int rc = bpf_skb_vlan_pop(ctx);
+		if (xdp || next_h->ifindex == dsa.ifindex) {
+			prev_proto(pkt->p) = l2->proto;
+		}
+		else {
+			long rc = bpf_skb_vlan_pop(ctx);
 			if (rc != 0) {
 				BPF_ERROR("bpf_skb_vlan_pop error: %d", rc);
 				return false;
 			}
 
-			if (!tc_vlan_recheck_pointer(ctx, pkt))
-				return false;
-
-			return true;
+			return tc_vlan_recheck_pointer(ctx, pkt);
 		}
-#endif
-		prev_proto(pkt->p) = l2->proto;
+		
 	}
 
 	return true;
@@ -137,25 +134,21 @@ __always_inline static bool check_pppoe_header(struct packet_data *pkt, struct l
     else if (l2->pppoe_id != next_hop_pppoe) {
 		BPF_DEBUG("Add PPPoE ID 0x%x", next_hop_pppoe);
 
-		if (pkt->p + sizeof(struct pppoehdr) > pkt->data_end)
-			return false;
-
-        struct pppoehdr *pppoe_h = pkt->p;
+		parse_header(struct pppoehdr, *pppoe_h, pkt);
         pppoe_h->vertype = 0x11;
 		pppoe_h->code = 0x00;
 		pppoe_h->sid = next_hop_pppoe;
 		pppoe_h->length = bpf_htons(l2->payload_len + sizeof(pppoe_h->proto));
 		pppoe_h->proto = proto_eth2ppp(l2->proto);
 
-		prev_proto(pkt->p) = bpf_htons(ETH_P_PPP_SES);
-		pkt->p += sizeof(struct pppoehdr);
+		prev_proto(pppoe_h) = bpf_htons(ETH_P_PPP_SES);
     }
 
     return true;
 }
 
-__always_inline static bool push_l2_header(struct BPFW_CTX *ctx, struct packet_data *pkt, struct l2_header* l2, struct next_hop *next_h) {
-    if (!adjust_l2_size(ctx, pkt, next_h->l2_diff))
+__always_inline static bool push_l2_header(void *ctx, bool xdp, struct packet_data *pkt, struct l2_header* l2, struct next_hop *next_h) {
+    if (!adjust_l2_size(ctx, xdp, pkt, next_h->l2_diff))
         return false;
 		
     pkt->p = pkt->data;
@@ -163,7 +156,7 @@ __always_inline static bool push_l2_header(struct BPFW_CTX *ctx, struct packet_d
     if (!set_eth_header(pkt, next_h))
 		return false;
 
-    if (!check_vlan_header(ctx, pkt, l2, next_h))
+    if (!check_vlan_header(ctx, xdp, pkt, l2, next_h))
         return false;
 
     if (!check_pppoe_header(pkt, l2, next_h->pppoe_id))
