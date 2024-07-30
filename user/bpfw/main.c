@@ -40,7 +40,7 @@ static void print_usage(char* prog) {
     bpfw_error("Hooks:\n");
     bpfw_error("  xdp           XDP hook\n");
     bpfw_error("  xdpgeneric    Generic/SKB XDP hook\n");
-    bpfw_error("  xdpdriver     Driver/Native XDP hook\n");
+    bpfw_error("  xdpnative     Native/Driver XDP hook\n");
     bpfw_error("  xdpoffload    XDP offloaded into hardware\n");
     bpfw_error("  tc            TC hoook\n\n");
 
@@ -129,8 +129,8 @@ static bool check_cmd_args(int argc, char* argv[]) {
         args.hook = BPFW_HOOK_XDP;
     else if (strncmp(prog_hook, "xdpgeneric", arg_len) == 0)
         args.hook = BPFW_HOOK_XDP_GENERIC;
-    else if (strncmp(prog_hook, "xdpdriver",  arg_len) == 0)
-        args.hook = BPFW_HOOK_XDP_DRIVER;
+    else if (strncmp(prog_hook, "xdpnative",  arg_len) == 0)
+        args.hook = BPFW_HOOK_XDP_NATIVE;
     else if (strncmp(prog_hook, "xdpoffload", arg_len) == 0)
         args.hook = BPFW_HOOK_XDP_OFFLOAD;
     else if (strcmp(prog_hook, "tc") == 0)

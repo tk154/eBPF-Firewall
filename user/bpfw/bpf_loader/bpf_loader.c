@@ -98,7 +98,7 @@ static __u32 get_xdp_flag(enum bpfw_hook hook) {
     switch (hook) {
         case BPFW_HOOK_XDP_GENERIC:
             return XDP_FLAGS_SKB_MODE;
-        case BPFW_HOOK_XDP_DRIVER:
+        case BPFW_HOOK_XDP_NATIVE:
             return XDP_FLAGS_DRV_MODE;
         case BPFW_HOOK_XDP_OFFLOAD:
             return XDP_FLAGS_HW_MODE;

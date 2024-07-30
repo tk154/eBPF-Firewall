@@ -18,10 +18,10 @@ enum bpfw_hook {
     BPFW_HOOK_TC          = (1U << 0),
 
     BPFW_HOOK_XDP_GENERIC = (1U << 1),
-    BPFW_HOOK_XDP_DRIVER  = (1U << 2),
+    BPFW_HOOK_XDP_NATIVE  = (1U << 2),
     BPFW_HOOK_XDP_OFFLOAD = (1U << 3),
 
-    BPFW_HOOK_XDP         = ( BPFW_HOOK_XDP_GENERIC | BPFW_HOOK_XDP_DRIVER | BPFW_HOOK_XDP_OFFLOAD )
+    BPFW_HOOK_XDP         = ( BPFW_HOOK_XDP_GENERIC | BPFW_HOOK_XDP_NATIVE | BPFW_HOOK_XDP_OFFLOAD )
 };
 
 struct cmd_args {
