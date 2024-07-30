@@ -29,7 +29,7 @@ __always_inline static bool parse_eth_header(void *ctx, struct packet_data *pkt,
 		if (!parse_dsa_header(pkt, l2))
 			return false;
 
-		BPF_DEBUG("Interface: %u@p%u", pkt->ifindex, l2->dsa_port & ~DSA_PORT_SET);
+		bpfw_debug("Interface: %u@p%u", pkt->ifindex, l2->dsa_port & ~DSA_PORT_SET);
 	}
 	else {
 		check_header(struct ethhdr, *ethh, pkt);
@@ -38,10 +38,10 @@ __always_inline static bool parse_eth_header(void *ctx, struct packet_data *pkt,
 		l2->proto = ethh->h_proto;
 		l2->dsa_port = 0;
 
-		BPF_DEBUG("Interface: %u", pkt->ifindex);
+		bpfw_debug("Interface: %u", pkt->ifindex);
 	}
 
-	BPF_DEBUG_MAC("Src MAC: ", l2->src_mac);
+	bpfw_debug_mac("Src MAC: ", l2->src_mac);
 
 	return true;
 }
@@ -56,7 +56,7 @@ __always_inline static bool parse_vlan_header(void *ctx, bool xdp, struct packet
 			// Save the VLAN ID (last 12 Byte)
 			l2->vlan_id = bpf_ntohs(vlan_h->tci) & 0x0FFF;
 
-			BPF_DEBUG("VLAN ID: %u", l2->vlan_id);
+			bpfw_debug("VLAN ID: %u", l2->vlan_id);
 
 			// Save the packet type ID of the next header
 			l2->proto = vlan_h->proto;
@@ -71,7 +71,7 @@ __always_inline static bool parse_vlan_header(void *ctx, bool xdp, struct packet
 			// Save the VLAN ID (last 12 Byte)
 			l2->vlan_id = skb->vlan_tci & 0x0FFF;
 
-			BPF_DEBUG("VLAN ID: %u", l2->vlan_id);
+			bpfw_debug("VLAN ID: %u", l2->vlan_id);
 
 			return true;
 		}
@@ -89,11 +89,11 @@ __always_inline static bool parse_pppoe_header(struct packet_data *pkt, struct l
 
 		l2->pppoe_id = pppoe_h->sid;
 
-		BPF_DEBUG("PPPoE Session ID: 0x%x", l2->pppoe_id);
+		bpfw_debug("PPPoE Session ID: 0x%x", l2->pppoe_id);
 
 		l2->proto = proto_ppp2eth(pppoe_h->proto);
 		if (!l2->proto) {
-			BPF_DEBUG("PPPoE Protocol: 0x%04x", pppoe_h->proto);
+			bpfw_debug("PPPoE Protocol: 0x%04x", pppoe_h->proto);
 			return false;
 		}
 	}
@@ -124,8 +124,8 @@ __always_inline static bool parse_ipv4_header(struct packet_data *pkt, struct l3
 	// Parse the IPv4 header, will drop the package if out-of-bounds
 	check_header(struct iphdr, *iph, pkt);
 
-	BPF_DEBUG_IPV4("Src IPv4: ", &iph->saddr);
-	BPF_DEBUG_IPV4("Dst IPv4: ", &iph->daddr);
+	bpfw_debug_ipv4("Src IPv4: ", &iph->saddr);
+	bpfw_debug_ipv4("Dst IPv4: ", &iph->daddr);
 
 	l3->family	= AF_INET;
 	l3->src_ip 	= &iph->saddr;
@@ -142,8 +142,8 @@ __always_inline static bool parse_ipv6_header(struct packet_data *pkt, struct l3
 	// Parse the IPv6 header, will drop the package if out-of-bounds
 	check_header(struct ipv6hdr, *ipv6h, pkt);
 
-	BPF_DEBUG_IPV6("Src IPv6: ", &ipv6h->saddr);
-	BPF_DEBUG_IPV6("Dst IPv6: ", &ipv6h->daddr);
+	bpfw_debug_ipv6("Src IPv6: ", &ipv6h->saddr);
+	bpfw_debug_ipv6("Dst IPv6: ", &ipv6h->daddr);
 
 	l3->family	= AF_INET6;
 	l3->src_ip  = &ipv6h->saddr;
@@ -164,7 +164,7 @@ __always_inline static bool parse_l3_header(struct packet_data *pkt, __be16 prot
 			return parse_ipv6_header(pkt, l3);
 
 		default:
-			BPF_DEBUG("Ethernet Protocol: 0x%04x", proto);
+			bpfw_debug("Ethernet Protocol: 0x%04x", proto);
 			return false;
 	}
 }
@@ -173,8 +173,8 @@ __always_inline static bool parse_tcp_header(struct packet_data *pkt, struct l4_
 	// Parse the TCP header, will drop the package if out-of-bounds
 	check_header(struct tcphdr, *tcph, pkt);
 
-	BPF_DEBUG("TCP Src Port: %u", bpf_ntohs(tcph->source));
-	BPF_DEBUG("TCP Dst Port: %u", bpf_ntohs(tcph->dest));
+	bpfw_debug("TCP Src Port: %u", bpf_ntohs(tcph->source));
+	bpfw_debug("TCP Dst Port: %u", bpf_ntohs(tcph->dest));
 
 	// For possible NAT adjustmenets
 	l4->sport = &tcph->source;
@@ -191,8 +191,8 @@ __always_inline static bool parse_udp_header(struct packet_data *pkt, struct l4_
 	// Parse the UDP header, will drop the package if out-of-bounds
 	check_header(struct udphdr, *udph, pkt);
 
-	BPF_DEBUG("UDP Src Port: %u", bpf_ntohs(udph->source));
-	BPF_DEBUG("UDP Dst Port: %u", bpf_ntohs(udph->dest));
+	bpfw_debug("UDP Src Port: %u", bpf_ntohs(udph->source));
+	bpfw_debug("UDP Dst Port: %u", bpf_ntohs(udph->dest));
 
 	// For possible NAT adjustmenets
 	l4->sport = &udph->source;
@@ -211,7 +211,7 @@ __always_inline static bool parse_l4_header(struct packet_data *pkt, __be16 prot
 			return parse_udp_header(pkt, l4);
 
 		default:
-			BPF_DEBUG("IP Protocol: %u", proto);
+			bpfw_debug("IP Protocol: %u", proto);
 			return false;
 	}
 }

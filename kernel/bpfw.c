@@ -2,7 +2,7 @@
 #include <linux/pkt_cls.h>
 #include <bpf/bpf_helpers.h>
 
-#define BPF_LOG_LEVEL BPF_LOG_LEVEL_WARN
+#define BPFW_LOG_LEVEL BPFW_LOG_LEVEL_WARN
 #include "common_kern.h"
 
 #include "dsa.h"
@@ -66,7 +66,7 @@ __always_inline static bool tcp_finished(struct flow_key *f_key, struct flow_val
 	if (f_value)
 		f_value->action = ACTION_NONE;
 
-	BPF_LOG_KEY(flags.fin ? "FIN" : "RST", f_key);
+	bpfw_info_key(flags.fin ? "FIN" : "RST", f_key);
 
 	return true;
 }
@@ -78,7 +78,7 @@ __always_inline static bool tcp_finished(struct flow_key *f_key, struct flow_val
  * @returns The action to be executed on the received package
 **/
 __always_inline static __u8 bpfw_func(void *ctx, bool xdp, struct packet_data *pkt, __u32 *out_ifindex) {
-	BPF_DEBUG("---------- New Package ----------");
+	bpfw_debug("---------- New Package ----------");
 
 	struct l2_header l2;
 	if (!parse_l2_header(ctx, xdp, pkt, &l2))
@@ -110,14 +110,14 @@ __always_inline static __u8 bpfw_func(void *ctx, bool xdp, struct packet_data *p
 	// Check if a conntrack entry exists
 	struct flow_value* f_value = bpf_map_lookup_elem(&FLOW_MAP, &f_key);
 	if (!f_value) {
-		BPF_LOG_KEY("NEW", &f_key);
+		bpfw_info_key("NEW", &f_key);
 
 		// If there is none, create a new one
 		struct flow_value f_value = {};
 
 		long rc = bpf_map_update_elem(&FLOW_MAP, &f_key, &f_value, BPF_NOEXIST);
 		if (rc != 0)
-			BPF_WARN("bpf_map_update_elem error: %d", rc);
+			bpfw_warn("bpf_map_update_elem error: %d", rc);
 
 		return ACTION_PASS;
 	}
@@ -137,18 +137,18 @@ __always_inline static __u8 bpfw_func(void *ctx, bool xdp, struct packet_data *p
 			if (!push_l2_header(ctx, xdp, pkt, &l2, &f_value->next_h))
 				return ACTION_DROP;
 
-			BPF_DEBUG("Redirect to ifindex %u", f_value->next_h.ifindex);
+			bpfw_debug("Redirect to ifindex %u", f_value->next_h.ifindex);
 			*out_ifindex = f_value->next_h.ifindex;
 
 			break;
 
 		case ACTION_DROP:
-			BPF_DEBUG("Drop package");
+			bpfw_debug("Drop package");
 			break;
 
 		case ACTION_PASS:
 		default:
-			BPF_DEBUG("Pass package");
+			bpfw_debug("Pass package");
 	}
 
 	return f_value->action;

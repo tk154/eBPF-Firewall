@@ -2,6 +2,7 @@
 #define BPFW_COMMON_H
 
 #include <stddef.h>
+#include <string.h>
 
 #include <linux/types.h>
 #include <linux/if_ether.h>
@@ -113,10 +114,6 @@ enum {
 	REWRITE_DEST_PORT = (1U << 3)
 };
 
-
-#ifndef memcpy
-#define memcpy(dest, src, n) __builtin_memcpy(dest, src, n)
-#endif
 
 __always_inline static void* ipcpy(void *dest, const void* src, __u8 family) {
     switch (family) {

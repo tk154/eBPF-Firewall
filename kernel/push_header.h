@@ -34,7 +34,7 @@ __always_inline static bool adjust_l2_size(void *ctx, bool xdp, struct packet_da
 
 		long rc = bpf_xdp_adjust_head(xdp_md, -diff);
 		if (rc != 0) {
-			BPF_ERROR("bpf_xdp_adjust_head error: %d", rc);
+			bpfw_error("bpf_xdp_adjust_head error: %d", rc);
 			return false;
 		}
 
@@ -46,7 +46,7 @@ __always_inline static bool adjust_l2_size(void *ctx, bool xdp, struct packet_da
 
 		long rc = bpf_skb_change_head(skb, diff, 0);
 		if (rc != 0) {
-			BPF_ERROR("bpf_skb_change_head error: %d", rc);
+			bpfw_error("bpf_skb_change_head error: %d", rc);
 			return false;
 		}
 
@@ -68,7 +68,7 @@ __always_inline static bool set_eth_header(struct packet_data *pkt, struct next_
 		if (!push_dsa_header(pkt, next_h))
 			return false;
 
-		BPF_DEBUG("DSA Port: %u", next_h->dsa_port & ~DSA_PORT_SET);
+		bpfw_debug("DSA Port: %u", next_h->dsa_port & ~DSA_PORT_SET);
 	}
 	else {
 		check_header(struct ethhdr, *ethh, pkt);
@@ -78,14 +78,14 @@ __always_inline static bool set_eth_header(struct packet_data *pkt, struct next_
 		memcpy(ethh->h_dest,   next_h->dest_mac, ETH_ALEN);
 	}
 
-	BPF_DEBUG_MAC("Dst MAC: ", next_h->dest_mac);
+	bpfw_debug_mac("Dst MAC: ", next_h->dest_mac);
 
 	return true;
 }
 
 __always_inline static bool check_vlan_header(void *ctx, bool xdp, struct packet_data *pkt, struct l2_header *l2, struct next_hop *next_h) {
 	if (!l2->vlan_id && next_h->vlan_id) {
-		BPF_DEBUG("Add VLAN Tag %u", next_h->vlan_id);
+		bpfw_debug("Add VLAN Tag %u", next_h->vlan_id);
 
 		if (xdp || next_h->ifindex == dsa.ifindex) {
 			check_header(struct vlanhdr, *vlan_h, pkt);
@@ -97,7 +97,7 @@ __always_inline static bool check_vlan_header(void *ctx, bool xdp, struct packet
 		else {
 			long rc = bpf_skb_vlan_push(ctx, ETH_P_8021Q, next_h->vlan_id);
 			if (rc != 0) {
-				BPF_ERROR("bpf_skb_vlan_push error: %d", rc);
+				bpfw_error("bpf_skb_vlan_push error: %d", rc);
 				return false;
 			}
 
@@ -105,7 +105,7 @@ __always_inline static bool check_vlan_header(void *ctx, bool xdp, struct packet
 		}
 	}
 	else if (l2->vlan_id && !next_h->vlan_id) {
-		BPF_DEBUG("Remove VLAN Tag");
+		bpfw_debug("Remove VLAN Tag");
 
 		if (xdp || next_h->ifindex == dsa.ifindex) {
 			prev_proto(pkt->p) = l2->proto;
@@ -113,7 +113,7 @@ __always_inline static bool check_vlan_header(void *ctx, bool xdp, struct packet
 		else {
 			long rc = bpf_skb_vlan_pop(ctx);
 			if (rc != 0) {
-				BPF_ERROR("bpf_skb_vlan_pop error: %d", rc);
+				bpfw_error("bpf_skb_vlan_pop error: %d", rc);
 				return false;
 			}
 
@@ -127,12 +127,12 @@ __always_inline static bool check_vlan_header(void *ctx, bool xdp, struct packet
 
 __always_inline static bool check_pppoe_header(struct packet_data *pkt, struct l2_header *l2, __be16 next_hop_pppoe) {
     if (l2->pppoe_id && !next_hop_pppoe) {
-		BPF_DEBUG("Remove PPPoE Header");
+		bpfw_debug("Remove PPPoE Header");
 
 		prev_proto(pkt->p) = l2->proto;
     }
     else if (l2->pppoe_id != next_hop_pppoe) {
-		BPF_DEBUG("Add PPPoE ID 0x%x", next_hop_pppoe);
+		bpfw_debug("Add PPPoE ID 0x%x", next_hop_pppoe);
 
 		check_header(struct pppoehdr, *pppoe_h, pkt);
         pppoe_h->vertype = 0x11;
