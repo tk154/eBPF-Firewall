@@ -48,8 +48,8 @@
 #endif
 
 
-// Helper macro to make the out-of-bounds check on a packet header and drop the package on failure
-#define parse_header(header_type, header_ptr, pkt) \
+// Helper macro to make the out-of-bounds check on a packet header
+#define check_header(header_type, header_ptr, pkt) \
     header_type header_ptr = pkt->p; \
 	pkt->p += sizeof(header_type); \
     if (pkt->p > pkt->data_end) { \

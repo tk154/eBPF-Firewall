@@ -71,7 +71,7 @@ __always_inline static bool set_eth_header(struct packet_data *pkt, struct next_
 		BPF_DEBUG("DSA Port: %u", next_h->dsa_port & ~DSA_PORT_SET);
 	}
 	else {
-		parse_header(struct ethhdr, *ethh, pkt);
+		check_header(struct ethhdr, *ethh, pkt);
 
 		// Adjust the MAC addresses
 		memcpy(ethh->h_source, next_h->src_mac,  ETH_ALEN);
@@ -88,7 +88,7 @@ __always_inline static bool check_vlan_header(void *ctx, bool xdp, struct packet
 		BPF_DEBUG("Add VLAN Tag %u", next_h->vlan_id);
 
 		if (xdp || next_h->ifindex == dsa.ifindex) {
-			parse_header(struct vlanhdr, *vlan_h, pkt);
+			check_header(struct vlanhdr, *vlan_h, pkt);
 			vlan_h->tci = bpf_htons(next_h->vlan_id);
 			vlan_h->proto = l2->proto;
 
@@ -134,7 +134,7 @@ __always_inline static bool check_pppoe_header(struct packet_data *pkt, struct l
     else if (l2->pppoe_id != next_hop_pppoe) {
 		BPF_DEBUG("Add PPPoE ID 0x%x", next_hop_pppoe);
 
-		parse_header(struct pppoehdr, *pppoe_h, pkt);
+		check_header(struct pppoehdr, *pppoe_h, pkt);
         pppoe_h->vertype = 0x11;
 		pppoe_h->code = 0x00;
 		pppoe_h->sid = next_hop_pppoe;

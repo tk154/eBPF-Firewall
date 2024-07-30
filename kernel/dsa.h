@@ -6,7 +6,7 @@
 
 #define parse_dsa_tag(tag, get_port) \
 	__always_inline static bool tag(struct packet_data *pkt, struct l2_header *l2) { \
-		parse_header(struct tag, *tag, pkt) \
+		check_header(struct tag, *tag, pkt) \
 		l2->src_mac = tag->h_source; \
 		l2->proto = tag->h_proto; \
 		l2->dsa_port = (get_port) | DSA_PORT_SET; \
@@ -15,7 +15,7 @@
 
 #define push_dsa_tag(tag, get_tag) \
 	__always_inline static bool tag(struct packet_data *pkt, struct next_hop *next_hop) { \
-		parse_header(struct tag, *tag, pkt) \
+		check_header(struct tag, *tag, pkt) \
 		memcpy(tag->h_source, next_hop->src_mac,  ETH_ALEN); \
 		memcpy(tag->h_dest,   next_hop->dest_mac, ETH_ALEN); \
 		tag->h_tag = (get_tag) & ~DSA_PORT_SET; \
