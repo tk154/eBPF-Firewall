@@ -27,7 +27,7 @@ struct flowtrack_handle {
     int flow_map_fd;
 
     bool dsa;
-    struct dsa_tag *dsa_tag;
+    struct dsa_size dsa_size;
 
     struct bpf_handle *bpf;
     struct netlink_handle *netlink_h;
@@ -48,16 +48,16 @@ struct flowtrack_handle {
 };*/
 
 
-static void calc_l2_diff(struct flow_key_value *flow, enum bpfw_hook hook, struct dsa_tag *dsa_tag) {
+static void calc_l2_diff(struct flow_key_value *flow, enum bpfw_hook hook, struct dsa_size dsa_size) {
     __s8 diff = 0;
     
     if (flow->key.dsa_port)
-        diff -= dsa_tag->rx_size;
+        diff -= dsa_size.rx;
     else
         diff -= sizeof(struct ethhdr);
     
     if (flow->value.next_h.dsa_port)
-        diff += dsa_tag->tx_size;
+        diff += dsa_size.tx;
     else
         diff += sizeof(struct ethhdr);
 
@@ -154,19 +154,13 @@ struct flowtrack_handle* flowtrack_init(struct cmd_args *args) {
     // Load the BPF object (including program and maps) into the kernel
     bpfw_info("Loading BPF program into kernel ...\n");
 
-    flowtrack_h->bpf = bpf_load_program(args->prog_path, args->hook, args->dsa);
+    flowtrack_h->bpf = bpf_load_program(args->prog_path, args->hook, args->dsa, &flowtrack_h->dsa_size);
     if (!flowtrack_h->bpf)
         goto netlink_destroy;
 
     flowtrack_h->flow_map_fd = bpf_get_map_fd(flowtrack_h->bpf, FLOW_MAP_NAME);
     if (flowtrack_h->flow_map_fd < 0)
         goto bpf_unload_program;
-
-    if (flowtrack_h->dsa) {
-        flowtrack_h->dsa_tag = bpf_get_section_data(flowtrack_h->bpf, DSA_TAG_SECTION, NULL);
-        if (!flowtrack_h->dsa_tag)
-            goto bpf_unload_program;
-    }
 
     bpfw_info("Attaching BPF program to network interfaces ...\n");
 
@@ -271,7 +265,7 @@ int flowtrack_update(struct flowtrack_handle* flowtrack_h) {
                         return -1;
 
                     if (flow.value.action == ACTION_REDIRECT)
-                        calc_l2_diff(&flow, flowtrack_h->hook, flowtrack_h->dsa_tag);
+                        calc_l2_diff(&flow, flowtrack_h->hook, flowtrack_h->dsa_size);
 
                     bpfw_debug_action("Act: ", flow.value.action);
                 }

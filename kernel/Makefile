@@ -22,9 +22,7 @@ ifdef FLOW_MAP_MAX_ENTRIES
 OPTIONS += -DFLOW_MAP_MAX_ENTRIES=$(FLOW_MAP_MAX_ENTRIES)
 endif
 
-all: generic dsa
-
-generic: xdp-le tc-le xdp-be tc-be
+all: xdp-le tc-le xdp-be tc-be
 
 xdp: xdp-le xdp-be
 
@@ -58,6 +56,3 @@ $(eval $(call BPF_COMPILE,$(XDP_LE_OBJ_FILE),$(LE_FLAGS) $(XDP_FLAGS) $(OPTIONS)
 $(eval $(call BPF_COMPILE,$(XDP_BE_OBJ_FILE),$(BE_FLAGS) $(XDP_FLAGS) $(OPTIONS)))
 $(eval $(call BPF_COMPILE,$(TC_LE_OBJ_FILE),$(LE_FLAGS) $(TC_FLAGS) $(OPTIONS)))
 $(eval $(call BPF_COMPILE,$(TC_BE_OBJ_FILE),$(BE_FLAGS) $(TC_FLAGS) $(OPTIONS)))
-
-
-include dsa.mk

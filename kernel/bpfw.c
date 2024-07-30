@@ -4,6 +4,7 @@
 #define BPF_LOG_LEVEL BPF_LOG_LEVEL_WARN
 #include "common_kern.h"
 
+#include "dsa.h"
 #include "parse_header.h"
 #include "push_header.h"
 #include "mangle.h"

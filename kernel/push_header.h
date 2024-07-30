@@ -39,11 +39,6 @@ __always_inline static bool adjust_l2_size(struct BPFW_CTX *ctx, struct packet_d
 	pkt->data 	   = (void*)(long)ctx->data;
 	pkt->data_end  = (void*)(long)ctx->data_end;
 
-#ifndef BPFW_DSA
-	if (pkt->data + sizeof(struct ethhdr) > pkt->data_end)
-		return false;
-#endif
-
 	return true;
 }
 
@@ -54,40 +49,22 @@ __always_inline static bool adjust_l2_size(struct BPFW_CTX *ctx, struct packet_d
  * @returns BPF_REDIRECT on success, BPF_DROP otherwise
  * **/
 __always_inline static bool set_eth_header(struct packet_data *pkt, struct next_hop *next_h) {
-#ifdef BPFW_DSA
 	if (next_h->dsa_port) {
-		if (pkt->p + sizeof(struct ethhdr_dsa_tx) > pkt->data_end)
+		if (!push_dsa_header(pkt, next_h))
 			return false;
 
-		struct ethhdr_dsa_tx *ethh = pkt->p;
-
-		__u8 dsa_port = next_h->dsa_port & ~DSA_PORT_SET;
-		ethh->dsa_tag = dsa_get_tag(dsa_port);
+		BPF_DEBUG("DSA Port: %u", next_h->dsa_port & ~DSA_PORT_SET);
+	}
+	else {
+		parse_header(struct ethhdr, *ethh, pkt);
 
 		// Adjust the MAC addresses
 		memcpy(ethh->h_source, next_h->src_mac,  ETH_ALEN);
 		memcpy(ethh->h_dest,   next_h->dest_mac, ETH_ALEN);
-
-		BPF_DEBUG("DSA Port: %u", dsa_port);
-		BPF_DEBUG_MAC("Dst MAC: ", next_h->dest_mac);
-
-		pkt->p += sizeof(struct ethhdr_dsa_tx);
-		return true;
 	}
-
-	if (pkt->p + sizeof(struct ethhdr) > pkt->data_end)
-		return false;
-#endif
-
-	struct ethhdr *ethh = pkt->p;
-
-	// Adjust the MAC addresses
-	memcpy(ethh->h_source, next_h->src_mac,  ETH_ALEN);
-	memcpy(ethh->h_dest,   next_h->dest_mac, ETH_ALEN);
 
 	BPF_DEBUG_MAC("Dst MAC: ", next_h->dest_mac);
 
-	pkt->p += sizeof(struct ethhdr);
 	return true;
 }
 
@@ -104,10 +81,7 @@ __always_inline static bool check_vlan_header(struct BPFW_CTX *ctx, struct packe
 		BPF_DEBUG("Add VLAN Tag %u", next_h->vlan_id);
 
 #ifdef TC_PROGRAM
-#ifdef BPFW_DSA
-		if (next_h->ifindex != dsa_switch)
-#endif
-		{
+		if (next_h->ifindex != dsa.ifindex) {
 			int rc = bpf_skb_vlan_push(ctx, ETH_P_8021Q, next_h->vlan_id);
 			if (rc != 0) {
 				BPF_ERROR("bpf_skb_vlan_push error: %d", rc);
@@ -120,7 +94,6 @@ __always_inline static bool check_vlan_header(struct BPFW_CTX *ctx, struct packe
 			return true;
 		}
 #endif
-#if defined(XDP_PROGRAM) || defined(BPFW_DSA)
 		if (pkt->p + sizeof(struct vlanhdr) > pkt->data_end)
 			return false;
 
@@ -130,17 +103,13 @@ __always_inline static bool check_vlan_header(struct BPFW_CTX *ctx, struct packe
 
 		prev_proto(pkt->p) = bpf_htons(ETH_P_8021Q);
 		pkt->p += sizeof(struct vlanhdr);
-#endif
 	}
 
 	else if (l2->vlan_id && !next_h->vlan_id) {
 		BPF_DEBUG("Remove VLAN Tag");
 
 #ifdef TC_PROGRAM
-#ifdef BPFW_DSA
-		if (ctx->ingress_ifindex != dsa_switch)
-#endif
-		{
+		if (ctx->ingress_ifindex != dsa.ifindex) {
 			int rc = bpf_skb_vlan_pop(ctx);
 			if (rc != 0) {
 				BPF_ERROR("bpf_skb_vlan_pop error: %d", rc);
@@ -153,9 +122,7 @@ __always_inline static bool check_vlan_header(struct BPFW_CTX *ctx, struct packe
 			return true;
 		}
 #endif
-#if defined(XDP_PROGRAM) || defined(BPFW_DSA)
 		prev_proto(pkt->p) = l2->proto;
-#endif
 	}
 
 	return true;

@@ -18,7 +18,7 @@ struct bpf_handle;
  * @param prog_type Can be either BPF_PROG_TYPE_XDP for XDP or BPF_PROG_TYPE_SCHED_CLS for TC programs
  * @returns On success, a pointer to a dynamically allocated bpf_handle struct, NULL otherwise
 **/
-struct bpf_handle* bpf_load_program(const char* prog_path, enum bpfw_hook hook, bool dsa);
+struct bpf_handle* bpf_load_program(const char* prog_path, enum bpfw_hook hook, bool dsa, struct dsa_size *dsa_size);
 
 /**
  * Unload a BPF object including its map and program from the kernel

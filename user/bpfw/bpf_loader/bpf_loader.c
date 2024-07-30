@@ -72,7 +72,7 @@ globfree:
     return rc;
 }
 
-static int check_dsa(struct bpf_handle *bpf) {
+static int check_dsa(struct bpf_handle *bpf, struct dsa_size *dsa_size) {
     bpf->dsa_switch = 0;
     char switch_proto[DSA_PROTO_MAX_LEN];
 
@@ -87,24 +87,34 @@ static int check_dsa(struct bpf_handle *bpf) {
         return -1;
     }
 
-    const char *bpf_proto = bpf_get_section_data(bpf, DSA_PROTO_SECTION, NULL);
-    if (!bpf_proto) {
-        bpfw_error("BPF program wasn't built with DSA support.\n");
+    size_t dsa_tag_size;
+    const struct dsa_tag *dsa_tag = bpf_get_section_data(bpf, DSA_RO_SECTION, &dsa_tag_size);
+    if (!dsa_tag)
+        return -1;
+
+    __s8 index = -1;
+    for (int i = 0; i < dsa_tag_size / sizeof(struct dsa_tag); i++) {
+        if (strncmp(switch_proto, dsa_tag[i].proto, DSA_PROTO_MAX_LEN) == 0) {
+            index = i;
+            break;
+        }
+    }
+
+    if (index == -1) {
+        bpfw_error("Error: BPF program doesn't support the DSA tagging protocol '%s' of the DSA switch.\n",
+            switch_proto);
+
         return -1;
     }
 
-    if (strncmp(switch_proto, bpf_proto, DSA_PROTO_MAX_LEN) != 0) {
-        bpfw_error("Error: DSA protocol of the DSA switch (%s) and the BPF program (%s) don't match.\n",
-            switch_proto, bpf_proto);
+    *dsa_size = dsa_tag[index].size;
 
-        return -1;
-    }
-
-    __u32 *dsa_switch = bpf_get_section_data(bpf, DSA_SWITCH_SECTION, NULL);
-    if (!dsa_switch)
+    struct dsa *dsa = bpf_get_section_data(bpf, DSA_BSS_SECTION, NULL);
+    if (!dsa)
         return -1;
 
-    *dsa_switch = bpf->dsa_switch;
+    dsa->ifindex = bpf->dsa_switch;
+    dsa->proto   = index + 1;
 
     return 0;
 }
@@ -123,7 +133,7 @@ static __u32 get_xdp_flag(enum bpfw_hook hook) {
 }
 
 
-struct bpf_handle* bpf_load_program(const char *obj_path, enum bpfw_hook hook, bool dsa) {
+struct bpf_handle* bpf_load_program(const char *obj_path, enum bpfw_hook hook, bool dsa, struct dsa_size *dsa_size) {
     struct bpf_handle* bpf = (struct bpf_handle*)malloc(sizeof(struct bpf_handle));
     if (!bpf) {
         bpfw_error("Error allocating BPF handle: %s (-%d).\n", strerror(errno), errno);
@@ -148,7 +158,7 @@ struct bpf_handle* bpf_load_program(const char *obj_path, enum bpfw_hook hook, b
     
     bpf_program__set_type(bpf->prog, (hook & BPFW_HOOK_XDP) ? BPF_PROG_TYPE_XDP : BPF_PROG_TYPE_SCHED_CLS);
 
-    if (check_dsa(bpf) != 0)
+    if (check_dsa(bpf, dsa_size) != 0)
         goto bpf_object__close;
 
     // Try to load the BPF object into the kernel, return on error

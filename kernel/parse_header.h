@@ -11,20 +11,6 @@
 #include <stdbool.h>
 #include "common_kern.h"
 
-#ifdef BPFW_DSA
-#include "dsa.h"
-#endif
-
-
-// Helper macro to make the out-of-bounds check on a packet header and drop the package on failure
-#define parse_header(header_type, header_ptr, pkt) \
-    header_type header_ptr = pkt->p; \
-	pkt->p += sizeof(header_type); \
-    if (pkt->p > pkt->data_end) { \
-        BPF_WARN(#header_type" > data_end"); \
-        return false; \
-    }
-
 
 __always_inline static __be16 proto_ppp2eth(__be16 ppp_proto) {
 	switch (ppp_proto) {
@@ -39,19 +25,13 @@ __always_inline static __be16 proto_ppp2eth(__be16 ppp_proto) {
 
 __always_inline static bool parse_eth_header(struct BPFW_CTX *ctx, struct packet_data *pkt, struct l2_header *l2) {
 	// Parse the Ethernet header, will drop the package if out-of-bounds
-#ifdef BPFW_DSA
-	if (ctx->ingress_ifindex == dsa_switch) {
-		parse_header(struct ethhdr_dsa_rx, *ethh, pkt);
-
-		l2->src_mac = ethh->h_source;
-    	l2->proto = ethh->h_proto;
-		l2->dsa_port = dsa_get_port(ethh->dsa_tag) | DSA_PORT_SET;
+	if (ctx->ingress_ifindex == dsa.ifindex) {
+		if (!parse_dsa_header(pkt, l2))
+			return false;
 
 		BPF_DEBUG("Interface: %u@p%u", ctx->ingress_ifindex, l2->dsa_port & ~DSA_PORT_SET);
 	}
-	else
-#endif
-	{
+	else {
 		parse_header(struct ethhdr, *ethh, pkt);
 
 		l2->src_mac = ethh->h_source;
@@ -68,10 +48,7 @@ __always_inline static bool parse_eth_header(struct BPFW_CTX *ctx, struct packet
 
 __always_inline static bool parse_vlan_header(struct BPFW_CTX *ctx, struct packet_data *pkt, struct l2_header *l2) {
 #ifdef TC_PROGRAM
-#ifdef BPFW_DSA
-	if (ctx->ingress_ifindex != dsa_switch)
-#endif
-	{
+	if (ctx->ingress_ifindex != dsa.ifindex) {
 		if (ctx->vlan_present && ctx->vlan_proto == bpf_htons(ETH_P_8021Q)) {
 			// Save the VLAN ID (last 12 Byte)
 			l2->vlan_id = ctx->vlan_tci & 0x0FFF;

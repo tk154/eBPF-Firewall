@@ -67,6 +67,16 @@
 #endif
 
 
+// Helper macro to make the out-of-bounds check on a packet header and drop the package on failure
+#define parse_header(header_type, header_ptr, pkt) \
+    header_type header_ptr = pkt->p; \
+	pkt->p += sizeof(header_type); \
+    if (pkt->p > pkt->data_end) { \
+        BPF_WARN(#header_type" > data_end"); \
+        return false; \
+    }
+
+
 // tcphdr from <linux/tcp.h> uses the host endianness, instead of the compiler endianness
 struct tcp_flags {
 #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__

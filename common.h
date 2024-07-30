@@ -8,17 +8,18 @@
 #include <sys/socket.h>
 
 
+#define __packed __attribute__((packed))
+
 #define STRINGIFY(x)  #x
 #define MAP_NAME(map) STRINGIFY(map)           // Used to get the map name as a string (used for user space programs)
 
 #define FLOW_MAP      flow_map
 #define FLOW_MAP_NAME MAP_NAME(FLOW_MAP)
 
-#define DSA_PROTO_MAX_LEN 16
+#define DSA_PROTO_MAX_LEN 8
 
-#define DSA_PROTO_SECTION	".rodata.dsa.proto"
-#define DSA_TAG_SECTION   	".rodata.dsa.tag"
-#define DSA_SWITCH_SECTION 	".bss.dsa.switch"
+#define DSA_RO_SECTION		".rodata.dsa"
+#define DSA_BSS_SECTION		".bss.dsa"
 
 #define IPV4_ALEN 4
 #define IPV6_ALEN 16
@@ -67,10 +68,20 @@ struct flow_value {
 };
 
 
-struct dsa_tag {
-	__u8 rx_size;
-	__u8 tx_size;
+struct dsa {
+	__u32 ifindex;
+	__u8  proto;
 };
+
+struct dsa_size {
+	__u8 rx, tx;
+};
+
+struct dsa_tag {
+	char proto[DSA_PROTO_MAX_LEN];
+	struct dsa_size size;
+};
+
 
 struct vlanhdr {
 	__be16 tci;
@@ -83,7 +94,7 @@ struct pppoehdr {
 	__be16 sid;
 	__be16 length;
     __be16 proto;
-} __attribute__((packed));
+} __packed;
 
 
 #define DSA_PORT_SET	(1U << 7)
