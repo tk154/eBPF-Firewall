@@ -14,10 +14,6 @@ BE_OBJ_FILE := $(OBJ_DIR)/$(BPF_NAME)_be.o
 LE_FLAG := -mlittle-endian
 BE_FLAG := -mbig-endian
 
-ifdef FLOW_MAP_MAX_ENTRIES
-OPTIONS += -DFLOW_MAP_MAX_ENTRIES=$(FLOW_MAP_MAX_ENTRIES)
-endif
-
 all: le be
 
 le: $(LE_OBJ_FILE)
@@ -36,5 +32,5 @@ $(1): $(SOURCE) $(HEADERS) | $(OBJ_DIR)
 	$(CLANG) $$(CFLAGS) -c $$< -o $$@
 endef
 
-$(eval $(call BPF_COMPILE,$(LE_OBJ_FILE),$(LE_FLAG) $(OPTIONS)))
-$(eval $(call BPF_COMPILE,$(BE_OBJ_FILE),$(BE_FLAG) $(OPTIONS)))
+$(eval $(call BPF_COMPILE,$(LE_OBJ_FILE),$(LE_FLAG)))
+$(eval $(call BPF_COMPILE,$(BE_OBJ_FILE),$(BE_FLAG)))

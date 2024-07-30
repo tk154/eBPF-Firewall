@@ -151,12 +151,23 @@ struct flowtrack_handle* flowtrack_init(struct cmd_args *args) {
     if (!flowtrack_h->netlink_h)
         goto free;
 
+    bpfw_info("Opening BPF object ...\n");
+
+    flowtrack_h->bpf = bpf_open_object(args->obj_path, args->hook);
+    if (!flowtrack_h->bpf)
+        goto netlink_destroy;
+
+    if (bpf_set_map_max_entries(flowtrack_h->bpf, FLOW_MAP_NAME, args->map_max_entries) != 0)
+        goto bpf_unload_program;
+
+    if (bpf_check_dsa(flowtrack_h->bpf, args->dsa, &flowtrack_h->dsa_size) != 0)
+        goto bpf_unload_program;
+
     // Load the BPF object (including program and maps) into the kernel
     bpfw_info("Loading BPF program into kernel ...\n");
 
-    flowtrack_h->bpf = bpf_load_program(args->prog_path, args->hook, args->dsa, &flowtrack_h->dsa_size);
-    if (!flowtrack_h->bpf)
-        goto netlink_destroy;
+    if (bpf_load_program(flowtrack_h->bpf) != 0)
+        goto bpf_unload_program;
 
     flowtrack_h->flow_map_fd = bpf_get_map_fd(flowtrack_h->bpf, FLOW_MAP_NAME);
     if (flowtrack_h->flow_map_fd < 0)

@@ -2,9 +2,6 @@
 #define BPF_LOADER_H
 
 #include <stdbool.h>
-#include <stddef.h>
-
-#include <linux/bpf.h>
 
 #include "../common_user.h"
 
@@ -18,7 +15,8 @@ struct bpf_handle;
  * @param prog_type Can be either BPF_PROG_TYPE_XDP for XDP or BPF_PROG_TYPE_SCHED_CLS for TC programs
  * @returns On success, a pointer to a dynamically allocated bpf_handle struct, NULL otherwise
 **/
-struct bpf_handle* bpf_load_program(const char* prog_path, enum bpfw_hook hook, bool dsa, struct dsa_size *dsa_size);
+struct bpf_handle* bpf_open_object(const char* prog_path, enum bpfw_hook hook);
+int bpf_load_program(struct bpf_handle* bpf);
 
 /**
  * Unload a BPF object including its map and program from the kernel
@@ -76,8 +74,10 @@ void bpf_ifnames_detach_program(struct bpf_handle* bpf, char* ifnames[], unsigne
  * **/
 //int bpf_detach_program(struct bpf_handle* bpf, struct netlink_handle *netlink_h);
 
+int bpf_check_dsa(struct bpf_handle *bpf, bool dsa, struct dsa_size *dsa_size);
+
 int bpf_get_map_fd(struct bpf_handle* bpf, const char *map_name);
-void* bpf_get_section_data(struct bpf_handle *bpf, const char *sec_name, size_t *sec_size);
+int bpf_set_map_max_entries(struct bpf_handle *bpf, const char *map_name, __u32 new_max_entries);
 
 
 #endif

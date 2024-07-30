@@ -25,7 +25,7 @@ enum bpfw_hook {
 };
 
 struct cmd_args {
-    char* prog_path;
+    char* obj_path;
     enum bpfw_hook hook;
 
     char** if_names;
@@ -33,9 +33,11 @@ struct cmd_args {
 
     bool dsa;
 
-    unsigned int map_poll_sec;
-    unsigned int tcp_flow_timeout;
-    unsigned int udp_flow_timeout;
+    __u32 map_poll_sec;
+    __u32 map_max_entries;
+
+    __u32 tcp_flow_timeout;
+    __u32 udp_flow_timeout;
 };
 
 

@@ -72,51 +72,26 @@ globfree:
     return rc;
 }
 
-static int check_dsa(struct bpf_handle *bpf, struct dsa_size *dsa_size) {
-    bpf->dsa_switch = 0;
-    char switch_proto[DSA_PROTO_MAX_LEN];
-
-    if (get_dsa_switch(&bpf->dsa_switch, switch_proto) != 0)
-        return -1;
-
-    if (!bpf->dsa)
-        return 0;
-
-    if (!bpf->dsa_switch) {
-        bpfw_error("Error: Couldn't find a DSA switch.\n");
-        return -1;
+static void* bpf_get_section_data(struct bpf_handle *bpf, const char *sec_name, size_t *sec_size) {
+    // Find the .rodata section
+    struct bpf_map *section = bpf_object__find_map_by_name(bpf->obj, sec_name);
+    if (!section) {
+        bpfw_error("Error: Couldn't find BPF section %s.\n", sec_name);
+        return NULL;
     }
 
-    size_t dsa_tag_sec_size;
-    const struct dsa_tag *dsa_tag = bpf_get_section_data(bpf, DSA_RO_SECTION, &dsa_tag_sec_size);
-    if (!dsa_tag)
-        return -1;
+    size_t section_size;
+    void *section_data = bpf_map__initial_value(section, &section_size);
 
-    __s8 index = -1;
-    for (int i = 0; i < dsa_tag_sec_size / sizeof(struct dsa_tag); i++) {
-        if (strncmp(switch_proto, dsa_tag[i].proto, DSA_PROTO_MAX_LEN) == 0) {
-            index = i;
-            break;
-        }
+    if (!section_data) {
+        bpfw_error("Error: Failed to get data from BPF section %s.\n", sec_name);
+        return NULL;
     }
 
-    if (index == -1) {
-        bpfw_error("Error: BPF program doesn't support the DSA tagging protocol '%s' of the DSA switch.\n",
-            switch_proto);
+    if (sec_size)
+        *sec_size = section_size;
 
-        return -1;
-    }
-
-    *dsa_size = dsa_tag[index].size;
-
-    struct dsa *dsa = bpf_get_section_data(bpf, DSA_BSS_SECTION, NULL);
-    if (!dsa)
-        return -1;
-
-    dsa->ifindex = bpf->dsa_switch;
-    dsa->proto   = index + 1;
-
-    return 0;
+    return section_data;
 }
 
 static __u32 get_xdp_flag(enum bpfw_hook hook) {
@@ -133,7 +108,7 @@ static __u32 get_xdp_flag(enum bpfw_hook hook) {
 }
 
 
-struct bpf_handle* bpf_load_program(const char *obj_path, enum bpfw_hook hook, bool dsa, struct dsa_size *dsa_size) {
+struct bpf_handle* bpf_open_object(const char *obj_path, enum bpfw_hook hook) {
     struct bpf_handle* bpf = (struct bpf_handle*)malloc(sizeof(struct bpf_handle));
     if (!bpf) {
         bpfw_error("Error allocating BPF handle: %s (-%d).\n", strerror(errno), errno);
@@ -141,7 +116,6 @@ struct bpf_handle* bpf_load_program(const char *obj_path, enum bpfw_hook hook, b
     }
 
     bpf->hook = hook;
-    bpf->dsa  = dsa;
 
     const char *prog_name;
     enum bpf_prog_type prog_type;
@@ -170,24 +144,26 @@ struct bpf_handle* bpf_load_program(const char *obj_path, enum bpfw_hook hook, b
     
     bpf_program__set_type(bpf->prog, prog_type);
 
-    if (check_dsa(bpf, dsa_size) != 0)
-        goto bpf_object__close;
-
-    // Try to load the BPF object into the kernel, return on error
-    if (bpf_object__load(bpf->obj) != 0) {
-        bpfw_error("Error loading BPF program into kernel: %s (-%d).\n", strerror(errno), errno);
-        goto bpf_object__close;
-    }
-
     return bpf;
 
 bpf_object__close:
+    bpf_object__unpin_maps(bpf->obj, NULL);
     bpf_object__close(bpf->obj);
 
 free:
     free(bpf);
 
     return NULL;
+}
+
+int bpf_load_program(struct bpf_handle* bpf) {
+    // Try to load the BPF object into the kernel, return on error
+    if (bpf_object__load(bpf->obj) != 0) {
+        bpfw_error("Error loading BPF program into kernel: %s (-%d).\n", strerror(errno), errno);
+        return -1;
+    }
+
+    return 0;
 }
 
 void bpf_unload_program(struct bpf_handle* bpf) {
@@ -311,33 +287,78 @@ void bpf_ifnames_detach_program(struct bpf_handle* bpf, char* ifnames[], unsigne
         bpf_ifname_detach_program(bpf, ifnames[i]);
 }
 
+int bpf_check_dsa(struct bpf_handle *bpf, bool dsa, struct dsa_size *dsa_size) {
+    bpf->dsa = dsa;
+    bpf->dsa_switch = 0;
+    char switch_proto[DSA_PROTO_MAX_LEN];
+
+    if (get_dsa_switch(&bpf->dsa_switch, switch_proto) != 0)
+        return -1;
+
+    if (!bpf->dsa)
+        return 0;
+
+    if (!bpf->dsa_switch) {
+        bpfw_error("Error: Couldn't find a DSA switch.\n");
+        return -1;
+    }
+
+    size_t dsa_tag_sec_size;
+    const struct dsa_tag *dsa_tag = bpf_get_section_data(bpf, DSA_RO_SECTION, &dsa_tag_sec_size);
+    if (!dsa_tag)
+        return -1;
+
+    __s8 index = -1;
+    for (int i = 0; i < dsa_tag_sec_size / sizeof(struct dsa_tag); i++) {
+        if (strncmp(switch_proto, dsa_tag[i].proto, DSA_PROTO_MAX_LEN) == 0) {
+            index = i;
+            break;
+        }
+    }
+
+    if (index == -1) {
+        bpfw_error("Error: BPF program doesn't support the DSA tagging protocol '%s' of the DSA switch.\n",
+            switch_proto);
+
+        return -1;
+    }
+
+    *dsa_size = dsa_tag[index].size;
+
+    struct dsa *dsa_sec = bpf_get_section_data(bpf, DSA_BSS_SECTION, NULL);
+    if (!dsa_sec)
+        return -1;
+
+    dsa_sec->ifindex = bpf->dsa_switch;
+    dsa_sec->proto   = index + 1;
+
+    return 0;
+}
+
 int bpf_get_map_fd(struct bpf_handle *bpf, const char *map_name) {
     // Get the file descriptor of the BPF flow map
     int map_fd = bpf_object__find_map_fd_by_name(bpf->obj, map_name);
-    if (map_fd < 0)
+    if (map_fd < 0) {
         bpfw_error("Error: Couldn't find BPF map %s.\n", map_name);
+        return -1;
+    }
 
     return map_fd;
 }
 
-void* bpf_get_section_data(struct bpf_handle *bpf, const char *sec_name, size_t *sec_size) {
-    // Find the .rodata section
-    struct bpf_map *section = bpf_object__find_map_by_name(bpf->obj, sec_name);
-    if (!section) {
-        bpfw_error("Error: Couldn't find BPF section %s.\n", sec_name);
-        return NULL;
+int bpf_set_map_max_entries(struct bpf_handle *bpf, const char *map_name, __u32 new_max_entries) {
+    struct bpf_map *map = bpf_object__find_map_by_name(bpf->obj, map_name);
+    if (!map) {
+        bpfw_error("Error: Couldn't find BPF map %s.\n", map_name);
+        return -1;
     }
 
-    size_t section_size;
-    void *section_data = bpf_map__initial_value(section, &section_size);
+    if (bpf_map__set_max_entries(map, new_max_entries) != 0) {
+        bpfw_error("Error setting %s max entries: %s (-%d).\n",
+            map_name, strerror(errno), errno);
 
-    if (!section_data) {
-        bpfw_error("Error: Failed to get data from BPF section %s.\n", sec_name);
-        return NULL;
+        return -1;
     }
 
-    if (sec_size)
-        *sec_size = section_size;
-
-    return section_data;
+    return 0;
 }
