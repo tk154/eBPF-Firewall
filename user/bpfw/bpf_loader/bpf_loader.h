@@ -74,7 +74,7 @@ void bpf_ifnames_detach_program(struct bpf_handle* bpf, char* ifnames[], unsigne
  * **/
 //int bpf_detach_program(struct bpf_handle* bpf, struct netlink_handle *netlink_h);
 
-int bpf_check_dsa(struct bpf_handle *bpf, bool dsa, struct dsa_size *dsa_size);
+int bpf_check_dsa(struct bpf_handle *bpf, bool dsa, struct dsa_tag **dsa_tag);
 
 int bpf_get_map_fd(struct bpf_handle* bpf, const char *map_name);
 int bpf_set_map_max_entries(struct bpf_handle *bpf, const char *map_name, __u32 new_max_entries);

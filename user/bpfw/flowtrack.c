@@ -21,13 +21,17 @@
 
 
 struct flowtrack_handle {
-    unsigned int map_poll_sec;
-
     enum bpfw_hook hook;
+
     int flow_map_fd;
+    __u32 map_poll_sec;
+
+    // Flow Timeouts
+    __u32 tcp_flow_timeout;
+    __u32 udp_flow_timeout;
 
     bool dsa;
-    struct dsa_size dsa_size;
+    struct dsa_tag *dsa_tag;
 
     struct bpf_handle *bpf;
     struct netlink_handle *netlink_h;
@@ -36,10 +40,6 @@ struct flowtrack_handle {
 #ifdef OPENWRT_UCODE
     struct ucode_handle *ucode_h;
 #endif
-
-    // Flow Timeouts
-    unsigned int tcp_flow_timeout;
-    unsigned int udp_flow_timeout;
 };
 
 /*struct bpf_attach_args {
@@ -48,18 +48,15 @@ struct flowtrack_handle {
 };*/
 
 
-static void calc_l2_diff(struct flow_key_value *flow, enum bpfw_hook hook, struct dsa_size dsa_size) {
+static void calc_l2_diff(struct flow_key_value *flow, struct flowtrack_handle *flowtrack_h) {
+    enum bpfw_hook hook = flowtrack_h->hook;
+    struct dsa_tag *tag = flowtrack_h->dsa_tag;
     __s8 diff = 0;
     
     if (flow->key.dsa_port)
-        diff -= dsa_size.rx;
-    else
-        diff -= sizeof(struct ethhdr);
-    
+        diff -= tag->rx_size;
     if (flow->value.next_h.dsa_port)
-        diff += dsa_size.tx;
-    else
-        diff += sizeof(struct ethhdr);
+        diff += tag->tx_size;
 
     if ((hook & BPFW_HOOK_XDP || flow->key.dsa_port) && flow->key.vlan_id)
         diff -= sizeof(struct vlanhdr);
@@ -160,7 +157,7 @@ struct flowtrack_handle* flowtrack_init(struct cmd_args *args) {
     if (bpf_set_map_max_entries(flowtrack_h->bpf, FLOW_MAP_NAME, args->map_max_entries) != 0)
         goto bpf_unload_program;
 
-    if (bpf_check_dsa(flowtrack_h->bpf, args->dsa, &flowtrack_h->dsa_size) != 0)
+    if (bpf_check_dsa(flowtrack_h->bpf, args->dsa, &flowtrack_h->dsa_tag) != 0)
         goto bpf_unload_program;
 
     // Load the BPF object (including program and maps) into the kernel
@@ -276,7 +273,7 @@ int flowtrack_update(struct flowtrack_handle* flowtrack_h) {
                         return -1;
 
                     if (flow.value.action == ACTION_REDIRECT)
-                        calc_l2_diff(&flow, flowtrack_h->hook, flowtrack_h->dsa_size);
+                        calc_l2_diff(&flow, flowtrack_h);
 
                     bpfw_debug_action("Act: ", flow.value.action);
                 }

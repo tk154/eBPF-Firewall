@@ -25,7 +25,7 @@ __always_inline static __be16 proto_ppp2eth(__be16 ppp_proto) {
 
 __always_inline static bool parse_eth_header(void *ctx, struct packet_data *pkt, struct l2_header *l2) {
 	// Parse the Ethernet header, will drop the package if out-of-bounds
-	if (pkt->ifindex == dsa.ifindex) {
+	if (pkt->ifindex == dsa_switch.ifindex) {
 		if (!parse_dsa_header(pkt, l2))
 			return false;
 
@@ -47,7 +47,7 @@ __always_inline static bool parse_eth_header(void *ctx, struct packet_data *pkt,
 }
 
 __always_inline static bool parse_vlan_header(void *ctx, bool xdp, struct packet_data *pkt, struct l2_header *l2) {
-	if (xdp || pkt->ifindex == dsa.ifindex) {
+	if (xdp || pkt->ifindex == dsa_switch.ifindex) {
 		// Check if there is a VLAN header
 		if (l2->proto == bpf_htons(ETH_P_8021Q)) {
 			// Parse the VLAN header, will drop the package if out-of-bounds

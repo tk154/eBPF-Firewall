@@ -19,8 +19,8 @@
 
 #define DSA_PROTO_MAX_LEN 8
 
-#define DSA_RO_SECTION		".rodata.dsa"
-#define DSA_BSS_SECTION		".bss.dsa"
+#define DSA_TAG_SECTION		".rodata.dsa.tag"
+#define DSA_SWITCH_SECTION	".bss.dsa.switch"
 
 #define IPV4_ALEN 4
 #define IPV6_ALEN 16
@@ -69,18 +69,14 @@ struct flow_value {
 };
 
 
-struct dsa {
+struct dsa_switch {
 	__u32 ifindex;
 	__u8  proto;
 };
 
-struct dsa_size {
-	__u8 rx, tx;
-};
-
 struct dsa_tag {
 	char proto[DSA_PROTO_MAX_LEN];
-	struct dsa_size size;
+	__u8 rx_size, tx_size;
 };
 
 

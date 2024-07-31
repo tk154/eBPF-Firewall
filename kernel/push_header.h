@@ -87,7 +87,7 @@ __always_inline static bool check_vlan_header(void *ctx, bool xdp, struct packet
 	if (!l2->vlan_id && next_h->vlan_id) {
 		bpfw_debug("Add VLAN Tag %u", next_h->vlan_id);
 
-		if (xdp || next_h->ifindex == dsa.ifindex) {
+		if (xdp || next_h->ifindex == dsa_switch.ifindex) {
 			check_header(struct vlanhdr, *vlan_h, pkt);
 			vlan_h->tci = bpf_htons(next_h->vlan_id);
 			vlan_h->proto = l2->proto;
@@ -107,7 +107,7 @@ __always_inline static bool check_vlan_header(void *ctx, bool xdp, struct packet
 	else if (l2->vlan_id && !next_h->vlan_id) {
 		bpfw_debug("Remove VLAN Tag");
 
-		if (xdp || next_h->ifindex == dsa.ifindex) {
+		if (xdp || next_h->ifindex == dsa_switch.ifindex) {
 			prev_proto(pkt->p) = l2->proto;
 		}
 		else {

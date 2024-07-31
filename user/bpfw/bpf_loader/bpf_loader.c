@@ -287,7 +287,7 @@ void bpf_ifnames_detach_program(struct bpf_handle* bpf, char* ifnames[], unsigne
         bpf_ifname_detach_program(bpf, ifnames[i]);
 }
 
-int bpf_check_dsa(struct bpf_handle *bpf, bool dsa, struct dsa_size *dsa_size) {
+int bpf_check_dsa(struct bpf_handle *bpf, bool dsa, struct dsa_tag **dsa_tag) {
     bpf->dsa = dsa;
     bpf->dsa_switch = 0;
     char switch_proto[DSA_PROTO_MAX_LEN];
@@ -304,13 +304,13 @@ int bpf_check_dsa(struct bpf_handle *bpf, bool dsa, struct dsa_size *dsa_size) {
     }
 
     size_t dsa_tag_sec_size;
-    const struct dsa_tag *dsa_tag = bpf_get_section_data(bpf, DSA_RO_SECTION, &dsa_tag_sec_size);
-    if (!dsa_tag)
+    struct dsa_tag *dsa_tag_sec = bpf_get_section_data(bpf, DSA_TAG_SECTION, &dsa_tag_sec_size);
+    if (!dsa_tag_sec)
         return -1;
 
     __s8 index = -1;
     for (int i = 0; i < dsa_tag_sec_size / sizeof(struct dsa_tag); i++) {
-        if (strncmp(switch_proto, dsa_tag[i].proto, DSA_PROTO_MAX_LEN) == 0) {
+        if (strncmp(switch_proto, dsa_tag_sec[i].proto, DSA_PROTO_MAX_LEN) == 0) {
             index = i;
             break;
         }
@@ -323,14 +323,14 @@ int bpf_check_dsa(struct bpf_handle *bpf, bool dsa, struct dsa_size *dsa_size) {
         return -1;
     }
 
-    *dsa_size = dsa_tag[index].size;
+    *dsa_tag = &dsa_tag_sec[index];
 
-    struct dsa *dsa_sec = bpf_get_section_data(bpf, DSA_BSS_SECTION, NULL);
-    if (!dsa_sec)
+    struct dsa_switch *dsa_switch_sec = bpf_get_section_data(bpf, DSA_SWITCH_SECTION, NULL);
+    if (!dsa_switch_sec)
         return -1;
 
-    dsa_sec->ifindex = bpf->dsa_switch;
-    dsa_sec->proto   = index + 1;
+    dsa_switch_sec->ifindex = bpf->dsa_switch;
+    dsa_switch_sec->proto   = index + 1;
 
     return 0;
 }

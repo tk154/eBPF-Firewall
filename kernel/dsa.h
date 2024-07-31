@@ -24,8 +24,8 @@
 
 #define DSA_TAG(tag) { \
 		.proto = STRINGIFY(tag), \
-		.size.rx = sizeof(struct tag##_tag_rcv), \
-		.size.tx = sizeof(struct tag##_tag_xmit) \
+		.rx_size = sizeof(((struct tag##_tag_rcv*)0)->h_tag), \
+		.tx_size = sizeof(((struct tag##_tag_xmit*)0)->h_tag) \
 	}
 
 
@@ -83,11 +83,11 @@ parse_dsa_tag(qca_tag_rcv, qca_tag_rcv->h_tag & 0x07)
 push_dsa_tag(qca_tag_xmit, 0x8080 | (1 << next_hop->dsa_port))
 
 
-SEC(DSA_RO_SECTION)
+SEC(DSA_TAG_SECTION)
 const struct dsa_tag dsa_tag[] = { DSA_TAG(gswip), DSA_TAG(mtk), DSA_TAG(qca) };
 
-SEC(DSA_BSS_SECTION)
-struct dsa dsa;
+SEC(DSA_SWITCH_SECTION)
+struct dsa_switch dsa_switch;
 
 
 enum {
@@ -97,7 +97,7 @@ enum {
 };
 
 __always_inline static bool parse_dsa_header(struct packet_data *pkt, struct l2_header *l2) {
-	switch (dsa.proto) {
+	switch (dsa_switch.proto) {
 		case DSA_PROTO_GSWIP:
 			return gswip_tag_rcv(pkt, l2);
 		case DSA_PROTO_MTK:
@@ -110,7 +110,7 @@ __always_inline static bool parse_dsa_header(struct packet_data *pkt, struct l2_
 }
 
 __always_inline static bool push_dsa_header(struct packet_data *pkt, struct next_hop *next_hop) {
-	switch (dsa.proto) {
+	switch (dsa_switch.proto) {
 		case DSA_PROTO_GSWIP:
 			return gswip_tag_xmit(pkt, next_hop);
 		case DSA_PROTO_MTK:
