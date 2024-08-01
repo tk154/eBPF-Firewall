@@ -1,21 +1,13 @@
-ifndef TARGET
-$(error Missing TARGET)
-endif
+ARCH ?= $(shell uname -m)
+GCC  ?= 14.1.0
 
-define first_wildcard_match
-	$(shell set -- $(1); echo "$$1")
-endef
+TOOLCHAIN_DIR := $(wildcard $(OPENWRT_DIR)/staging_dir/toolchain-$(ARCH)_*gcc-$(GCC)_musl*)
+TARGET_DIR    := $(wildcard $(OPENWRT_DIR)/staging_dir/target-$(ARCH)_*musl*)
 
+export PATH 	   := $(PATH):$(TOOLCHAIN_DIR)/bin
+export STAGING_DIR := $(TOOLCHAIN_DIR):$(TARGET_DIR)/usr
 
-GCC_VERSION := 14.1.0
+CC := $(notdir $(wildcard $(TOOLCHAIN_DIR)/bin/$(ARCH)-openwrt-linux-musl*-gcc))
 
-TOOLCHAIN_DIR := $(call first_wildcard_match,$(OPENWRT_DIR)/staging_dir/toolchain-$(TARGET)*_gcc-$(GCC_VERSION)_musl*)
-TARGET_DIR    := $(call first_wildcard_match,$(OPENWRT_DIR)/staging_dir/target-$(TARGET)*_musl*)
-
-CC  := $(call first_wildcard_match,$(TOOLCHAIN_DIR)/bin/$(TARGET)-openwrt-linux-musl*-gcc)
-CXX := $(call first_wildcard_match,$(TOOLCHAIN_DIR)/bin/$(TARGET)-openwrt-linux-musl*-g++)
-
-CPPFLAGS += -I$(TARGET_DIR)/usr/include
-LDFLAGS  += -L$(TARGET_DIR)/usr/lib
-
-export STAGING_DIR = $(TOOLCHAIN_DIR):$(TARGET_DIR)/usr
+CFLAGS 	+= -I$(TARGET_DIR)/usr/include
+LDFLAGS += -L$(TARGET_DIR)/usr/lib
