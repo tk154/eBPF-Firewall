@@ -1,7 +1,6 @@
 #include "bpf_loader.h"
 
 #include <errno.h>
-#include <glob.h>
 #include <stdlib.h>
 
 #include <bpf/bpf.h>
@@ -18,8 +17,8 @@ struct bpf_handle {
 
     enum bpfw_hook hook;
 
-    bool  dsa;
-    __u32 dsa_switch;
+    /*bool  dsa;
+    __u32 dsa_switch;*/
 
     //struct {
     //    __u32 handle;
@@ -27,50 +26,6 @@ struct bpf_handle {
     //} tc;
 };
 
-
-#define SYSFS_SYS_CLASS_NET "/sys/class/net/"
-
-static int get_dsa_switch(__u32 *dsa_switch, char *tag_proto) {
-    const char *glob_path = SYSFS_SYS_CLASS_NET"*/dsa/tagging";
-    int rc = 0;
-
-    glob_t globbuf;
-    glob(glob_path, 0, NULL, &globbuf);
-
-    size_t sw_count = globbuf.gl_pathc;
-    if (sw_count == 0)
-        goto globfree;
-
-    char* tag_file_path = globbuf.gl_pathv[0];
-    FILE *tag_file = fopen(tag_file_path, "r");
-    if (!tag_file) {
-        bpfw_error("Error opening '%s': %s (-%d).\n", tag_file_path, strerror(errno), errno);
-        rc = -1;
-
-        goto globfree;
-    }
-
-    if (!fgets(tag_proto, DSA_PROTO_MAX_LEN, tag_file)) {
-        bpfw_error("Error reading '%s': %s (-%d).\n", tag_file_path, strerror(errno), errno);
-        rc = -1;
-
-        goto fclose;
-    }
-
-    tag_proto[strcspn(tag_proto, "\n")] = '\0';
-
-    char *sw_name = tag_file_path + sizeof(SYSFS_SYS_CLASS_NET) - 1;
-    sw_name[strcspn(sw_name, "/")] = '\0';
-    *dsa_switch = if_nametoindex(sw_name);
-
-fclose:
-    fclose(tag_file);
-
-globfree:
-    globfree(&globbuf);
-
-    return rc;
-}
 
 static void* bpf_get_section_data(struct bpf_handle *bpf, const char *sec_name, size_t *sec_size) {
     // Find the .rodata section
@@ -175,8 +130,8 @@ void bpf_unload_program(struct bpf_handle* bpf) {
 }
 
 int bpf_ifindex_attach_program(struct bpf_handle* bpf, __u32 ifindex) {
-    if (ifindex == bpf->dsa_switch && !bpf->dsa)
-        return 0;
+    /*if (ifindex == bpf->dsa_switch && !bpf->dsa)
+        return 0;*/
     
     if (bpf->hook & BPFW_HOOK_XDP) {
         // Attach the program to the XDP hook
@@ -218,9 +173,9 @@ int bpf_ifindex_attach_program(struct bpf_handle* bpf, __u32 ifindex) {
     return 0;
 }
 
-void bpf_ifindex_detach_program(struct bpf_handle* bpf, __u32 ifindex) {
-    if (ifindex == bpf->dsa_switch && !bpf->dsa)
-        return;
+static void bpf_ifindex_detach_program(struct bpf_handle* bpf, __u32 ifindex) {
+    /*if (ifindex == bpf->dsa_switch && !bpf->dsa)
+        return;*/
 
     if (bpf->hook & BPFW_HOOK_XDP) {
         // Detach the program from the XDP hook
@@ -241,7 +196,7 @@ void bpf_ifindex_detach_program(struct bpf_handle* bpf, __u32 ifindex) {
     }
 }
 
-int bpf_ifname_attach_program(struct bpf_handle* bpf, char* ifname) {
+static int bpf_ifname_attach_program(struct bpf_handle* bpf, char* ifname) {
     // Get the interface index from the interface name
     __u32 ifindex = if_nametoindex(ifname);
     if (!ifindex) {
@@ -252,7 +207,7 @@ int bpf_ifname_attach_program(struct bpf_handle* bpf, char* ifname) {
     return bpf_ifindex_attach_program(bpf, ifindex);
 }
 
-int bpf_ifname_detach_program(struct bpf_handle* bpf, char* ifname) {
+static int bpf_ifname_detach_program(struct bpf_handle* bpf, char* ifname) {
     // Get the interface index from the interface name
     __u32 ifindex = if_nametoindex(ifname);
     if (!ifindex) {
@@ -287,22 +242,64 @@ void bpf_ifnames_detach_program(struct bpf_handle* bpf, char* ifnames[], unsigne
         bpf_ifname_detach_program(bpf, ifnames[i]);
 }
 
-int bpf_check_dsa(struct bpf_handle *bpf, bool dsa, struct dsa_tag **dsa_tag) {
-    bpf->dsa = dsa;
-    bpf->dsa_switch = 0;
-    char switch_proto[DSA_PROTO_MAX_LEN];
+int bpf_attach_program(struct bpf_handle* bpf, struct netlink_handle *netlink_h) {
+    int rc = 0;
 
-    if (get_dsa_switch(&bpf->dsa_switch, switch_proto) != 0)
-        return -1;
+    // Retrieve the name and index of all network interfaces
+    struct if_nameindex* ifaces = if_nameindex();
+    if (!ifaces) {
+        bpfw_error("Error retrieving network interfaces: %s (-%d).\n", strerror(errno), errno);
+        rc = -1;
 
-    if (!bpf->dsa)
-        return 0;
+        goto out;
+    }
 
-    if (!bpf->dsa_switch) {
-        bpfw_error("Error: Couldn't find a DSA switch.\n");
+    for (struct if_nameindex* iface = ifaces; iface->if_index && iface->if_name; iface++) {
+        rc = netlink_ifindex_should_attach(netlink_h, iface->if_index);
+        if (rc < 0)
+            goto error;
+
+        if (rc == 0)
+            continue;
+
+        rc = bpf_ifindex_attach_program(bpf, iface->if_index);
+        if (rc != 0) {
+error:
+            // If an error occured while attaching to one interface, detach all the already attached programs
+            while (--iface >= ifaces)
+                if (netlink_ifindex_should_attach(netlink_h, iface->if_index) == 1)
+                    bpf_ifindex_detach_program(bpf, iface->if_index);
+
+            break;
+        }
+    }
+
+    // Retrieved interfaces are dynamically allocated, so they must be freed
+    if_freenameindex(ifaces);
+
+out:
+    return rc;
+}
+
+int bpf_detach_program(struct bpf_handle* bpf, struct netlink_handle *netlink_h) {
+    // Retrieve the name and index of all network interfaces
+    struct if_nameindex* ifaces = if_nameindex();
+    if (!ifaces) {
+        bpfw_error("Error retrieving network interfaces: %s (-%d).\n", strerror(errno), errno);
         return -1;
     }
 
+    for (struct if_nameindex* iface = ifaces; iface->if_index && iface->if_name; iface++)
+        if (netlink_ifindex_should_attach(netlink_h, iface->if_index) == 1)
+            bpf_ifindex_detach_program(bpf, iface->if_index);
+
+    // Retrieved interfaces are dynamically allocated, so they must be freed
+    if_freenameindex(ifaces);
+
+    return 0;
+}
+
+int bpf_check_dsa(struct bpf_handle *bpf, __u32 dsa_switch, const char *dsa_proto, struct dsa_tag **dsa_tag) {
     size_t dsa_tag_sec_size;
     struct dsa_tag *dsa_tag_sec = bpf_get_section_data(bpf, DSA_TAG_SECTION, &dsa_tag_sec_size);
     if (!dsa_tag_sec)
@@ -310,7 +307,7 @@ int bpf_check_dsa(struct bpf_handle *bpf, bool dsa, struct dsa_tag **dsa_tag) {
 
     __s8 index = -1;
     for (int i = 0; i < dsa_tag_sec_size / sizeof(struct dsa_tag); i++) {
-        if (strncmp(switch_proto, dsa_tag_sec[i].proto, DSA_PROTO_MAX_LEN) == 0) {
+        if (strncmp(dsa_proto, dsa_tag_sec[i].proto, DSA_PROTO_MAX_LEN) == 0) {
             index = i;
             break;
         }
@@ -318,32 +315,21 @@ int bpf_check_dsa(struct bpf_handle *bpf, bool dsa, struct dsa_tag **dsa_tag) {
 
     if (index == -1) {
         bpfw_error("Error: BPF program doesn't support the DSA tagging protocol '%s' of the DSA switch.\n",
-            switch_proto);
+            dsa_proto);
 
         return -1;
     }
-
-    *dsa_tag = &dsa_tag_sec[index];
 
     struct dsa_switch *dsa_switch_sec = bpf_get_section_data(bpf, DSA_SWITCH_SECTION, NULL);
     if (!dsa_switch_sec)
         return -1;
 
-    dsa_switch_sec->ifindex = bpf->dsa_switch;
+    dsa_switch_sec->ifindex = dsa_switch;
     dsa_switch_sec->proto   = index + 1;
 
+    *dsa_tag = &dsa_tag_sec[index];
+
     return 0;
-}
-
-int bpf_get_map_fd(struct bpf_handle *bpf, const char *map_name) {
-    // Get the file descriptor of the BPF flow map
-    int map_fd = bpf_object__find_map_fd_by_name(bpf->obj, map_name);
-    if (map_fd < 0) {
-        bpfw_error("Error: Couldn't find BPF map %s.\n", map_name);
-        return -1;
-    }
-
-    return map_fd;
 }
 
 int bpf_set_map_max_entries(struct bpf_handle *bpf, const char *map_name, __u32 new_max_entries) {
@@ -361,4 +347,15 @@ int bpf_set_map_max_entries(struct bpf_handle *bpf, const char *map_name, __u32 
     }
 
     return 0;
+}
+
+int bpf_get_map_fd(struct bpf_handle *bpf, const char *map_name) {
+    // Get the file descriptor of the BPF flow map
+    int map_fd = bpf_object__find_map_fd_by_name(bpf->obj, map_name);
+    if (map_fd < 0) {
+        bpfw_error("Error: Couldn't find BPF map %s.\n", map_name);
+        return -1;
+    }
+
+    return map_fd;
 }

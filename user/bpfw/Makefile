@@ -5,7 +5,7 @@ SRC_DIR := .
 BIN_DIR := bin
 
 MAIN_SRC := main.c
-SOURCES  := flowtrack.c bpf_loader/bpf_loader.c netlink/netlink.c \
+SOURCES  := flowtrack.c bpf_loader/bpf_loader.c netlink/netlink.c netlink/dsa/dsa.c \
 	netlink/pppoe/pppoe.c conntrack/conntrack.c conntrack/nat.c logging/logging.c
 
 ifdef OPENWRT_DIR

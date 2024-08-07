@@ -15,9 +15,8 @@ struct {
 	__uint(type, BPF_MAP_TYPE_LRU_HASH);
 	__type(key, struct flow_key);
 	__type(value, struct flow_value);
-	__uint(max_entries, 1);
-	//__uint(map_flags, BPF_F_NO_PREALLOC);
 	__uint(pinning, LIBBPF_PIN_BY_NAME);
+	//__uint(map_flags, BPF_F_NO_PREALLOC);
 } FLOW_MAP SEC(".maps");
 
 

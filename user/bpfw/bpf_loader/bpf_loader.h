@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 
+#include "../netlink/netlink.h"
 #include "../common_user.h"
 
 
@@ -26,7 +27,7 @@ int bpf_load_program(struct bpf_handle* bpf);
 void bpf_unload_program(struct bpf_handle* bpf);
 
 int  bpf_ifindex_attach_program(struct bpf_handle* bpf, __u32 ifindex);
-void bpf_ifindex_detach_program(struct bpf_handle* bpf, __u32 ifindex);
+//void bpf_ifindex_detach_program(struct bpf_handle* bpf, __u32 ifindex);
 
 /**
  * Attach a BPF program to an interface
@@ -34,14 +35,14 @@ void bpf_ifindex_detach_program(struct bpf_handle* bpf, __u32 ifindex);
  * @param ifname The name of the network interface where the program should be attached to
  * @returns 0 on success, -1 if the program is not of type XDP or TC, errno for other errors
  * **/
-int bpf_ifname_attach_program(struct bpf_handle* bpf, char* ifname);
+//int bpf_ifname_attach_program(struct bpf_handle* bpf, char* ifname);
 
 /**
  * Detach a BPF program from an interface
  * @param prog A pointer to the to-be-unattached BPF program
  * @param ifname The name of the network interface where the program should be detached from
  * **/
-int bpf_ifname_detach_program(struct bpf_handle* bpf, char* ifname);
+//int bpf_ifname_detach_program(struct bpf_handle* bpf, char* ifname);
 
 /**
  * Attach a BPF program to multiple interfaces
@@ -65,16 +66,16 @@ void bpf_ifnames_detach_program(struct bpf_handle* bpf, char* ifnames[], unsigne
  * @param prog A pointer to the to-be-attached BPF program
  * @returns 0 on success, -1 if the program is not of type XDP or TC, errno for other errors
  * **/
-//int bpf_attach_program(struct bpf_handle* bpf, struct netlink_handle *netlink_h);
+int bpf_attach_program(struct bpf_handle* bpf, struct netlink_handle *netlink_h);
 
 /**
  * Detach a BPF program from all non-virtual network interfaces
  * @param prog A pointer to the to-be-detached BPF program
  * @returns 0 on success, errno if the network interfaces couldn't be retrieved
  * **/
-//int bpf_detach_program(struct bpf_handle* bpf, struct netlink_handle *netlink_h);
+int bpf_detach_program(struct bpf_handle* bpf, struct netlink_handle *netlink_h);
 
-int bpf_check_dsa(struct bpf_handle *bpf, bool dsa, struct dsa_tag **dsa_tag);
+int bpf_check_dsa(struct bpf_handle *bpf, __u32 dsa_switch, const char *dsa_proto, struct dsa_tag **dsa_tag);
 
 int bpf_get_map_fd(struct bpf_handle* bpf, const char *map_name);
 int bpf_set_map_max_entries(struct bpf_handle *bpf, const char *map_name, __u32 new_max_entries);
