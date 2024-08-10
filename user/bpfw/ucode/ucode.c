@@ -140,7 +140,7 @@ static void vm_add_objects(uc_value_t *vm_scope, struct flow_key_value *flow, __
 
 	if (flow->value.action == ACTION_REDIRECT) {
 		char oifname[IF_NAMESIZE];
-		if_indextoname(flow->value.next_h.ifindex, oifname);
+		if_indextoname(flow->value.next.hop.ifindex, oifname);
 		ucv_object_add(vm_scope, "oif", ucv_string_new(oifname));
 	}
 
@@ -194,9 +194,6 @@ int ucode_match_rule(struct ucode_handle *ucode_h, struct flow_key_value *flow, 
 			char *name   = ucv_string_get(name_obj);
 			char *target = ucv_string_get(target_obj);
 
-			flow->value.action =
-				(!target || strcmp(target, "drop") != 0) ? ACTION_PASS : ACTION_DROP;
-
 			if (!target || strcmp(target, "pass") == 0) {
 				__u8 old_action = flow->value.action;
 				flow->value.action =
@@ -209,9 +206,10 @@ int ucode_match_rule(struct ucode_handle *ucode_h, struct flow_key_value *flow, 
 			else {
 				bpfw_error("Error: Unknown Firewall target %s.\n", target);
 				rc = BPFW_RC_ERROR;
+				break;
 			}
 			
-			bpfw_debug_rule(flow, iif, target, name);
+			bpfw_debug_rule(target, name);
 			rc = BPFW_RC_OK;
 		break;
 

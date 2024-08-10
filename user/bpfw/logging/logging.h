@@ -33,7 +33,7 @@
 #define bpfw_verbose_nat(prefix, n_entry, family) bpfw_log_nat(BPFW_LOG_VERBOSE, prefix, n_entry, family)
 #define bpfw_verbose_next_hop(prefix, next_h)     bpfw_log_next_hop(BPFW_LOG_VERBOSE, prefix, next_h)
 #define bpfw_verbose_route_type(prefix, rtm_type) bpfw_log_route_type(BPFW_LOG_VERBOSE, prefix, rtm_type)
-#define bpfw_debug_rule(flow, iif, target, name)  bpfw_log_rule(BPFW_LOG_DEBUG, flow, iif, target, name)
+#define bpfw_debug_rule(target, name)             bpfw_log_rule(BPFW_LOG_DEBUG, target, name)
 
 
 void bpfw_set_log_level(unsigned int log_level);
@@ -48,7 +48,7 @@ void bpfw_log_action(unsigned int log_level, const char *prefix, __u8 action);
 void bpfw_log_nat(unsigned int log_level, const char *prefix, struct nat_entry *n_entry, __u8 family);
 void bpfw_log_next_hop(unsigned int log_level, const char *prefix, struct next_hop *next_h);
 void bpfw_log_route_type(unsigned int log_level, const char *prefix, unsigned char rtm_type);
-void bpfw_log_rule(unsigned int log_level, struct flow_key_value *flow, __u32 iif, const char *target, const char *name);
+void bpfw_log_rule(unsigned int log_level, const char *target, const char *name);
 
 
 #endif

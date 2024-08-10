@@ -236,27 +236,13 @@ void bpfw_log_action(unsigned int log_level, const char *prefix, __u8 action) {
     }
 }
 
-void bpfw_log_rule(unsigned int log_level, struct flow_key_value *flow, __u32 iif, const char *target, const char *name) {
+void bpfw_log_rule(unsigned int log_level, const char *target, const char *name) {
     LOG_FUNC_HEAD
 
-    char iifname[IF_NAMESIZE];
-    if_indextoname(iif, iifname);
-
-    size_t ip_str_len = flow->key.family == AF_INET ? INET_ADDRSTRLEN : INET6_ADDRSTRLEN;
-    char src_ip[ip_str_len], dest_ip[ip_str_len];
-
-    inet_ntop(flow->key.family, &flow->key.src_ip, src_ip, sizeof(src_ip));
-    inet_ntop(flow->key.family, &flow->key.dest_ip, dest_ip, sizeof(dest_ip));
-
     if (target)
-        bpfw_debug("%s (%s): ", target, name);
+        fprintf(stdlog, "%s (%s)", target, name);
     else
-        bpfw_debug("%s: ", name);
+        fputs(name, stdlog);
 
-    bpfw_debug("%s %02x:%02x:%02x:%02x:%02x:%02x "
-               "%s %s %hu %s %hu\n", iifname,
-        flow->value.src_mac[0], flow->value.src_mac[1], flow->value.src_mac[2],
-        flow->value.src_mac[3], flow->value.src_mac[4], flow->value.src_mac[5],
-        flow->key.proto == IPPROTO_TCP ? "tcp" : "udp",
-        src_ip, ntohs(flow->key.src_port), dest_ip, ntohs(flow->key.dest_port));
+    putc('\n', stdlog);
 }
