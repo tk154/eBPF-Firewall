@@ -227,8 +227,8 @@ void bpfw_log_action(unsigned int log_level, const char *prefix, __u8 action) {
             fputs("Redirect\n", stdlog);
             break;
 
-        case __ACTION_PASS:
-            fputs("Pass (?)\n", stdlog);
+        case ACTION_PASS_FOR_NOW:
+            fputs("Pass (for now)\n", stdlog);
             break;
 
         default:

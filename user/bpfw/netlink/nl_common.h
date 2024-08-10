@@ -8,6 +8,11 @@
 #include "pppoe/pppoe.h"
 
 
+enum {
+    NL_INTERFACE_NOT_FOUND = 1,
+    NL_PPPOE_MISS
+};
+
 struct nl_sock_buf {
     struct mnl_socket *sock;
     void *buf;

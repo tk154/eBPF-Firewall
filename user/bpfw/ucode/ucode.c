@@ -197,7 +197,7 @@ int ucode_match_rule(struct ucode_handle *ucode_h, struct flow_key_value *flow, 
 			if (!target || strcmp(target, "pass") == 0) {
 				__u8 old_action = flow->value.action;
 				flow->value.action =
-					old_action == ACTION_REDIRECT ? __ACTION_PASS : ACTION_PASS;
+					old_action == ACTION_REDIRECT ? ACTION_PASS_FOR_NOW : ACTION_PASS;
 			}
 			else if (strcmp(target, "reject") == 0)
 				flow->value.action = ACTION_PASS;
