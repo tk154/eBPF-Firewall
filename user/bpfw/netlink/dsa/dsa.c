@@ -5,11 +5,11 @@
 
 #include <net/if.h>
 
-#include "../../common_user.h"
+#include "../../logging/logging.h"
 
 
 int dsa_get_tag_proto(__u32 ifindex, char *tag_proto) {
-    int rc = 0;
+    int rc = BPFW_RC_OK;
 
     char ifname[IF_NAMESIZE];
     if_indextoname(ifindex, ifname);
@@ -20,14 +20,14 @@ int dsa_get_tag_proto(__u32 ifindex, char *tag_proto) {
     FILE *tag_file = fopen(tag_path, "r");
     if (!tag_file) {
         bpfw_error("Error opening '%s': %s (-%d).\n", tag_path, strerror(errno), errno);
-        rc = -1;
+        rc = BPFW_RC_ERROR;
 
         goto out;
     }
 
     if (!fgets(tag_proto, DSA_PROTO_MAX_LEN, tag_file)) {
         bpfw_error("Error reading '%s': %s (-%d).\n", tag_path, strerror(errno), errno);
-        rc = -1;
+        rc = BPFW_RC_ERROR;
 
         goto fclose;
     }

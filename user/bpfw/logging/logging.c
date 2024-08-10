@@ -1,5 +1,4 @@
 #include "logging.h"
-#include "../common_user.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -7,22 +6,23 @@
 
 #include <net/if.h>
 #include <arpa/inet.h>
+
 #include <linux/rtnetlink.h>
 
 
-static unsigned int bpfw_log_level = BPFW_INFO;
+static unsigned int bpfw_log_level = BPFW_LOG_INFO;
 
 #define LOG_FUNC_HEAD \
     if (bpfw_log_level < log_level) \
         return; \
     \
-    FILE *stdlog = log_level >= BPFW_INFO ? stdout : stderr;
+    FILE *stdlog = log_level >= BPFW_LOG_INFO ? stdout : stderr;
 
 #define LOG_ERROR_TAIL \
     if (error) \
-        fprintf(stdlog, ": %s (-%d)", strerror(error), error); \
+        fprintf(stdlog, ": %s (-%d).", strerror(error), error); \
     \
-    fputs(".\n", stdlog); \
+    putc('\n', stdlog); \
 
 
 void bpfw_set_log_level(unsigned int log_level) {
@@ -38,7 +38,7 @@ void bpfw_log(unsigned int log_level, const char* format, ...) {
     va_end(args);
 }
 
-void bpfw_log_if(unsigned int log_level, const char* prefix, __u32 ifindex, int error) {
+void bpfw_log_ifindex(unsigned int log_level, const char *prefix, __u32 ifindex, const char *suffix, int error) {
     LOG_FUNC_HEAD
 
     char ifname[IF_NAMESIZE];
@@ -46,6 +46,7 @@ void bpfw_log_if(unsigned int log_level, const char* prefix, __u32 ifindex, int 
 
     fputs(prefix, stdlog);
     fputs(ifname, stdlog);
+    fputs(suffix, stdlog);
 
     LOG_ERROR_TAIL
 }
@@ -62,7 +63,7 @@ void bpfw_log_ip(unsigned int log_level, const char *prefix, void *ip, __u8 fami
     LOG_ERROR_TAIL
 }
 
-void bpfw_log_ip_on_if(unsigned int log_level, const char *prefix, void *ip, __u8 family, __u32 ifindex, int error) {
+void bpfw_log_ip_on_ifindex(unsigned int log_level, const char *prefix, void *ip, __u8 family, __u32 ifindex, int error) {
     LOG_FUNC_HEAD
 
     char ifname[IF_NAMESIZE];
@@ -217,13 +218,45 @@ void bpfw_log_action(unsigned int log_level, const char *prefix, __u8 action) {
         case ACTION_PASS:
             fputs("Pass\n", stdlog);
             break;
+
         case ACTION_DROP:
             fputs("Drop\n", stdlog);
             break;
+
         case ACTION_REDIRECT:
             fputs("Redirect\n", stdlog);
             break;
+
+        case __ACTION_PASS:
+            fputs("Pass (?)\n", stdlog);
+            break;
+
         default:
-            fputs("?\n", stdlog);
+            fputs("None\n", stdlog);
     }
+}
+
+void bpfw_log_rule(unsigned int log_level, struct flow_key_value *flow, __u32 iif, const char *target, const char *name) {
+    LOG_FUNC_HEAD
+
+    char iifname[IF_NAMESIZE];
+    if_indextoname(iif, iifname);
+
+    size_t ip_str_len = flow->key.family == AF_INET ? INET_ADDRSTRLEN : INET6_ADDRSTRLEN;
+    char src_ip[ip_str_len], dest_ip[ip_str_len];
+
+    inet_ntop(flow->key.family, &flow->key.src_ip, src_ip, sizeof(src_ip));
+    inet_ntop(flow->key.family, &flow->key.dest_ip, dest_ip, sizeof(dest_ip));
+
+    if (target)
+        bpfw_debug("%s (%s): ", target, name);
+    else
+        bpfw_debug("%s: ", name);
+
+    bpfw_debug("%s %02x:%02x:%02x:%02x:%02x:%02x "
+               "%s %s %hu %s %hu\n", iifname,
+        flow->value.src_mac[0], flow->value.src_mac[1], flow->value.src_mac[2],
+        flow->value.src_mac[3], flow->value.src_mac[4], flow->value.src_mac[5],
+        flow->key.proto == IPPROTO_TCP ? "tcp" : "udp",
+        src_ip, ntohs(flow->key.src_port), dest_ip, ntohs(flow->key.dest_port));
 }

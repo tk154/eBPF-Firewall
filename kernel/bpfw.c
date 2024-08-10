@@ -12,11 +12,11 @@
 
 
 struct {
-	__uint(type, BPF_MAP_TYPE_LRU_HASH);
+	__uint(type, BPF_MAP_TYPE_HASH);
 	__type(key, struct flow_key);
 	__type(value, struct flow_value);
 	__uint(pinning, LIBBPF_PIN_BY_NAME);
-	//__uint(map_flags, BPF_F_NO_PREALLOC);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
 } FLOW_MAP SEC(".maps");
 
 
@@ -26,29 +26,28 @@ struct {
  * @param f_value Pointer to the flow value
  * **/
 __always_inline static void reverse_flow_key(struct flow_key *f_key, struct flow_value *f_value) {
-	__u8 src_ip[IPV6_ALEN];
+	__u8 temp_ip[IPV6_ALEN];
 
-	ipcpy(src_ip, f_value->n_entry.rewrite_flag & REWRITE_SRC_IP ?
+	ipcpy(temp_ip, f_value->n_entry.rewrite_flag & REWRITE_SRC_IP ?
 		f_value->n_entry.src_ip : f_key->src_ip, f_key->family);
 
 	ipcpy(f_key->src_ip, f_value->n_entry.rewrite_flag & REWRITE_DEST_IP ?
 		f_value->n_entry.dest_ip : f_key->dest_ip, f_key->family);
 
-	ipcpy(f_key->dest_ip, src_ip, f_key->family);
+	ipcpy(f_key->dest_ip, temp_ip, f_key->family);
 
-	__be16 src_port  = f_value->n_entry.rewrite_flag & REWRITE_SRC_PORT ?
+	__be16 temp_port  = f_value->n_entry.rewrite_flag & REWRITE_SRC_PORT ?
 					   f_value->n_entry.src_port : f_key->src_port;
 
 	f_key->src_port  = f_value->n_entry.rewrite_flag & REWRITE_DEST_PORT ?
 					   f_value->n_entry.dest_port : f_key->dest_port;
 
-	f_key->dest_port = src_port;
+	f_key->dest_port = temp_port;
 
-	f_key->ifindex   = f_value->next_h.ifindex;
-	f_key->vlan_id   = f_value->next_h.vlan_id;
-	f_key->pppoe_id  = f_value->next_h.pppoe_id;
-
-	memcpy(f_key->src_mac, f_value->next_h.dest_mac, ETH_ALEN);
+	f_key->ifindex  = f_value->next_h.ifindex;
+	f_key->dsa_port = f_value->next_h.dsa_port;
+	f_key->vlan_id  = f_value->next_h.vlan_id;
+	f_key->pppoe_id = f_value->next_h.pppoe_id;
 }
 
 __always_inline static bool tcp_finished(struct flow_key *f_key, struct flow_value *f_value, struct tcp_flags flags) {
@@ -104,7 +103,6 @@ __always_inline static __u8 bpfw_func(void *ctx, bool xdp, struct packet_data *p
 
 	ipcpy(f_key.src_ip, l3.src_ip, l3.family);
 	ipcpy(f_key.dest_ip, l3.dest_ip, l3.family);
-	memcpy(f_key.src_mac, l2.src_mac, ETH_ALEN);
 
 	// Check if a conntrack entry exists
 	struct flow_value* f_value = bpf_map_lookup_elem(&FLOW_MAP, &f_key);
@@ -113,6 +111,7 @@ __always_inline static __u8 bpfw_func(void *ctx, bool xdp, struct packet_data *p
 
 		// If there is none, create a new one
 		struct flow_value f_value = {};
+		memcpy(f_value.src_mac, l2.src_mac, ETH_ALEN);
 
 		long rc = bpf_map_update_elem(&FLOW_MAP, &f_key, &f_value, BPF_NOEXIST);
 		if (rc != 0)

@@ -82,15 +82,15 @@ static bool check_cmd_args(int argc, char* argv[]) {
                 size_t arg_len = strlen(optarg);
 
                 if (strncmp(optarg, "error", arg_len) == 0)
-                    bpfw_set_log_level(BPFW_ERROR);
+                    bpfw_set_log_level(BPFW_LOG_ERROR);
                 else if (strncmp(optarg, "warning", arg_len) == 0)
-                    bpfw_set_log_level(BPFW_WARN);
+                    bpfw_set_log_level(BPFW_LOG_WARN);
                 else if (strncmp(optarg, "info", arg_len) == 0)
-                    bpfw_set_log_level(BPFW_INFO);
+                    bpfw_set_log_level(BPFW_LOG_INFO);
                 else if (strncmp(optarg, "debug", arg_len) == 0)
-                    bpfw_set_log_level(BPFW_DEBUG);
+                    bpfw_set_log_level(BPFW_LOG_DEBUG);
                 else if (strncmp(optarg, "verbose", arg_len) == 0)
-                    bpfw_set_log_level(BPFW_VERBOSE);
+                    bpfw_set_log_level(BPFW_LOG_VERBOSE);
                 else
                     return false;
             break;

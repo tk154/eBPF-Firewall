@@ -1,24 +1,23 @@
 CC 	   := gcc
 LDLIBS := -lbpf -lelf -lz -lnetfilter_conntrack -lnfnetlink -lmnl
 
-SRC_DIR := .
-BIN_DIR := bin
+SRC_DIR  := .
+BIN_DIR  := bin
+ARCH_DIR := $(BIN_DIR)/host
 
-MAIN_SRC := main.c
-SOURCES  := flowtrack.c bpf_loader/bpf_loader.c netlink/netlink.c netlink/dsa/dsa.c \
-	netlink/pppoe/pppoe.c conntrack/conntrack.c conntrack/nat.c logging/logging.c
+MAIN_SRC 	 := $(SRC_DIR)/main.c
+UCODE_SOURCE := $(SRC_DIR)/ucode/ucode.c
+SOURCES  	 := $(shell find -name "*.c" ! -wholename "$(MAIN_SRC)" ! -wholename "$(UCODE_SOURCE)")
 
 ifdef OPENWRT_DIR
 include ../OpenWrt.mk
 ARCH_DIR := $(BIN_DIR)/$(ARCH)
-else
-ARCH_DIR := $(BIN_DIR)/host
-endif
 
-ifdef OPENWRT_UCODE
+ifdef PACKAGE_DROPPER
 CFLAGS  += -DOPENWRT_UCODE
 LDLIBS  += -lucode -ljson-c
-SOURCES += ucode/ucode.c
+SOURCES += $(UCODE_SOURCE)
+endif
 endif
 
 OUT_BIN := $(ARCH_DIR)/bpfw

@@ -1,18 +1,16 @@
 #ifndef BPFW_COMMON_USER_H
 #define BPFW_COMMON_USER_H
 
-
 #include <stdbool.h>
 
 #include "../../common.h"
-#include "logging/logging.h"
+//#include "logging/logging.h"
 
 
-struct flow_key_value {
-    struct flow_key key;
-    struct flow_value value;
+enum {
+    BPFW_RC_ERROR = -1,
+    BPFW_RC_OK    =  0
 };
-
 
 enum bpfw_hook {
     BPFW_HOOK_TC          = (1U << 0),
@@ -22,6 +20,12 @@ enum bpfw_hook {
     BPFW_HOOK_XDP_OFFLOAD = (1U << 3),
 
     BPFW_HOOK_XDP         = ( BPFW_HOOK_XDP_GENERIC | BPFW_HOOK_XDP_NATIVE | BPFW_HOOK_XDP_OFFLOAD )
+};
+
+
+struct flow_key_value {
+    struct flow_key key;
+    struct flow_value value;
 };
 
 struct cmd_args {

@@ -9,7 +9,7 @@
 #include <ucode/lib.h>
 #include <ucode/vm.h>
 
-#include "../common_user.h"
+#include "../logging/logging.h"
 
 
 #define MULTILINE_STRING(...) #__VA_ARGS__
@@ -94,31 +94,9 @@ struct ucode_handle {
 	uc_parse_config_t config;
 };
 
-
-static void log_rule(struct flow_key *f_key, const char *target, const char *name) {
-    if (fw_log_level >= FW_LOG_LEVEL_DEBUG) {
-        char ifname[IF_NAMESIZE];
-        if_indextoname(f_key->ifindex, ifname);
-
-        size_t ip_str_len = f_key->family == AF_INET ? INET_ADDRSTRLEN : INET6_ADDRSTRLEN;
-        char src_ip[ip_str_len], dest_ip[ip_str_len];
-
-        inet_ntop(f_key->family, &f_key->src_ip, src_ip, sizeof(src_ip));
-        inet_ntop(f_key->family, &f_key->dest_ip, dest_ip, sizeof(dest_ip));
-
-        bpfw_debug("\n%s (%s): %s %02x:%02x:%02x:%02x:%02x:%02x "
-				 "%s %s %hu %s %hu\n", target, name, ifname,
-			f_key->src_mac[0], f_key->src_mac[1], f_key->src_mac[2],
-			f_key->src_mac[3], f_key->src_mac[4], f_key->src_mac[5],
-			f_key->proto == IPPROTO_TCP ? "tcp" : "udp",
-            src_ip, ntohs(f_key->src_port), dest_ip, ntohs(f_key->dest_port));
-    }
-}
-
 struct ucode_handle *ucode_init() {
     struct ucode_handle *ucode_h = malloc(sizeof(struct ucode_handle));
     if (!ucode_h) {
-        bpfw_error("Error allocating ucode handle: %s (-%d).\n", strerror(errno), errno);
         bpfw_error("Error allocating ucode handle: %s (-%d).\n", strerror(errno), errno);
         return NULL;
     }
@@ -141,7 +119,6 @@ struct ucode_handle *ucode_init() {
 	/* check if compilation failed */
 	if (!ucode_h->program) {
 		bpfw_error("Failed to compile ucode program: %s.\n", syntax_error);
-		bpfw_error("Failed to compile ucode program: %s.\n", syntax_error);
 		goto free;
 	}
 
@@ -156,15 +133,15 @@ free:
 	return NULL;
 }
 
-static void vm_add_objects(uc_value_t *vm_scope, struct flow_key_value *flow) {
-	char iif[IF_NAMESIZE];
-	if_indextoname(flow->key.ifindex, iif);
-	ucv_object_add(vm_scope, "iif", ucv_string_new(iif));
+static void vm_add_objects(uc_value_t *vm_scope, struct flow_key_value *flow, __u32 iif) {
+	char iifname[IF_NAMESIZE];
+	if_indextoname(iif, iifname);
+	ucv_object_add(vm_scope, "iif", ucv_string_new(iifname));
 
 	if (flow->value.action == ACTION_REDIRECT) {
-		char oif[IF_NAMESIZE];
-		if_indextoname(flow->value.next_h.ifindex, oif);
-		ucv_object_add(vm_scope, "oif", ucv_string_new(oif));
+		char oifname[IF_NAMESIZE];
+		if_indextoname(flow->value.next_h.ifindex, oifname);
+		ucv_object_add(vm_scope, "oif", ucv_string_new(oifname));
 	}
 
 	__u8 family = flow->key.family == AF_INET ? 4 : 6;
@@ -189,12 +166,12 @@ static void vm_add_objects(uc_value_t *vm_scope, struct flow_key_value *flow) {
 
 	char src_mac[18];
 	snprintf(src_mac, sizeof(src_mac), "%02x:%02x:%02x:%02x:%02x:%02x", 
-		flow->key.src_mac[0], flow->key.src_mac[1], flow->key.src_mac[2],
-		flow->key.src_mac[3], flow->key.src_mac[4], flow->key.src_mac[5]);
+		flow->value.src_mac[0], flow->value.src_mac[1], flow->value.src_mac[2],
+		flow->value.src_mac[3], flow->value.src_mac[4], flow->value.src_mac[5]);
 	ucv_object_add(vm_scope, "src_mac", ucv_string_new(src_mac));
 }
 
-int ucode_match_rule(struct ucode_handle *ucode_h, struct flow_key_value *flow) {
+int ucode_match_rule(struct ucode_handle *ucode_h, struct flow_key_value *flow, __u32 iif) {
 	/* initialize VM context */
 	uc_vm_t vm = {};
 	uc_vm_init(&vm, &ucode_h->config);
@@ -203,7 +180,7 @@ int ucode_match_rule(struct ucode_handle *ucode_h, struct flow_key_value *flow) 
 	uc_stdlib_load(uc_vm_scope_get(&vm));
 
 	/* add global variables to VM scope */
-	vm_add_objects(uc_vm_scope_get(&vm), flow);
+	vm_add_objects(uc_vm_scope_get(&vm), flow, iif);
 
 	/* execute compiled program function */
 	uc_value_t *last_expression_result = NULL;
@@ -217,24 +194,41 @@ int ucode_match_rule(struct ucode_handle *ucode_h, struct flow_key_value *flow) 
 			char *name   = ucv_string_get(name_obj);
 			char *target = ucv_string_get(target_obj);
 
-			flow->value.action = strcmp(target, "drop") == 0 ? ACTION_DROP : ACTION_PASS;
-			log_rule(&flow->key, target, name);
+			flow->value.action =
+				(!target || strcmp(target, "drop") != 0) ? ACTION_PASS : ACTION_DROP;
+
+			if (!target || strcmp(target, "pass") == 0) {
+				__u8 old_action = flow->value.action;
+				flow->value.action =
+					old_action == ACTION_REDIRECT ? __ACTION_PASS : ACTION_PASS;
+			}
+			else if (strcmp(target, "reject") == 0)
+				flow->value.action = ACTION_PASS;
+			else if (strcmp(target, "drop") == 0)
+				flow->value.action = ACTION_DROP;
+			else {
+				bpfw_error("Error: Unknown Firewall target %s.\n", target);
+				rc = BPFW_RC_ERROR;
+			}
+			
+			bpfw_debug_rule(flow, iif, target, name);
+			rc = BPFW_RC_OK;
 		break;
 
 		case STATUS_EXIT:
 			rc = (int)ucv_int64_get(last_expression_result);
 			bpfw_error("The ucode program exited with code: %d.\n", rc);
-			bpfw_error("The ucode program exited with code: %d.\n", rc);
+			rc = BPFW_RC_ERROR;
 		break;
 
 		case ERROR_COMPILE:
 			bpfw_error("A compilation error occurred while running the ucode program.\n");
-			bpfw_error("A compilation error occurred while running the ucode program.\n");
+			rc = BPFW_RC_ERROR;
 		break;
 
 		case ERROR_RUNTIME:
 			bpfw_error("A runtime error occurred while running the ucode program.\n");
-			bpfw_error("A runtime error occurred while running the ucode program.\n");
+			rc = BPFW_RC_ERROR;
 		break;
 	}
 

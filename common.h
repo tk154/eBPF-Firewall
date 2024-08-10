@@ -34,7 +34,6 @@ struct flow_key {
 	__be16 dest_port;
 	__u8   src_ip[IPV6_ALEN];
 	__u8   dest_ip[IPV6_ALEN];
-	__u8   src_mac[ETH_ALEN];
 	__u8   dsa_port;
 	__u8   family;
 	__u8   proto;
@@ -63,6 +62,7 @@ struct nat_entry {
 struct flow_value {
 	struct next_hop next_h;
 	struct nat_entry n_entry;
+	__u8    src_mac[ETH_ALEN];
 	__u32   idle;
 	__sum16 ipv4_cksum_diff;
 	__u8    action;
@@ -100,7 +100,8 @@ enum {
 	ACTION_NONE,
 	ACTION_PASS,
 	ACTION_DROP,
-	ACTION_REDIRECT
+	ACTION_REDIRECT,
+	__ACTION_PASS
 };
 
 enum {

@@ -7,7 +7,7 @@
 struct ucode_handle;
 
 struct ucode_handle *ucode_init();
-int ucode_match_rule(struct ucode_handle *ucode_h, struct flow_key_value *flow);
+int ucode_match_rule(struct ucode_handle *ucode_h, struct flow_key_value *flow, __u32 iif);
 void ucode_destroy(struct ucode_handle *ucode_h);
 
 

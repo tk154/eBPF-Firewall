@@ -3,7 +3,6 @@
 
 #include <stdbool.h>
 
-#include "../netlink/netlink.h"
 #include "../common_user.h"
 
 
@@ -27,7 +26,7 @@ int bpf_load_program(struct bpf_handle* bpf);
 void bpf_unload_program(struct bpf_handle* bpf);
 
 int  bpf_ifindex_attach_program(struct bpf_handle* bpf, __u32 ifindex);
-//void bpf_ifindex_detach_program(struct bpf_handle* bpf, __u32 ifindex);
+void bpf_ifindex_detach_program(struct bpf_handle* bpf, __u32 ifindex);
 
 /**
  * Attach a BPF program to an interface
@@ -66,14 +65,14 @@ void bpf_ifnames_detach_program(struct bpf_handle* bpf, char* ifnames[], unsigne
  * @param prog A pointer to the to-be-attached BPF program
  * @returns 0 on success, -1 if the program is not of type XDP or TC, errno for other errors
  * **/
-int bpf_attach_program(struct bpf_handle* bpf, struct netlink_handle *netlink_h);
+//int bpf_attach_program(struct bpf_handle* bpf, struct netlink_handle *netlink_h);
 
 /**
  * Detach a BPF program from all non-virtual network interfaces
  * @param prog A pointer to the to-be-detached BPF program
  * @returns 0 on success, errno if the network interfaces couldn't be retrieved
  * **/
-int bpf_detach_program(struct bpf_handle* bpf, struct netlink_handle *netlink_h);
+//int bpf_detach_program(struct bpf_handle* bpf, struct netlink_handle *netlink_h);
 
 int bpf_check_dsa(struct bpf_handle *bpf, __u32 dsa_switch, const char *dsa_proto, struct dsa_tag **dsa_tag);
 
