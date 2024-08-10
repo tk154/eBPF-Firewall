@@ -148,11 +148,11 @@ static int nfct_get_cb(enum nf_conntrack_msg_type type, struct nf_conntrack *ct,
         case ACTION_NONE:
             bpfw_debug_key("\nCon: ", &flow->key);
 
-            memset(&flow->value, 0, sizeof(flow->value));
+            memset(&flow->value.next, 0, sizeof(flow->value.next));
             
             // Since the TTL is decremented, we must increment the checksum for IPv4
             if (flow->key.family == AF_INET)
-                flow->value.ipv4_cksum_diff = htons(0x0100);
+                flow->value.next.ipv4_cksum_diff = htons(0x0100);
 
             // Check for NAT
             check_nat(ct, flow);

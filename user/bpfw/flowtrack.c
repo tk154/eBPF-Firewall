@@ -54,17 +54,17 @@ static void calc_l2_diff(struct flow_key_value *flow, struct flowtrack_handle *f
     
     if (flow->key.dsa_port)
         diff -= tag->rx_size;
-    if (flow->value.next_h.dsa_port)
+    if (flow->value.next.hop.dsa_port)
         diff += tag->tx_size;
 
     if ((hook & BPFW_HOOK_XDP || flow->key.dsa_port) && flow->key.vlan_id)
         diff -= sizeof(struct vlanhdr);
-    if ((hook & BPFW_HOOK_XDP || flow->value.next_h.dsa_port) && flow->value.next_h.vlan_id)
+    if ((hook & BPFW_HOOK_XDP || flow->value.next.hop.dsa_port) && flow->value.next.hop.vlan_id)
         diff += sizeof(struct vlanhdr);
 
     if (flow->key.pppoe_id)
         diff -= sizeof(struct pppoehdr);
-    if (flow->value.next_h.pppoe_id)
+    if (flow->value.next.hop.pppoe_id)
         diff += sizeof(struct pppoehdr);
 
 	if ((hook & BPFW_HOOK_TC) && diff < 0) {
@@ -72,7 +72,7 @@ static void calc_l2_diff(struct flow_key_value *flow, struct flowtrack_handle *f
         flow->value.action = ACTION_PASS;
     }
     else
-        flow->value.next_h.l2_diff = diff;
+        flow->value.next.hop.l2_diff = diff;
 }
 
 

@@ -92,7 +92,7 @@ static int get_neigh(struct netlink_handle* nl_h, __u32 ifindex, struct flow_key
     }
 
     void *dest_mac = mnl_attr_get_payload(attr[NDA_LLADDR]);
-    memcpy(flow->value.next_h.dest_mac, dest_mac, ETH_ALEN);
+    memcpy(flow->value.next.hop.dest_mac, dest_mac, ETH_ALEN);
 
     return BPFW_RC_OK;
 }
@@ -111,14 +111,14 @@ static int parse_bridge_if(struct netlink_handle* nl_h, __u32 ifindex, struct fl
     ndm->ndm_family = PF_BRIDGE;
 
     // Set the destination IP (of Receiver or Gateway)
-    mnl_attr_put(nlh, NDA_LLADDR, ETH_ALEN, flow->value.next_h.dest_mac);
+    mnl_attr_put(nlh, NDA_LLADDR, ETH_ALEN, flow->value.next.hop.dest_mac);
     mnl_attr_put_u32(nlh, NDA_MASTER, ifindex);
 
     // Send request and receive response
     rc = send_request(nl_h);
     switch (rc) {
         case BPFW_RC_OK:
-            flow->value.next_h.ifindex = ndm->ndm_ifindex;
+            flow->value.next.hop.ifindex = ndm->ndm_ifindex;
 
         case BPFW_RC_ERROR:
             return rc;
@@ -135,19 +135,19 @@ static int parse_bridge_if(struct netlink_handle* nl_h, __u32 ifindex, struct fl
     }
 }
 
-static int parse_dsa_if(struct netlink_handle* nl_h, struct nlattr **ifla, struct next_hop *next_h) {
+static int parse_dsa_if(struct netlink_handle* nl_h, struct nlattr **ifla, struct next_hop *hop) {
     const char *port_name = mnl_attr_get_str(ifla[IFLA_PHYS_PORT_NAME]);
     __u8 dsa_port = strtoul(port_name + 1, NULL, 10);
-    next_h->dsa_port = dsa_port | DSA_PORT_SET;
+    hop->dsa_port = dsa_port | DSA_PORT_SET;
 
     __u32 dsa_switch = mnl_attr_get_u32(ifla[IFLA_LINK]);
-    next_h->ifindex = dsa_switch;
+    hop->ifindex = dsa_switch;
 
     return BPFW_RC_OK;
 }
 
 static int parse_vlan_if(struct netlink_handle* nl_h, struct nlattr **ifla, struct nlattr **ifla_info, struct flow_value *f_value) {
-    if (f_value->next_h.vlan_id)
+    if (f_value->next.hop.vlan_id)
         return NO_NEXT_HOP;
 
     struct nlattr *ifla_vlan[IFLA_VLAN_MAX + 1] = {};
@@ -158,10 +158,10 @@ static int parse_vlan_if(struct netlink_handle* nl_h, struct nlattr **ifla, stru
         return NO_NEXT_HOP;
 
     __u16 vlan_id = mnl_attr_get_u16(ifla_vlan[IFLA_VLAN_ID]);
-    f_value->next_h.vlan_id = vlan_id;
+    f_value->next.hop.vlan_id = vlan_id;
 
     __u32 lower = mnl_attr_get_u32(ifla[IFLA_LINK]);
-    f_value->next_h.ifindex = lower;
+    f_value->next.hop.ifindex = lower;
 
     return BPFW_RC_OK;
 }
@@ -195,9 +195,9 @@ static int parse_ppp_if(struct netlink_handle* nl_h, __u32 ifindex, struct flow_
     }
 
 fill_flow_value:
-    f_value->next_h.ifindex = nl_h->pppoe.device;
-    f_value->next_h.pppoe_id = nl_h->pppoe.id;
-    memcpy(f_value->next_h.dest_mac, nl_h->pppoe.address, ETH_ALEN);
+    f_value->next.hop.ifindex = nl_h->pppoe.device;
+    f_value->next.hop.pppoe_id = nl_h->pppoe.id;
+    memcpy(f_value->next.hop.dest_mac, nl_h->pppoe.address, ETH_ALEN);
 
     return BPFW_RC_OK;
 }
@@ -229,7 +229,7 @@ static int get_link(struct netlink_handle* nl_h, __u32 ifindex, struct flow_key_
             return NO_NEXT_HOP;
     }
 
-    if (mac_not_set(flow->value.next_h.src_mac)) {
+    if (mac_not_set(flow->value.next.hop.src_mac)) {
         if (!ifla[IFLA_ADDRESS]) {
             bpfw_error(STRINGIFY(RTM_GETLINK)" didn't return MAC address of %s.\n",
                 mnl_attr_get_str(ifla[IFLA_IFNAME]));
@@ -238,7 +238,7 @@ static int get_link(struct netlink_handle* nl_h, __u32 ifindex, struct flow_key_
         }
 
         void *if_mac = mnl_attr_get_payload(ifla[IFLA_ADDRESS]);
-        memcpy(flow->value.next_h.src_mac, if_mac, ETH_ALEN);
+        memcpy(flow->value.next.hop.src_mac, if_mac, ETH_ALEN);
     }
 
     if (ifla[IFLA_LINKINFO]) {
@@ -258,11 +258,11 @@ static int get_link(struct netlink_handle* nl_h, __u32 ifindex, struct flow_key_
                 rc = parse_vlan_if(nl_h, ifla, ifla_info, &flow->value);
 
             else if (strcmp(if_type, "dsa") == 0 && nl_h->dsa)
-                rc = parse_dsa_if(nl_h, ifla, &flow->value.next_h);
+                rc = parse_dsa_if(nl_h, ifla, &flow->value.next.hop);
         }
     }
 
-    if (mac_not_set(flow->value.next_h.dest_mac))
+    if (mac_not_set(flow->value.next.hop.dest_mac))
         rc = get_neigh(nl_h, ifindex, flow, dest_ip);
 
 out:
@@ -271,8 +271,8 @@ out:
         return rc;
     }
 
-    if (flow->value.next_h.ifindex != ifindex)
-        rc = get_link(nl_h, flow->value.next_h.ifindex, flow, dest_ip);
+    if (flow->value.next.hop.ifindex != ifindex)
+        rc = get_link(nl_h, flow->value.next.hop.ifindex, flow, dest_ip);
 
     return rc;
 }
@@ -292,8 +292,8 @@ static int get_route(struct netlink_handle* nl_h, struct flow_key_value* flow, _
     mnl_attr_put_ip (nlh, RTA_SRC, flow->key.src_ip, flow->key.family);
     mnl_attr_put_ip (nlh, RTA_DST, dest_ip, flow->key.family);
     mnl_attr_put_u16(nlh, RTA_SPORT, flow->key.src_port);
-    mnl_attr_put_u16(nlh, RTA_DPORT, flow->value.n_entry.rewrite_flag & REWRITE_DEST_PORT ?
-                                     flow->value.n_entry.dest_port : flow->key.dest_port);
+    mnl_attr_put_u16(nlh, RTA_DPORT, flow->value.next.nat.rewrite_flag & REWRITE_DEST_PORT ?
+                                     flow->value.next.nat.dest_port : flow->key.dest_port);
 
     // Send request and receive response
     int rc = send_request(nl_h);
@@ -307,6 +307,8 @@ static int get_route(struct netlink_handle* nl_h, struct flow_key_value* flow, _
         default:
             bpfw_warn_ip("Couldn't retrieve route for ",
                 flow->key.dest_ip, flow->key.family, rc);
+
+            flow->value.action = ACTION_PASS;
 
             return NO_NEXT_HOP;
     }
@@ -336,7 +338,7 @@ static int get_route(struct netlink_handle* nl_h, struct flow_key_value* flow, _
         return BPFW_RC_ERROR;
     }
 
-    flow->value.next_h.ifindex = mnl_attr_get_u32(attr[RTA_OIF]);
+    flow->value.next.hop.ifindex = mnl_attr_get_u32(attr[RTA_OIF]);
     flow->value.action = ACTION_REDIRECT;
 
     if (attr[RTA_GATEWAY]) {
@@ -357,18 +359,18 @@ int netlink_get_next_hop(struct netlink_handle* nl_h, struct flow_key_value* flo
     }
 
     __u8 dest_ip[IPV6_ALEN];
-    ipcpy(dest_ip, flow->value.n_entry.rewrite_flag & REWRITE_DEST_IP ?
-        flow->value.n_entry.dest_ip : flow->key.dest_ip, flow->key.family);
+    ipcpy(dest_ip, flow->value.next.nat.rewrite_flag & REWRITE_DEST_IP ?
+        flow->value.next.nat.dest_ip : flow->key.dest_ip, flow->key.family);
 
     rc = get_route(nl_h, flow, iif, dest_ip);
     if (rc != BPFW_RC_OK || flow->value.action != ACTION_REDIRECT)
         return rc;
 
-    rc = get_link(nl_h, flow->value.next_h.ifindex, flow, dest_ip);
+    rc = get_link(nl_h, flow->value.next.hop.ifindex, flow, dest_ip);
     if (rc != BPFW_RC_OK)
         return rc;
 
-    bpfw_verbose_next_hop("-> ", &flow->value.next_h);
+    bpfw_verbose_next_hop("-> ", &flow->value.next.hop);
 
     return BPFW_RC_OK;
 }
@@ -383,14 +385,14 @@ int netlink_get_route(struct netlink_handle* nl_h, struct flow_key_value* flow, 
     }
 
     __u8 dest_ip[IPV6_ALEN];
-    ipcpy(dest_ip, flow->value.n_entry.rewrite_flag & REWRITE_DEST_IP ?
-        flow->value.n_entry.dest_ip : flow->key.dest_ip, flow->key.family);
+    ipcpy(dest_ip, flow->value.next.nat.rewrite_flag & REWRITE_DEST_IP ?
+        flow->value.next.nat.dest_ip : flow->key.dest_ip, flow->key.family);
 
     rc = get_route(nl_h, flow, *iif, dest_ip);
     if (rc != BPFW_RC_OK || flow->value.action != ACTION_REDIRECT)
         return rc;
 
-    bpfw_verbose_ifindex("-> ", flow->value.next_h.ifindex, "", 0);
+    bpfw_verbose_ifindex("-> ", flow->value.next.hop.ifindex, "", 0);
 
     return BPFW_RC_OK;
 }

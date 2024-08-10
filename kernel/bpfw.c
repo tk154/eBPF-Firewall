@@ -28,26 +28,26 @@ struct {
 __always_inline static void reverse_flow_key(struct flow_key *f_key, struct flow_value *f_value) {
 	__u8 temp_ip[IPV6_ALEN];
 
-	ipcpy(temp_ip, f_value->n_entry.rewrite_flag & REWRITE_SRC_IP ?
-		f_value->n_entry.src_ip : f_key->src_ip, f_key->family);
+	ipcpy(temp_ip, f_value->next.nat.rewrite_flag & REWRITE_SRC_IP ?
+		f_value->next.nat.src_ip : f_key->src_ip, f_key->family);
 
-	ipcpy(f_key->src_ip, f_value->n_entry.rewrite_flag & REWRITE_DEST_IP ?
-		f_value->n_entry.dest_ip : f_key->dest_ip, f_key->family);
+	ipcpy(f_key->src_ip, f_value->next.nat.rewrite_flag & REWRITE_DEST_IP ?
+		f_value->next.nat.dest_ip : f_key->dest_ip, f_key->family);
 
 	ipcpy(f_key->dest_ip, temp_ip, f_key->family);
 
-	__be16 temp_port  = f_value->n_entry.rewrite_flag & REWRITE_SRC_PORT ?
-					   f_value->n_entry.src_port : f_key->src_port;
+	__be16 temp_port  = f_value->next.nat.rewrite_flag & REWRITE_SRC_PORT ?
+					   f_value->next.nat.src_port : f_key->src_port;
 
-	f_key->src_port  = f_value->n_entry.rewrite_flag & REWRITE_DEST_PORT ?
-					   f_value->n_entry.dest_port : f_key->dest_port;
+	f_key->src_port  = f_value->next.nat.rewrite_flag & REWRITE_DEST_PORT ?
+					   f_value->next.nat.dest_port : f_key->dest_port;
 
 	f_key->dest_port = temp_port;
 
-	f_key->ifindex  = f_value->next_h.ifindex;
-	f_key->dsa_port = f_value->next_h.dsa_port;
-	f_key->vlan_id  = f_value->next_h.vlan_id;
-	f_key->pppoe_id = f_value->next_h.pppoe_id;
+	f_key->ifindex  = f_value->next.hop.ifindex;
+	f_key->dsa_port = f_value->next.hop.dsa_port;
+	f_key->vlan_id  = f_value->next.hop.vlan_id;
+	f_key->pppoe_id = f_value->next.hop.pppoe_id;
 }
 
 __always_inline static bool tcp_finished(struct flow_key *f_key, struct flow_value *f_value, struct tcp_flags flags) {
@@ -130,13 +130,13 @@ __always_inline static __u8 bpfw_func(void *ctx, bool xdp, struct packet_data *p
 			if (tcp_finished(&f_key, f_value, l4.tcp_flags) || *l3.ttl <= 1)
 				return ACTION_PASS;
 
-			mangle_packet(&l3, &l4, f_value);
+			mangle_packet(&l3, &l4, &f_value->next);
 
-			if (!push_l2_header(ctx, xdp, pkt, &l2, &f_value->next_h))
+			if (!push_l2_header(ctx, xdp, pkt, &l2, &f_value->next.hop))
 				return ACTION_DROP;
 
-			bpfw_debug("Redirect to ifindex %u", f_value->next_h.ifindex);
-			*out_ifindex = f_value->next_h.ifindex;
+			bpfw_debug("Redirect to ifindex %u", f_value->next.hop.ifindex);
+			*out_ifindex = f_value->next.hop.ifindex;
 
 			break;
 

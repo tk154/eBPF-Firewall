@@ -59,13 +59,17 @@ struct nat_entry {
 	__u8    rewrite_flag;
 };
 
-struct flow_value {
-	struct next_hop next_h;
-	struct nat_entry n_entry;
-	__u8    src_mac[ETH_ALEN];
-	__u32   idle;
+struct next_entry {
+	struct next_hop hop;
+	struct nat_entry nat;
 	__sum16 ipv4_cksum_diff;
-	__u8    action;
+};
+
+struct flow_value {
+	__u32 idle;
+	__u8  src_mac[ETH_ALEN];
+	__u8  action;
+	struct next_entry next;
 };
 
 

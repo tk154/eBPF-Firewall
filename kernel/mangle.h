@@ -48,15 +48,15 @@ __always_inline static void apply_nat(struct l3_header* l3, struct l4_header* l4
 	cksum_add(l4->cksum, n_entry->l4_cksum_diff);
 }
 
-__always_inline static void mangle_packet(struct l3_header* l3, struct l4_header* l4, struct flow_value* f_value) {
+__always_inline static void mangle_packet(struct l3_header* l3, struct l4_header* l4, struct next_entry* next) {
     // Decrement the TTL, adjust the checksum
     (*l3->ttl)--;
 
     if (l3->family == AF_INET)
-        cksum_add(l3->cksum, f_value->ipv4_cksum_diff);
+        cksum_add(l3->cksum, next->ipv4_cksum_diff);
 
     // Apply NAT
-    apply_nat(l3, l4, &f_value->n_entry);
+    apply_nat(l3, l4, &next->nat);
 }
 
 

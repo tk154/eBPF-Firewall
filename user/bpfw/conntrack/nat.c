@@ -47,25 +47,25 @@ void check_nat(struct nf_conntrack *ct, struct flow_key_value *flow) {
             old_ip = nfct_get_attr_ip(ct, ATTR_ORIG_IP_SRC, family);
             new_ip = nfct_get_attr_ip(ct, ATTR_REPL_IP_DST, family);
 
-            ipcpy(flow->value.n_entry.src_ip, new_ip, family);
-            flow->value.n_entry.rewrite_flag |= REWRITE_SRC_IP;
+            ipcpy(flow->value.next.nat.src_ip, new_ip, family);
+            flow->value.next.nat.rewrite_flag |= REWRITE_SRC_IP;
         }
         else {
             // Reverse (DNAT)
             old_ip = nfct_get_attr_ip(ct, ATTR_REPL_IP_DST, family);
             new_ip = nfct_get_attr_ip(ct, ATTR_ORIG_IP_SRC, family);
 
-            ipcpy(flow->value.n_entry.dest_ip, new_ip, family);
-            flow->value.n_entry.rewrite_flag |= REWRITE_DEST_IP;
+            ipcpy(flow->value.next.nat.dest_ip, new_ip, family);
+            flow->value.next.nat.rewrite_flag |= REWRITE_DEST_IP;
         }
 
         // Calculate the L3 and L4 checksum diffs
         if (family == AF_INET) {
-            csum_replace(&flow->value.ipv4_cksum_diff, old_ip, new_ip, 2);
-            csum_replace(&flow->value.n_entry.l4_cksum_diff, old_ip, new_ip, 2);
+            csum_replace(&flow->value.next.ipv4_cksum_diff, old_ip, new_ip, 2);
+            csum_replace(&flow->value.next.nat.l4_cksum_diff, old_ip, new_ip, 2);
         }
         else
-            csum_replace(&flow->value.n_entry.l4_cksum_diff, old_ip, new_ip, 8);
+            csum_replace(&flow->value.next.nat.l4_cksum_diff, old_ip, new_ip, 8);
     }
 
     // DNAT
@@ -77,25 +77,25 @@ void check_nat(struct nf_conntrack *ct, struct flow_key_value *flow) {
             old_ip = nfct_get_attr_ip(ct, ATTR_ORIG_IP_DST, family);
             new_ip = nfct_get_attr_ip(ct, ATTR_REPL_IP_SRC, family);
 
-            ipcpy(flow->value.n_entry.dest_ip, new_ip, family);
-            flow->value.n_entry.rewrite_flag |= REWRITE_DEST_IP;
+            ipcpy(flow->value.next.nat.dest_ip, new_ip, family);
+            flow->value.next.nat.rewrite_flag |= REWRITE_DEST_IP;
         }
         else {
             // Reverse (SNAT)
             old_ip = nfct_get_attr_ip(ct, ATTR_REPL_IP_SRC, family);
             new_ip = nfct_get_attr_ip(ct, ATTR_ORIG_IP_DST, family);
 
-            ipcpy(flow->value.n_entry.src_ip, new_ip, family);
-            flow->value.n_entry.rewrite_flag |= REWRITE_SRC_IP;
+            ipcpy(flow->value.next.nat.src_ip, new_ip, family);
+            flow->value.next.nat.rewrite_flag |= REWRITE_SRC_IP;
         }
 
         // Calculate the L3 and L4 checksum diffs
         if (family == AF_INET) {
-            csum_replace(&flow->value.ipv4_cksum_diff, old_ip, new_ip, 2);
-            csum_replace(&flow->value.n_entry.l4_cksum_diff, old_ip, new_ip, 2);
+            csum_replace(&flow->value.next.ipv4_cksum_diff, old_ip, new_ip, 2);
+            csum_replace(&flow->value.next.nat.l4_cksum_diff, old_ip, new_ip, 2);
         }
         else
-            csum_replace(&flow->value.n_entry.l4_cksum_diff, old_ip, new_ip, 8);
+            csum_replace(&flow->value.next.nat.l4_cksum_diff, old_ip, new_ip, 8);
     }
 
     // SPAT
@@ -107,20 +107,20 @@ void check_nat(struct nf_conntrack *ct, struct flow_key_value *flow) {
             old_port = nfct_get_attr_u16(ct, ATTR_ORIG_PORT_SRC);
             new_port = nfct_get_attr_u16(ct, ATTR_REPL_PORT_DST);
 
-            flow->value.n_entry.src_port      = new_port;
-            flow->value.n_entry.rewrite_flag |= REWRITE_SRC_PORT;
+            flow->value.next.nat.src_port      = new_port;
+            flow->value.next.nat.rewrite_flag |= REWRITE_SRC_PORT;
         }
         else {
             // Reverse (DPAT)
             old_port = nfct_get_attr_u16(ct, ATTR_REPL_PORT_DST);
             new_port = nfct_get_attr_u16(ct, ATTR_ORIG_PORT_SRC);
 
-            flow->value.n_entry.dest_port     = new_port;
-            flow->value.n_entry.rewrite_flag |= REWRITE_DEST_PORT;
+            flow->value.next.nat.dest_port     = new_port;
+            flow->value.next.nat.rewrite_flag |= REWRITE_DEST_PORT;
         }
 
         // Calculate the L4 checksum diff
-        csum_replace(&flow->value.n_entry.l4_cksum_diff, &old_port, &new_port, 1);
+        csum_replace(&flow->value.next.nat.l4_cksum_diff, &old_port, &new_port, 1);
     }
 
     // DPAT
@@ -132,21 +132,21 @@ void check_nat(struct nf_conntrack *ct, struct flow_key_value *flow) {
             old_port = nfct_get_attr_u16(ct, ATTR_ORIG_PORT_DST);
             new_port = nfct_get_attr_u16(ct, ATTR_REPL_PORT_SRC);
 
-            flow->value.n_entry.dest_port     = new_port;
-            flow->value.n_entry.rewrite_flag |= REWRITE_DEST_PORT;
+            flow->value.next.nat.dest_port     = new_port;
+            flow->value.next.nat.rewrite_flag |= REWRITE_DEST_PORT;
         }
         else {
             // Reverse (SPAT)
             old_port = nfct_get_attr_u16(ct, ATTR_REPL_PORT_SRC);
             new_port = nfct_get_attr_u16(ct, ATTR_ORIG_PORT_DST);
 
-            flow->value.n_entry.src_port      = new_port;
-            flow->value.n_entry.rewrite_flag |= REWRITE_SRC_PORT;
+            flow->value.next.nat.src_port      = new_port;
+            flow->value.next.nat.rewrite_flag |= REWRITE_SRC_PORT;
         }
 
         // Calculate the L4 checksum diff
-        csum_replace(&flow->value.n_entry.l4_cksum_diff, &old_port, &new_port, 1);
+        csum_replace(&flow->value.next.nat.l4_cksum_diff, &old_port, &new_port, 1);
     }
 
-    bpfw_verbose_nat("Nat:", &flow->value.n_entry, family);
+    bpfw_verbose_nat("Nat:", &flow->value.next.nat, family);
 }
