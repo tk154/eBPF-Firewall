@@ -2,6 +2,7 @@
 #include <getopt.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
 
 #include <arpa/inet.h>
 #include <linux/in.h>
@@ -23,6 +24,13 @@ struct flow_key_value {
 };
 
 
+__u64 time_get_coarse_ns() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC_COARSE, &ts);
+
+    return ts.tv_sec * (__u64)1e9 + ts.tv_nsec;
+}
+
 int print_ifname(__u32 ifindex) {
     char ifname[IF_NAMESIZE];
     if_indextoname(ifindex, ifname);
@@ -30,12 +38,20 @@ int print_ifname(__u32 ifindex) {
     return fputs(ifname, stdout);
 }
 
+int print_dsa(__u8 dsa_port) {
+    return printf("@p%hhu", dsa_port & ~DSA_PORT_SET);
+}
+
 int print_vlan(__u16 vlan_id) {
     return printf(" vlan=%hu", vlan_id);
 }
 
-int print_idle(__u32 idle) {
-    return printf(" %u", idle);
+int print_pppoe(__be16 pppoe_id) {
+    return printf(" pppoe=0x%hx", ntohs(pppoe_id));
+}
+
+int print_idle(__u64 flow_ns, __u64 curr_ns) {
+    return printf(" idle=%u", (__u32)((curr_ns - flow_ns) / (__u64)1e9));
 }
 
 int print_proto(__u8 proto) {
@@ -50,7 +66,7 @@ int print_proto(__u8 proto) {
 }
 
 int print_ip(__u8 *ip, __u8 family, const char *prefix) {
-    char ip_str[family == AF_INET ? INET_ADDRSTRLEN : INET6_ADDRSTRLEN];
+    char ip_str[INET6_ADDRSTRLEN];
     inet_ntop(family, ip, ip_str, sizeof(ip_str));
 
     return printf(" %s=%s", prefix, ip_str);
@@ -79,13 +95,19 @@ int print_action(__u8 action) {
 }
 
 
-void print_base(struct flow_key_value *flow) {
+void print_base(struct flow_key_value *flow, __u64 curr_ns) {
     print_ifname(flow->key.ifindex);
+
+    if (flow->key.dsa_port)
+        print_dsa(flow->key.dsa_port);
 
     if (flow->key.vlan_id)
         print_vlan(flow->key.vlan_id);
 
-    print_idle(flow->value.idle);
+    if (flow->key.pppoe_id)
+        print_pppoe(flow->key.pppoe_id);
+
+    print_idle(flow->value.time, curr_ns);
     print_proto(flow->key.proto);
 
     print_ip(flow->key.src_ip, flow->key.family, "src");
@@ -116,8 +138,14 @@ void print_hop(struct next_hop *next_h) {
     fputs(" | ", stdout);
     print_ifname(next_h->ifindex);
 
+    if (next_h->dsa_port)
+        print_dsa(next_h->dsa_port);
+
     if (next_h->vlan_id)
         print_vlan(next_h->vlan_id);
+
+    if (next_h->pppoe_id)
+        print_pppoe(next_h->pppoe_id);
 
     print_mac(next_h->src_mac, "smac");
     print_mac(next_h->dest_mac, "dmac");
@@ -139,6 +167,8 @@ int print_flows(struct cmd_args *args) {
         return EXIT_FAILURE;
     }
 
+    __u64 curr_ns = time_get_coarse_ns();
+
     struct flow_key_value flow;
     int rc = bpf_map_get_next_key(flow_map_fd, NULL, &flow.key);
 
@@ -154,13 +184,13 @@ int print_flows(struct cmd_args *args) {
             args->redirect_only && flow.value.action != ACTION_REDIRECT)
                 goto get_next_key;
 
-        print_base(&flow);
+        print_base(&flow, curr_ns);
 
-        if (args->print_nat && flow.value.n_entry.rewrite_flag)
-            print_nat(&flow.value.n_entry, flow.key.family);
+        if (args->print_nat && flow.value.next.nat.rewrite_flag)
+            print_nat(&flow.value.next.nat, flow.key.family);
 
         if (args->print_hop && flow.value.action == ACTION_REDIRECT)
-            print_hop(&flow.value.next_h);
+            print_hop(&flow.value.next.hop);
 
         print_endline();
 

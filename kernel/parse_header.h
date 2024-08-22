@@ -11,6 +11,9 @@
 #include <stdbool.h>
 #include "common_kern.h"
 
+#define IP_MF		0x2000	/* "More Fragments" */
+#define IP_OFFSET	0x1fff	/* "Fragment Offset" */
+
 
 __always_inline static __be16 proto_ppp2eth(__be16 ppp_proto) {
 	switch (ppp_proto) {
@@ -25,11 +28,11 @@ __always_inline static __be16 proto_ppp2eth(__be16 ppp_proto) {
 
 __always_inline static bool parse_eth_header(void *ctx, struct packet_data *pkt, struct l2_header *l2) {
 	// Parse the Ethernet header, will drop the package if out-of-bounds
-	if (pkt->ifindex == dsa_switch.ifindex) {
+	if (pkt->ifindex.in == dsa_switch.ifindex) {
 		if (!parse_dsa_header(pkt, l2))
 			return false;
 
-		bpfw_debug("Interface: %u@p%u", pkt->ifindex, l2->dsa_port & ~DSA_PORT_SET);
+		bpfw_debug("Interface: %u@p%u", pkt->ifindex.in, l2->dsa_port & ~DSA_PORT_SET);
 	}
 	else {
 		check_header(struct ethhdr, *ethh, pkt);
@@ -38,7 +41,7 @@ __always_inline static bool parse_eth_header(void *ctx, struct packet_data *pkt,
 		l2->proto = ethh->h_proto;
 		l2->dsa_port = 0;
 
-		bpfw_debug("Interface: %u", pkt->ifindex);
+		bpfw_debug("Interface: %u", pkt->ifindex.in);
 	}
 
 	bpfw_debug_mac("Src MAC: ", l2->src_mac);
@@ -47,7 +50,7 @@ __always_inline static bool parse_eth_header(void *ctx, struct packet_data *pkt,
 }
 
 __always_inline static bool parse_vlan_header(void *ctx, bool xdp, struct packet_data *pkt, struct l2_header *l2) {
-	if (xdp || pkt->ifindex == dsa_switch.ifindex) {
+	if (xdp || pkt->ifindex.in == dsa_switch.ifindex) {
 		// Check if there is a VLAN header
 		if (l2->proto == bpf_htons(ETH_P_8021Q)) {
 			// Parse the VLAN header, will drop the package if out-of-bounds
@@ -127,6 +130,20 @@ __always_inline static bool parse_ipv4_header(struct packet_data *pkt, struct l3
 	bpfw_debug_ipv4("Src IPv4: ", &iph->saddr);
 	bpfw_debug_ipv4("Dst IPv4: ", &iph->daddr);
 
+	__u8 ihl = ((struct iphdr_ver_ihl*)iph)->ihl;
+
+	/* ip options */
+	if (ihl * 4 != sizeof(*iph)) {
+		bpfw_debug("IHL words (%u) doesn't equal IPv4 Header size.", ihl);
+		return false;
+	}
+
+	/* ip fragmented traffic */
+	if (iph->frag_off & bpf_htons(IP_MF | IP_OFFSET)) {
+		bpfw_debug("IPv4 Packet is fragmented.");
+		return false;
+	}
+
 	l3->family	= AF_INET;
 	l3->src_ip 	= &iph->saddr;
 	l3->dest_ip = &iph->daddr;
@@ -156,17 +173,31 @@ __always_inline static bool parse_ipv6_header(struct packet_data *pkt, struct l3
 }
 
 __always_inline static bool parse_l3_header(struct packet_data *pkt, __be16 proto, struct l3_header *l3) {
+	bool success;
+
 	switch (proto) {
 		case bpf_ntohs(ETH_P_IP):
-			return parse_ipv4_header(pkt, l3);
+			success = parse_ipv4_header(pkt, l3);
+			break;
 
 		case bpf_ntohs(ETH_P_IPV6):
-			return parse_ipv6_header(pkt, l3);
+			success = parse_ipv6_header(pkt, l3);
+			break;
 
 		default:
 			bpfw_debug("Ethernet Protocol: 0x%04x", proto);
 			return false;
 	}
+
+	if (!success)
+		return false;
+
+	if (*l3->ttl <= 1) {
+		bpfw_debug("TTL expired.");
+		return false;
+	}
+
+	return true;
 }
 
 __always_inline static bool parse_tcp_header(struct packet_data *pkt, struct l4_header *l4) {
@@ -177,12 +208,12 @@ __always_inline static bool parse_tcp_header(struct packet_data *pkt, struct l4_
 	bpfw_debug("TCP Dst Port: %u", bpf_ntohs(tcph->dest));
 
 	// For possible NAT adjustmenets
-	l4->sport = &tcph->source;
-	l4->dport = &tcph->dest;
-	l4->cksum = &tcph->check;
+	l4->src_port  = &tcph->source;
+	l4->dest_port = &tcph->dest;
+	l4->cksum 	  = &tcph->check;
 
 	// Save the TCP Flags
-	l4->tcp_flags = *(struct tcp_flags*)((void*)tcph + TCP_FLAGS_OFFSET);
+	l4->tcp_flags = *(struct tcphdr_flags*)((void*)tcph + TCP_HEADER_FLAGS_OFFSET);
 
 	return true;
 }
@@ -195,9 +226,9 @@ __always_inline static bool parse_udp_header(struct packet_data *pkt, struct l4_
 	bpfw_debug("UDP Dst Port: %u", bpf_ntohs(udph->dest));
 
 	// For possible NAT adjustmenets
-	l4->sport = &udph->source;
-	l4->dport = &udph->dest;
-	l4->cksum = &udph->check;
+	l4->src_port  = &udph->source;
+	l4->dest_port = &udph->dest;
+	l4->cksum 	  = &udph->check;
 
 	return true;
 }

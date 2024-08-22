@@ -5,13 +5,8 @@
 #include <libmnl/libmnl.h>
 
 #include "netlink.h"
-#include "pppoe/pppoe.h"
+#include "interfaces/pppoe.h"
 
-
-enum {
-    NL_INTERFACE_NOT_FOUND = 1,
-    NL_PPPOE_MISS
-};
 
 struct nl_sock_buf {
     struct mnl_socket *sock;
@@ -39,7 +34,7 @@ int send_request(struct netlink_handle* nl_h);
 int send_dump_request(struct netlink_handle *nl_h, mnl_cb_t cb_func, void *cb_data);
 
 int request_interface(struct netlink_handle* nl_h, __u32 ifindex);
-int get_input_interface(struct netlink_handle* nl_h, struct flow_key* f_key, __u32 *iif);
+int get_input_interface(struct netlink_handle* nl_h, struct flow_key_value* flow);
 
 
 #endif

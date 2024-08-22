@@ -1,9 +1,10 @@
-#include "nat.h"
+#include "ct_common.h"
 
 #include <string.h>
 #include <arpa/inet.h>
 
-#include "ip_attr.h"
+#include <libnetfilter_conntrack/libnetfilter_conntrack.h>
+
 #include "../logging/logging.h"
 
 
@@ -34,33 +35,47 @@ static void csum_replace(__sum16 *csum, const __be16 *old, const __be16 *new, si
 }
 
 
-void check_nat(struct nf_conntrack *ct, struct flow_key_value *flow) {
-    __u8 family = flow->key.family;
-    size_t ip_len = family == AF_INET ? 4 : 16;
+static bool ct_flow_is_reverse(struct nf_conntrack *ct, struct flow_key *f_key) {
+    __u8 family = f_key->family;
+
+    return !(
+        ipeq(f_key->src_ip,  nfct_get_attr_ip(ct, ATTR_ORIG_IP_SRC, family), family) &&
+        ipeq(f_key->dest_ip, nfct_get_attr_ip(ct, ATTR_ORIG_IP_DST, family), family) &&
+        f_key->src_port  == nfct_get_attr_u16(ct, ATTR_ORIG_PORT_SRC) &&
+        f_key->dest_port == nfct_get_attr_u16(ct, ATTR_ORIG_PORT_DST)
+    );
+}
+
+
+void conntrack_check_nat(struct conntrack_handle *conntrack_h, struct flow_key_value *flow) {
+    struct nf_conntrack *ct = conntrack_h->ct;
+
+    // Check if reverse
+    bool is_reverse = ct_flow_is_reverse(ct, &flow->key);
 
     // SNAT
     if (nfct_getobjopt(ct, NFCT_GOPT_IS_SNAT)) {
         const void *old_ip, *new_ip;
         
         // Check if reverse
-        if (memcmp(flow->key.src_ip, nfct_get_attr_ip(ct, ATTR_ORIG_IP_SRC, family), ip_len) == 0) {
-            old_ip = nfct_get_attr_ip(ct, ATTR_ORIG_IP_SRC, family);
-            new_ip = nfct_get_attr_ip(ct, ATTR_REPL_IP_DST, family);
+        if (!is_reverse) {
+            old_ip = nfct_get_attr_ip(ct, ATTR_ORIG_IP_SRC, flow->key.family);
+            new_ip = nfct_get_attr_ip(ct, ATTR_REPL_IP_DST, flow->key.family);
 
-            ipcpy(flow->value.next.nat.src_ip, new_ip, family);
+            ipcpy(flow->value.next.nat.src_ip, new_ip, flow->key.family);
             flow->value.next.nat.rewrite_flag |= REWRITE_SRC_IP;
         }
         else {
             // Reverse (DNAT)
-            old_ip = nfct_get_attr_ip(ct, ATTR_REPL_IP_DST, family);
-            new_ip = nfct_get_attr_ip(ct, ATTR_ORIG_IP_SRC, family);
+            old_ip = nfct_get_attr_ip(ct, ATTR_REPL_IP_DST, flow->key.family);
+            new_ip = nfct_get_attr_ip(ct, ATTR_ORIG_IP_SRC, flow->key.family);
 
-            ipcpy(flow->value.next.nat.dest_ip, new_ip, family);
+            ipcpy(flow->value.next.nat.dest_ip, new_ip, flow->key.family);
             flow->value.next.nat.rewrite_flag |= REWRITE_DEST_IP;
         }
 
         // Calculate the L3 and L4 checksum diffs
-        if (family == AF_INET) {
+        if (flow->key.family == AF_INET) {
             csum_replace(&flow->value.next.ipv4_cksum_diff, old_ip, new_ip, 2);
             csum_replace(&flow->value.next.nat.l4_cksum_diff, old_ip, new_ip, 2);
         }
@@ -73,24 +88,24 @@ void check_nat(struct nf_conntrack *ct, struct flow_key_value *flow) {
         const void *old_ip, *new_ip;
 
         // Check if reverse
-        if (memcmp(flow->key.dest_ip, nfct_get_attr_ip(ct, ATTR_ORIG_IP_DST, family), ip_len) == 0) {
-            old_ip = nfct_get_attr_ip(ct, ATTR_ORIG_IP_DST, family);
-            new_ip = nfct_get_attr_ip(ct, ATTR_REPL_IP_SRC, family);
+        if (!is_reverse) {
+            old_ip = nfct_get_attr_ip(ct, ATTR_ORIG_IP_DST, flow->key.family);
+            new_ip = nfct_get_attr_ip(ct, ATTR_REPL_IP_SRC, flow->key.family);
 
-            ipcpy(flow->value.next.nat.dest_ip, new_ip, family);
+            ipcpy(flow->value.next.nat.dest_ip, new_ip, flow->key.family);
             flow->value.next.nat.rewrite_flag |= REWRITE_DEST_IP;
         }
         else {
             // Reverse (SNAT)
-            old_ip = nfct_get_attr_ip(ct, ATTR_REPL_IP_SRC, family);
-            new_ip = nfct_get_attr_ip(ct, ATTR_ORIG_IP_DST, family);
+            old_ip = nfct_get_attr_ip(ct, ATTR_REPL_IP_SRC, flow->key.family);
+            new_ip = nfct_get_attr_ip(ct, ATTR_ORIG_IP_DST, flow->key.family);
 
-            ipcpy(flow->value.next.nat.src_ip, new_ip, family);
+            ipcpy(flow->value.next.nat.src_ip, new_ip, flow->key.family);
             flow->value.next.nat.rewrite_flag |= REWRITE_SRC_IP;
         }
 
         // Calculate the L3 and L4 checksum diffs
-        if (family == AF_INET) {
+        if (flow->key.family == AF_INET) {
             csum_replace(&flow->value.next.ipv4_cksum_diff, old_ip, new_ip, 2);
             csum_replace(&flow->value.next.nat.l4_cksum_diff, old_ip, new_ip, 2);
         }
@@ -103,7 +118,7 @@ void check_nat(struct nf_conntrack *ct, struct flow_key_value *flow) {
         __be16 old_port, new_port;
 
         // Check if reverse
-        if (flow->key.src_port == nfct_get_attr_u16(ct, ATTR_ORIG_PORT_SRC)) {
+        if (!is_reverse) {
             old_port = nfct_get_attr_u16(ct, ATTR_ORIG_PORT_SRC);
             new_port = nfct_get_attr_u16(ct, ATTR_REPL_PORT_DST);
 
@@ -128,7 +143,7 @@ void check_nat(struct nf_conntrack *ct, struct flow_key_value *flow) {
         __be16 old_port, new_port;
 
         // Check if reverse
-        if (flow->key.dest_port == nfct_get_attr_u16(ct, ATTR_ORIG_PORT_DST)) {
+        if (!is_reverse) {
             old_port = nfct_get_attr_u16(ct, ATTR_ORIG_PORT_DST);
             new_port = nfct_get_attr_u16(ct, ATTR_REPL_PORT_SRC);
 
@@ -148,5 +163,5 @@ void check_nat(struct nf_conntrack *ct, struct flow_key_value *flow) {
         csum_replace(&flow->value.next.nat.l4_cksum_diff, &old_port, &new_port, 1);
     }
 
-    bpfw_verbose_nat("Nat:", &flow->value.next.nat, family);
+    bpfw_verbose_nat("Nat:", &flow->value.next.nat, flow->key.family);
 }

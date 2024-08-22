@@ -38,14 +38,15 @@ __always_inline static void apply_nat(struct l3_header* l3, struct l4_header* l4
 
 	// Rewrite the source port
 	if (n_entry->rewrite_flag & REWRITE_SRC_PORT)
-		*l4->sport = n_entry->src_port;
+		*l4->src_port = n_entry->src_port;
 
 	// Rewrite the destination port
 	if (n_entry->rewrite_flag & REWRITE_DEST_PORT)
-		*l4->dport = n_entry->dest_port;
+		*l4->dest_port = n_entry->dest_port;
 
-	// Adjust the L4 checksum
-	cksum_add(l4->cksum, n_entry->l4_cksum_diff);
+	if (*l4->cksum)
+		// Adjust the L4 checksum
+		cksum_add(l4->cksum, n_entry->l4_cksum_diff);
 }
 
 __always_inline static void mangle_packet(struct l3_header* l3, struct l4_header* l4, struct next_entry* next) {

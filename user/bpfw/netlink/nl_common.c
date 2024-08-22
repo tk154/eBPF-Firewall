@@ -10,19 +10,22 @@
 
 #include <net/if_arp.h>
 
-#include "dsa/dsa.h"
+#include "interfaces/dsa.h"
 #include "../logging/logging.h"
 
+#define NEW_INTERFACE UINT32_MAX
+#define INTERFACE_NOT_FOUND 1
 
-struct dump_cb {
+
+struct dump_cb_data {
     mnl_cb_t func;
     void *data;
 };
 
-struct notification_cb {
+struct not_cb_data {
     struct netlink_handle *nl_h;
     
-    int (*func)(__u32 ifindex, void* data);
+    newlink_cb_t newlink_cb;
     void *data;
 };
 
@@ -72,7 +75,14 @@ int mnl_attr_parse_cb(const struct nlattr *attr, void *data) {
     const struct nlattr **tb = data;
     tb[mnl_attr_get_type(attr)] = attr;
 
-    //printf("%hu\n", mnl_attr_get_type(attr));
+    return MNL_CB_OK;
+}
+
+int mnl_attr_parse_cb_debug(const struct nlattr *attr, void *data) {
+    const struct nlattr **tb = data;
+    tb[mnl_attr_get_type(attr)] = attr;
+
+    bpfw_debug("%hu\n", mnl_attr_get_type(attr));
 
     return MNL_CB_OK;
 }
@@ -120,7 +130,7 @@ static int send_dump_request_cb(const struct nlmsghdr *nlh, void *data) {
     /*if (!(nlh->nlmsg_flags & NLM_F_DUMP_FILTERED))
         return MNL_CB_OK;*/
 
-    struct dump_cb *cb = data;
+    struct dump_cb_data *cb = data;
     return (*cb->func)(nlh, cb->data);
 }
 
@@ -141,7 +151,7 @@ int send_dump_request(struct netlink_handle *nl_h, mnl_cb_t cb_func, void *cb_da
     // Receive and parse the response
     ssize_t nbytes;
     while ((nbytes = mnl_socket_recvfrom(nl_h->req.sock, nl_h->req.buf, nl_h->buffer_size)) > 0) {
-        struct dump_cb cb = { .func = cb_func, .data = cb_data };
+        struct dump_cb_data cb = { .func = cb_func, .data = cb_data };
         int rc = mnl_cb_run(nl_h->req.buf, nbytes, seq, portid, send_dump_request_cb, &cb);
 
         switch (rc) {
@@ -174,6 +184,10 @@ int request_interface(struct netlink_handle* nl_h, __u32 ifindex) {
         case BPFW_RC_OK:
         case BPFW_RC_ERROR:
             return rc;
+
+        case ENODEV:
+            bpfw_debug("Device with ifindex %u is gone.\n", ifindex);
+            return INTERFACE_NOT_FOUND;
 
         default:
             bpfw_error_ifindex("Error retrieving link information for ", ifindex, "", rc);
@@ -226,7 +240,7 @@ static int should_attach(struct netlink_handle *nl_h, const struct nlmsghdr *nlh
         return nl_h->dsa;
 
     if (ifinfom->ifi_type != ARPHRD_ETHER)
-        return BPFW_INTERFACE_DO_NOT_ATTACH;
+        return NL_INTERFACE_DO_NOT_ATTACH;
 
     struct nlattr *ifla[IFLA_MAX + 1] = {};
     mnl_attr_parse(nlh, sizeof(*ifinfom), mnl_attr_parse_cb, ifla);
@@ -237,17 +251,17 @@ static int should_attach(struct netlink_handle *nl_h, const struct nlmsghdr *nlh
 
         if (ifla_info[IFLA_INFO_KIND]) {
             if (nl_h->dsa)
-                return BPFW_INTERFACE_DO_NOT_ATTACH;
+                return NL_INTERFACE_DO_NOT_ATTACH;
 
             const char *if_type = mnl_attr_get_str(ifla_info[IFLA_INFO_KIND]);
             if (strcmp(if_type, "dsa") == 0)
-                return BPFW_INTERFACE_DO_ATTACH;
+                return NL_INTERFACE_DO_ATTACH;
 
-            return BPFW_INTERFACE_DO_NOT_ATTACH;
+            return NL_INTERFACE_DO_NOT_ATTACH;
         }
     }
 
-    return BPFW_INTERFACE_DO_ATTACH;
+    return NL_INTERFACE_DO_ATTACH;
 }
 
 int netlink_ifindex_should_attach(struct netlink_handle *nl_h, __u32 ifindex) {
@@ -257,34 +271,48 @@ int netlink_ifindex_should_attach(struct netlink_handle *nl_h, __u32 ifindex) {
     return should_attach(nl_h, nl_h->req.buf);
 }
 
-static int notification_cb(const struct nlmsghdr *nlh, void *data) {
-    struct notification_cb *cb = data;
 
-    if (nlh->nlmsg_type != RTM_NEWLINK)
-        goto out;
-
+static int handle_newlink(const struct nlmsghdr *nlh, void *data) {
+    struct not_cb_data *cb = data;
     struct ifinfomsg *ifinfom = mnl_nlmsg_get_payload(nlh);
-    if (ifinfom->ifi_change == UINT32_MAX && should_attach(cb->nl_h, nlh)) {
+
+    if (ifinfom->ifi_change == NEW_INTERFACE && should_attach(cb->nl_h, nlh)) {
         struct nlattr *ifla[IFLA_MAX + 1] = {};
         mnl_attr_parse(nlh, sizeof(*ifinfom), mnl_attr_parse_cb, ifla);
+
         bpfw_debug("\nNew interface: %s\n", mnl_attr_get_str(ifla[IFLA_IFNAME]));
 
-        if ((*cb->func)(ifinfom->ifi_index, cb->data) != 0)
+        if ((*cb->newlink_cb)(ifinfom->ifi_index, cb->data) != BPFW_RC_OK)
             return MNL_CB_ERROR;
     }
 
-out:
     return MNL_CB_OK;
 }
 
-int netlink_check_for_new_interfaces(struct netlink_handle *nl_h, int (*cb_func)(__u32 ifindex, void *cb_data), void *cb_data) {
-    struct notification_cb cb = { .nl_h = nl_h, .func = cb_func, .data = cb_data };
+static int notification_cb(const struct nlmsghdr *nlh, void *data) {
+    switch (nlh->nlmsg_type) {
+        case RTM_NEWLINK:
+            return handle_newlink(nlh, data);
+
+        case RTM_DELLINK:
+            return MNL_CB_OK;
+
+        default:
+            bpfw_debug("Netlink notification message: %hu\n", nlh->nlmsg_type);
+            return MNL_CB_OK;
+    }
+}
+
+int netlink_check_notifications(struct netlink_handle *nl_h, newlink_cb_t newlink, void *data) {
+    struct not_cb_data cb = { .nl_h = nl_h, .newlink_cb = newlink, .data = data };
 
     ssize_t nbytes;
     while ((nbytes = mnl_socket_recvfrom(nl_h->not.sock, nl_h->not.buf, nl_h->buffer_size)) > 0) {
         int rc = mnl_cb_run(nl_h->not.buf, nbytes, 0, 0, notification_cb, &cb);
-        if (rc == MNL_CB_ERROR)
+        if (rc == MNL_CB_ERROR) {
+            bpfw_error("Error executing notification callback: %s (-%d).\n", strerror(errno), errno);
             return BPFW_RC_ERROR;
+        }
     }
 
     if (errno != EAGAIN && errno != EWOULDBLOCK) {
@@ -292,7 +320,7 @@ int netlink_check_for_new_interfaces(struct netlink_handle *nl_h, int (*cb_func)
         return BPFW_RC_ERROR;
     }
 
-    return 0;
+    return BPFW_RC_OK;
 }
 
 static int open_socket_and_create_buffer(struct nl_sock_buf *nl, unsigned int sock_groups, size_t buffer_size) {
@@ -349,13 +377,15 @@ struct netlink_handle* netlink_init(bool auto_attach, bool dsa) {
     if (socket_set_strict_check(nl_h->req.sock, true) != 0)
         goto close_req_socket;
 
-    if (auto_attach) {
-        if (open_socket_and_create_buffer(&nl_h->not, RTMGRP_LINK, nl_h->buffer_size) != 0)
-            goto close_req_socket;
+    unsigned int not_sock_groups = 0;
+    if (auto_attach)
+        not_sock_groups |= RTMGRP_LINK;
 
-        if (socket_set_blocking(nl_h->not.sock, false) != 0)
-            goto close_not_socket;
-    }
+    if (open_socket_and_create_buffer(&nl_h->not, not_sock_groups, nl_h->buffer_size) != 0)
+        goto close_req_socket;
+
+    if (socket_set_blocking(nl_h->not.sock, false) != 0)
+        goto close_not_socket;
 
     return nl_h;
 

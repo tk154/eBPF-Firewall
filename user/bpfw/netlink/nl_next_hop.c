@@ -46,7 +46,7 @@ static int get_ppp_peer_ipv6(struct netlink_handle* nl_h, __u32 ifindex, void **
 }
 
 
-static int get_neigh(struct netlink_handle* nl_h, __u32 ifindex, struct flow_key_value* flow, __u8 dest_ip[IPV6_ALEN]) {
+static int get_neigh(struct netlink_handle* nl_h, __u32 ifindex, struct flow_key_value* flow, void *dest_ip) {
     // Prepare a Netlink request message
     struct nlmsghdr *nlh = mnl_nlmsg_put_header(nl_h->req.buf);
     nlh->nlmsg_type = RTM_GETNEIGH;
@@ -56,7 +56,7 @@ static int get_neigh(struct netlink_handle* nl_h, __u32 ifindex, struct flow_key
     ndm->ndm_ifindex = ifindex;
 
     // Set the destination IP (of Receiver or Gateway)
-    mnl_attr_put_ip(nlh, RTA_DST, dest_ip, flow->key.family);
+    mnl_attr_put_ip(nlh, NDA_DST, dest_ip, flow->key.family);
 
     // Send request and receive response
     int rc = send_request(nl_h);
@@ -98,10 +98,14 @@ static int get_neigh(struct netlink_handle* nl_h, __u32 ifindex, struct flow_key
 }
 
 
-static int parse_bridge_if(struct netlink_handle* nl_h, __u32 ifindex, struct flow_key_value *flow, __u8 dest_ip[IPV6_ALEN]) {
-    int rc = get_neigh(nl_h, ifindex, flow, dest_ip);
-    if (rc != BPFW_RC_OK)
-        return rc;
+static int parse_bridge_if(struct netlink_handle* nl_h, __u32 ifindex, struct flow_key_value *flow, void *dest_ip) {
+    int rc;
+
+    if (mac_not_set(flow->value.next.hop.dest_mac)) {
+        rc = get_neigh(nl_h, ifindex, flow, dest_ip);
+        if (rc != BPFW_RC_OK)
+            return rc;
+    }
 
     // Prepare a Netlink request message
     struct nlmsghdr *nlh = mnl_nlmsg_put_header(nl_h->req.buf);
@@ -123,9 +127,9 @@ static int parse_bridge_if(struct netlink_handle* nl_h, __u32 ifindex, struct fl
         case BPFW_RC_ERROR:
             return rc;
         
-        case ENOENT:
+        /*case ENOENT:
             bpfw_debug_ip("\nCurrently unreachable: ", dest_ip, flow->key.family, 0);
-            return NO_NEXT_HOP;
+            return NO_NEXT_HOP;*/
 
         default:
             bpfw_warn_ip_on_ifindex("Couldn't retrieve bridge port of ",
@@ -166,7 +170,10 @@ static int parse_vlan_if(struct netlink_handle* nl_h, struct nlattr **ifla, stru
     return BPFW_RC_OK;
 }
 
-static int parse_ppp_if(struct netlink_handle* nl_h, __u32 ifindex, struct flow_value *f_value) {
+static int parse_ppp_if(struct netlink_handle* nl_h, __u32 ifindex, struct nlattr **ifla, struct flow_value *f_value) {
+    const char *ifname = mnl_attr_get_str(ifla[IFLA_IFNAME]);
+    bpfw_verbose("-> %s (ppp) ", ifname);
+
     if (ifindex == nl_h->pppoe.ifindex)
         goto fill_flow_value;
 
@@ -202,32 +209,8 @@ fill_flow_value:
     return BPFW_RC_OK;
 }
 
-
-static int get_link(struct netlink_handle* nl_h, __u32 ifindex, struct flow_key_value *flow, void *dest_ip) {
-    int rc = request_interface(nl_h, ifindex);
-    if (rc != BPFW_RC_OK)
-        return BPFW_RC_ERROR;
-
-    struct nlmsghdr *nlh = nl_h->req.buf;
-    struct ifinfomsg *ifinfom = mnl_nlmsg_get_payload(nlh);
-
-    struct nlattr *ifla[IFLA_MAX + 1] = {};
-    mnl_attr_parse(nlh, sizeof(*ifinfom), mnl_attr_parse_cb, ifla);
-
-    switch (ifinfom->ifi_type) {
-        case ARPHRD_ETHER:
-            break;
-
-        case ARPHRD_PPP:
-            bpfw_verbose("-> %s (ppp) ", mnl_attr_get_str(ifla[IFLA_IFNAME]));
-            rc = parse_ppp_if(nl_h, ifindex, &flow->value);
-
-            goto out;
-
-        default:
-            bpfw_debug("Interface type: %hu\n", ifinfom->ifi_type);
-            return NO_NEXT_HOP;
-    }
+static int parse_eth_if(struct netlink_handle* nl_h, __u32 ifindex, struct nlattr **ifla, struct flow_key_value *flow, void *dest_ip) {
+    int rc = BPFW_RC_OK;
 
     if (mac_not_set(flow->value.next.hop.src_mac)) {
         if (!ifla[IFLA_ADDRESS]) {
@@ -246,13 +229,13 @@ static int get_link(struct netlink_handle* nl_h, __u32 ifindex, struct flow_key_
         mnl_attr_parse_nested(ifla[IFLA_LINKINFO], mnl_attr_parse_cb, ifla_info);
 
         if (ifla_info[IFLA_INFO_KIND]) {
+            const char *ifname = mnl_attr_get_str(ifla[IFLA_IFNAME]);
             const char *if_type = mnl_attr_get_str(ifla_info[IFLA_INFO_KIND]);
-            bpfw_verbose("-> %s (%s) ", mnl_attr_get_str(ifla[IFLA_IFNAME]), if_type);
 
-            if (strcmp(if_type, "bridge") == 0) {
+            bpfw_verbose("-> %s (%s) ", ifname, if_type);
+
+            if (strcmp(if_type, "bridge") == 0)
                 rc = parse_bridge_if(nl_h, ifindex, flow, dest_ip);
-                goto out;
-            }
 
             else if (strcmp(if_type, "vlan") == 0)
                 rc = parse_vlan_if(nl_h, ifla, ifla_info, &flow->value);
@@ -265,7 +248,35 @@ static int get_link(struct netlink_handle* nl_h, __u32 ifindex, struct flow_key_
     if (mac_not_set(flow->value.next.hop.dest_mac))
         rc = get_neigh(nl_h, ifindex, flow, dest_ip);
 
-out:
+    return rc;
+}
+
+
+static int get_link(struct netlink_handle* nl_h, __u32 ifindex, struct flow_key_value *flow, void *dest_ip) {
+    int rc = request_interface(nl_h, ifindex);
+    if (rc != BPFW_RC_OK)
+        return rc;
+
+    struct nlmsghdr *nlh = nl_h->req.buf;
+    struct ifinfomsg *ifinfom = mnl_nlmsg_get_payload(nlh);
+
+    struct nlattr *ifla[IFLA_MAX + 1] = {};
+    mnl_attr_parse(nlh, sizeof(*ifinfom), mnl_attr_parse_cb, ifla);
+
+    switch (ifinfom->ifi_type) {
+        case ARPHRD_ETHER:
+            rc = parse_eth_if(nl_h, ifindex, ifla, flow, dest_ip);
+            break;
+
+        case ARPHRD_PPP:
+            rc = parse_ppp_if(nl_h, ifindex, ifla, &flow->value);
+            break;
+
+        default:
+            bpfw_debug("Interface type: %hu\n", ifinfom->ifi_type);
+            return NO_NEXT_HOP;
+    }
+
     if (rc != BPFW_RC_OK) {
         flow->value.action = ACTION_PASS;
         return rc;
@@ -277,7 +288,7 @@ out:
     return rc;
 }
 
-static int get_route(struct netlink_handle* nl_h, struct flow_key_value* flow, __u32 iif, __u8 dest_ip[IPV6_ALEN]) {
+static int get_route(struct netlink_handle* nl_h, struct flow_key_value* flow, void *dest_ip) {
     // Prepare a Netlink request message
     struct nlmsghdr *nlh = mnl_nlmsg_put_header(nl_h->req.buf);
     nlh->nlmsg_type = RTM_GETROUTE;
@@ -287,10 +298,13 @@ static int get_route(struct netlink_handle* nl_h, struct flow_key_value* flow, _
     rtm->rtm_src_len = rtm->rtm_dst_len = flow->key.family == AF_INET ? 32 : 128;
 
     // Add attributes
-    mnl_attr_put_u32(nlh, RTA_IIF, iif);
+    mnl_attr_put_u32(nlh, RTA_IIF, flow->value.next.iif);
     mnl_attr_put_u8 (nlh, RTA_IP_PROTO, flow->key.proto);
+
     mnl_attr_put_ip (nlh, RTA_SRC, flow->key.src_ip, flow->key.family);
-    mnl_attr_put_ip (nlh, RTA_DST, dest_ip, flow->key.family);
+    mnl_attr_put_ip (nlh, RTA_DST, flow->value.next.nat.rewrite_flag & REWRITE_DEST_IP ?
+                                   flow->value.next.nat.dest_ip : flow->key.dest_ip, flow->key.family);
+
     mnl_attr_put_u16(nlh, RTA_SPORT, flow->key.src_port);
     mnl_attr_put_u16(nlh, RTA_DPORT, flow->value.next.nat.rewrite_flag & REWRITE_DEST_PORT ?
                                      flow->value.next.nat.dest_port : flow->key.dest_port);
@@ -304,28 +318,36 @@ static int get_route(struct netlink_handle* nl_h, struct flow_key_value* flow, _
         case BPFW_RC_ERROR:
             return BPFW_RC_ERROR;
 
+        case EINVAL:
+            rtm->rtm_type = RTN_BLACKHOLE;
+            break;
+
+        case EHOSTUNREACH:
+            rtm->rtm_type = RTN_UNREACHABLE;
+            break;
+
+        case EACCES:
+            rtm->rtm_type = RTN_PROHIBIT;
+            break;
+
         default:
-            bpfw_warn_ip("Couldn't retrieve route for ",
+            bpfw_debug_ip("Couldn't retrieve route for ",
                 flow->key.dest_ip, flow->key.family, rc);
 
-            flow->value.action = ACTION_PASS;
-
-            return NO_NEXT_HOP;
+            return ACTION_PASS;
     }
 
-    bpfw_verbose_route_type("Rtt: ", rtm->rtm_type);
+    bpfw_verbose_route_type("-> ", rtm->rtm_type);
 
     switch (rtm->rtm_type) {
         case RTN_UNICAST:
             break;
 
         case RTN_BLACKHOLE:
-            flow->value.action = ACTION_DROP;
-            return BPFW_RC_OK;
+            return ACTION_DROP;
 
         default:
-            flow->value.action = ACTION_PASS;
-            return BPFW_RC_OK;
+            return ACTION_PASS;
     }
 
     struct nlattr *attr[RTA_MAX + 1] = {};
@@ -338,65 +360,50 @@ static int get_route(struct netlink_handle* nl_h, struct flow_key_value* flow, _
         return BPFW_RC_ERROR;
     }
 
-    flow->value.next.hop.ifindex = mnl_attr_get_u32(attr[RTA_OIF]);
-    flow->value.action = ACTION_REDIRECT;
+    __u32 oif = mnl_attr_get_u32(attr[RTA_OIF]);
+    flow->value.next.oif = flow->value.next.hop.ifindex = oif;
 
-    if (attr[RTA_GATEWAY]) {
-        void *gateway = mnl_attr_get_payload(attr[RTA_GATEWAY]);
-        ipcpy(dest_ip, gateway, flow->key.family);
+    if (dest_ip) {
+        __u16 dest_attr = attr[RTA_GATEWAY] ? RTA_GATEWAY : RTA_DST;
+        ipcpy(dest_ip, mnl_attr_get_payload(attr[dest_attr]), flow->key.family);
     }
 
-    return BPFW_RC_OK;
+    return ACTION_REDIRECT;
+}
+
+static int get_input_interface_and_route(struct netlink_handle* nl_h, struct flow_key_value* flow, void *dest_ip) {
+    int rc = get_input_interface(nl_h, flow);
+    if (rc == BPFW_RC_ERROR)
+        return BPFW_RC_ERROR;
+
+    if (rc != BPFW_RC_OK) {
+        flow->value.action = ACTION_PASS_TEMP;
+        return rc;
+    }
+
+    return get_route(nl_h, flow, dest_ip);
+}
+
+int netlink_get_route(struct netlink_handle* nl_h, struct flow_key_value* flow) {
+    int rc = get_input_interface_and_route(nl_h, flow, NULL);
+    if (rc == ACTION_REDIRECT)
+        bpfw_verbose_ifindex("-> ", flow->value.next.hop.ifindex, "", 0);
+
+    return rc;
 }
 
 int netlink_get_next_hop(struct netlink_handle* nl_h, struct flow_key_value* flow) {
-    __u32 iif = flow->key.ifindex;
-
-    int rc = get_input_interface(nl_h, &flow->key, &iif);
-    if (rc != BPFW_RC_OK) {
-        flow->value.action =
-            rc == NL_PPPOE_MISS ? ACTION_PASS_FOR_NOW : ACTION_PASS;
-            
-        return rc;
-    }
-
     __u8 dest_ip[IPV6_ALEN];
-    ipcpy(dest_ip, flow->value.next.nat.rewrite_flag & REWRITE_DEST_IP ?
-        flow->value.next.nat.dest_ip : flow->key.dest_ip, flow->key.family);
 
-    rc = get_route(nl_h, flow, iif, dest_ip);
-    if (rc != BPFW_RC_OK || flow->value.action != ACTION_REDIRECT)
+    int rc = get_input_interface_and_route(nl_h, flow, dest_ip);
+    if (rc != ACTION_REDIRECT)
         return rc;
 
-    rc = get_link(nl_h, flow->value.next.hop.ifindex, flow, dest_ip);
+    rc = get_link(nl_h, flow->value.next.oif, flow, dest_ip);
     if (rc != BPFW_RC_OK)
         return rc;
 
     bpfw_verbose_next_hop("-> ", &flow->value.next.hop);
 
-    return BPFW_RC_OK;
-}
-
-int netlink_get_route(struct netlink_handle* nl_h, struct flow_key_value* flow, __u32 *iif) {
-    bpfw_debug_key("\nNon: ", &flow->key);
-
-    int rc = get_input_interface(nl_h, &flow->key, iif);
-    if (rc != BPFW_RC_OK) {
-        flow->value.action =
-            rc == NL_PPPOE_MISS ? ACTION_PASS_FOR_NOW : ACTION_PASS;
-
-        return rc;
-    }
-
-    __u8 dest_ip[IPV6_ALEN];
-    ipcpy(dest_ip, flow->value.next.nat.rewrite_flag & REWRITE_DEST_IP ?
-        flow->value.next.nat.dest_ip : flow->key.dest_ip, flow->key.family);
-
-    rc = get_route(nl_h, flow, *iif, dest_ip);
-    if (rc != BPFW_RC_OK || flow->value.action != ACTION_REDIRECT)
-        return rc;
-
-    bpfw_verbose_ifindex("-> ", flow->value.next.hop.ifindex, "", 0);
-
-    return BPFW_RC_OK;
+    return ACTION_REDIRECT;
 }

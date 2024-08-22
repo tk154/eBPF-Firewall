@@ -11,11 +11,11 @@
 #include <unistd.h>
 
 #include "common_user.h"
-#include "flowtrack.h"
+#include "flowtrack/flowtrack.h"
 #include "logging/logging.h"
 
 #define DEFAULT_BPF_MAP_POLL_SEC    5
-#define DEFAULT_BPF_MAP_MAX_ENTRIES 1024
+#define DEFAULT_BPF_MAP_MAX_ENTRIES FLOW_MAP_DEFAULT_MAX_ENTRIES
 
 #define DEFAULT_TCP_FLOW_TIMEOUT    30
 #define DEFAULT_UDP_FLOW_TIMEOUT    30
@@ -29,8 +29,8 @@ struct cmd_args args = {
     .map_poll_sec    = DEFAULT_BPF_MAP_POLL_SEC,
     .map_max_entries = DEFAULT_BPF_MAP_MAX_ENTRIES,
 
-    .tcp_flow_timeout = DEFAULT_TCP_FLOW_TIMEOUT,
-    .udp_flow_timeout = DEFAULT_UDP_FLOW_TIMEOUT
+    .flow_timeout.tcp = DEFAULT_TCP_FLOW_TIMEOUT,
+    .flow_timeout.udp = DEFAULT_UDP_FLOW_TIMEOUT
 };
 
 
@@ -101,14 +101,14 @@ static bool check_cmd_args(int argc, char* argv[]) {
                     return false;
 
             case 't':
-                args.tcp_flow_timeout = strtoul(optarg, NULL, 10);
-                if (!args.tcp_flow_timeout)
+                args.flow_timeout.tcp = strtoul(optarg, NULL, 10);
+                if (!args.flow_timeout.tcp)
                     return false;
             break;
 
             case 'u':
-                args.udp_flow_timeout = strtoul(optarg, NULL, 10);
-                if (!args.udp_flow_timeout)
+                args.flow_timeout.udp = strtoul(optarg, NULL, 10);
+                if (!args.flow_timeout.udp)
                     return false;
             break;
 

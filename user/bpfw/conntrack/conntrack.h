@@ -7,9 +7,9 @@
 struct conntrack_handle;
 
 enum conntrack_conn_state {
-    CONNECTION_NOT_FOUND,
-    CONNECTION_NOT_ESTABLISHED,
-    CONNECTION_ESTABLISHED
+    CT_CONN_NOT_FOUND,
+    CT_CONN_NOT_ESTABLISHED,
+    CT_CONN_ESTABLISHED
 };
 
 
@@ -21,14 +21,15 @@ enum conntrack_conn_state {
  * **/
 struct conntrack_handle* conntrack_init();
 
-
 /**
  * Iterates to all entries of the BPF conntrack map and updates the conntrack info respectively
  * @param obj The BPF object containing the conntrack map
  * @returns On success 0, errno otherwise
  * **/
-int conntrack_lookup(struct conntrack_handle* conntrack_h, struct flow_key_value *flow);
-
+int conntrack_do_lookup(struct conntrack_handle* conntrack_h, struct flow_key_value *flow);
+void conntrack_check_nat(struct conntrack_handle* conntrack_h, struct flow_key_value *flow);
+int conntrack_update_timeout(struct conntrack_handle* conntrack_h);
+void conntrack_free_ct_entry(struct conntrack_handle* conntrack_h);
 
 /**
  * Frees dynamically allocated memory by libnetfilter_conntrack

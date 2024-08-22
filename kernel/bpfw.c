@@ -15,58 +15,112 @@ struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__type(key, struct flow_key);
 	__type(value, struct flow_value);
+	__uint(max_entries, FLOW_MAP_DEFAULT_MAX_ENTRIES);
 	__uint(pinning, LIBBPF_PIN_BY_NAME);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
-} FLOW_MAP SEC(".maps");
+} BPFW_FLOW_MAP SEC(".maps");
 
+SEC(USERSPACE_TIME_SECTION)
+struct user_time user;
+
+
+__always_inline static void *ipcpy_fill_zeros(void *dest, const void* src, __u8 family) {
+    switch (family) {
+        case AF_INET:
+			memset(dest + IPV4_ALEN, 0, IPV6_ALEN - IPV4_ALEN);
+            return memcpy(dest, src, IPV4_ALEN);
+
+        case AF_INET6:
+            return memcpy(dest, src, IPV6_ALEN);
+
+		default:
+			return NULL;
+    }
+}
 
 /**
  * Helper to swap the src and dest IP and the src and dest port of a flow key
  * @param f_key Pointer to the flow key
  * @param f_value Pointer to the flow value
  * **/
-__always_inline static void reverse_flow_key(struct flow_key *f_key, struct flow_value *f_value) {
-	__u8 temp_ip[IPV6_ALEN];
+__always_inline static void reverse_flow_key(struct flow_key *f_key, struct next_entry *next) {
+	f_key->ifindex  = next->hop.ifindex;
+	f_key->dsa_port = next->hop.dsa_port;
+	f_key->vlan_id  = next->hop.vlan_id;
+	f_key->pppoe_id = next->hop.pppoe_id;
 
-	ipcpy(temp_ip, f_value->next.nat.rewrite_flag & REWRITE_SRC_IP ?
-		f_value->next.nat.src_ip : f_key->src_ip, f_key->family);
-
-	ipcpy(f_key->src_ip, f_value->next.nat.rewrite_flag & REWRITE_DEST_IP ?
-		f_value->next.nat.dest_ip : f_key->dest_ip, f_key->family);
-
-	ipcpy(f_key->dest_ip, temp_ip, f_key->family);
-
-	__be16 temp_port  = f_value->next.nat.rewrite_flag & REWRITE_SRC_PORT ?
-					   f_value->next.nat.src_port : f_key->src_port;
-
-	f_key->src_port  = f_value->next.nat.rewrite_flag & REWRITE_DEST_PORT ?
-					   f_value->next.nat.dest_port : f_key->dest_port;
-
-	f_key->dest_port = temp_port;
-
-	f_key->ifindex  = f_value->next.hop.ifindex;
-	f_key->dsa_port = f_value->next.hop.dsa_port;
-	f_key->vlan_id  = f_value->next.hop.vlan_id;
-	f_key->pppoe_id = f_value->next.hop.pppoe_id;
+	ipcpy(f_key->src_ip, next->nat.rewrite_flag & REWRITE_DEST_IP ?
+		next->nat.dest_ip : f_key->dest_ip, f_key->family);
+	ipcpy(f_key->dest_ip, next->nat.rewrite_flag & REWRITE_SRC_IP ?
+		next->nat.src_ip : f_key->src_ip, f_key->family);
+	
+	f_key->src_port  = next->nat.rewrite_flag & REWRITE_DEST_PORT ?
+					   next->nat.dest_port : f_key->dest_port;
+	f_key->dest_port = next->nat.rewrite_flag & REWRITE_SRC_PORT ?
+					   next->nat.src_port : f_key->src_port;
 }
 
-__always_inline static bool tcp_finished(struct flow_key *f_key, struct flow_value *f_value, struct tcp_flags flags) {
-	if (f_key->proto != IPPROTO_TCP || (!flags.fin && !flags.rst))
+__always_inline static bool tcp_finished(struct flow_key *f_key, struct flow_value *f_value, struct tcphdr_flags tcp_flags) {
+	if (f_key->proto != IPPROTO_TCP)
 		return false;
 
-	// Mark the flow as finished
-	f_value->action = ACTION_NONE;
+	if (tcp_flags.fin) {
+		// Mark the flow as finished
+		f_value->action = ACTION_PASS_TEMP;
+		bpfw_info_key("FIN", f_key);
 
-	// Also mark the flow as finished for the reverse direction, if there is one
-	reverse_flow_key(f_key, f_value);
+		return true;
+	}
 
-	f_value = bpf_map_lookup_elem(&FLOW_MAP, f_key);
-	if (f_value)
-		f_value->action = ACTION_NONE;
+	if (tcp_flags.rst) {
+		// Mark the flow as finished
+		f_value->action = ACTION_PASS_TEMP;
 
-	bpfw_info_key(flags.fin ? "FIN" : "RST", f_key);
+		// Also mark the flow as finished for the reverse direction, if there is one
+		reverse_flow_key(f_key, &f_value->next);
 
-	return true;
+		f_value = bpf_map_lookup_elem(&BPFW_FLOW_MAP, f_key);
+		if (f_value)
+			f_value->action = ACTION_PASS_TEMP;
+
+		bpfw_info_key("RST", f_key);
+
+		return true;
+	}
+
+	return false;
+}
+
+__always_inline static void fill_flow_key(struct flow_key *f_key, __u32 ifindex, struct packet_header *header) {
+	f_key->ifindex = ifindex;
+
+	f_key->dsa_port = header->l2.dsa_port;
+	f_key->vlan_id  = header->l2.vlan_id;
+	f_key->pppoe_id = header->l2.pppoe_id;
+	
+	f_key->family = header->l3.family;
+	ipcpy_fill_zeros(f_key->src_ip, header->l3.src_ip, header->l3.family);
+	ipcpy_fill_zeros(f_key->dest_ip, header->l3.dest_ip, header->l3.family);
+
+	f_key->proto = header->l3.proto;
+	f_key->src_port = *header->l4.src_port;
+	f_key->dest_port = *header->l4.dest_port;
+
+	f_key->__pad = 0;
+}
+
+__always_inline static long create_new_flow_entry(struct flow_key *f_key, __u64 curr_time, void *src_mac) {
+	bpfw_info_key("NEW", f_key);
+
+	struct flow_value f_value = {};
+	memcpy(f_value.src_mac, src_mac, ETH_ALEN);
+	f_value.time = curr_time;
+
+	long rc = bpf_map_update_elem(&BPFW_FLOW_MAP, f_key, &f_value, BPF_NOEXIST);
+	if (rc != 0)
+		bpfw_warn("bpf_map_update_elem error: %d", rc);
+
+	return rc;
 }
 
 
@@ -75,68 +129,54 @@ __always_inline static bool tcp_finished(struct flow_key *f_key, struct flow_val
  * @param ctx The package contents and some metadata. Type is xdp_md for XDP and __sk_buff for TC programs.
  * @returns The action to be executed on the received package
 **/
-__always_inline static __u8 bpfw_func(void *ctx, bool xdp, struct packet_data *pkt, __u32 *out_ifindex) {
+__always_inline static __u8 bpfw_func(void *ctx, bool xdp, struct packet_data *pkt) {
+	__u64 curr_time = bpf_ktime_get_coarse_ns();
+	if (curr_time - user.last_time >= user.timeout) {
+		bpfw_warn("Userspace program doesn't respond anymore.");
+		return ACTION_PASS;
+	}
+
 	bpfw_debug("---------- New Package ----------");
 
-	struct l2_header l2;
-	if (!parse_l2_header(ctx, xdp, pkt, &l2))
+	struct packet_header header;
+	if (!parse_l2_header(ctx, xdp, pkt, &header.l2))
 		return ACTION_PASS;
 
-	struct l3_header l3;
-	if (!parse_l3_header(pkt, l2.proto, &l3))
+	if (!parse_l3_header(pkt, header.l2.proto, &header.l3))
 		return ACTION_PASS;
 
-	struct l4_header l4;
-	if (!parse_l4_header(pkt, l3.proto, &l4))
+	if (!parse_l4_header(pkt, header.l3.proto, &header.l4))
 		return ACTION_PASS;
 
 	// Fill the flow key
-	struct flow_key f_key = {};
-	f_key.ifindex = pkt->ifindex;
-	f_key.vlan_id = l2.vlan_id;
-	f_key.pppoe_id = l2.pppoe_id;
-	f_key.src_port = *l4.sport;
-	f_key.dest_port = *l4.dport;
-	f_key.dsa_port = l2.dsa_port;
-	f_key.family = l3.family;
-	f_key.proto = l3.proto;
+	struct flow_key f_key;
+	fill_flow_key(&f_key, pkt->ifindex.in, &header);
 
-	ipcpy(f_key.src_ip, l3.src_ip, l3.family);
-	ipcpy(f_key.dest_ip, l3.dest_ip, l3.family);
-
-	// Check if a conntrack entry exists
-	struct flow_value* f_value = bpf_map_lookup_elem(&FLOW_MAP, &f_key);
+	// Check if a flowtrack entry exists
+	struct flow_value* f_value = bpf_map_lookup_elem(&BPFW_FLOW_MAP, &f_key);
 	if (!f_value) {
-		bpfw_info_key("NEW", &f_key);
-
 		// If there is none, create a new one
-		struct flow_value f_value = {};
-		memcpy(f_value.src_mac, l2.src_mac, ETH_ALEN);
-
-		long rc = bpf_map_update_elem(&FLOW_MAP, &f_key, &f_value, BPF_NOEXIST);
-		if (rc != 0)
-			bpfw_warn("bpf_map_update_elem error: %d", rc);
-
+		create_new_flow_entry(&f_key, curr_time, header.l2.src_mac);
 		return ACTION_PASS;
 	}
 
 	// Reset the timeout
-	f_value->idle = 0;
+	f_value->time = curr_time;
 
 	switch (f_value->action) {
 		case ACTION_REDIRECT:
 			// Pass the package to the network stack if 
 			// there is a FIN or RST or the TTL expired
-			if (tcp_finished(&f_key, f_value, l4.tcp_flags) || *l3.ttl <= 1)
+			if (tcp_finished(&f_key, f_value, header.l4.tcp_flags))
 				return ACTION_PASS;
 
-			mangle_packet(&l3, &l4, &f_value->next);
+			mangle_packet(&header.l3, &header.l4, &f_value->next);
 
-			if (!push_l2_header(ctx, xdp, pkt, &l2, &f_value->next.hop))
+			if (!push_l2_header(ctx, xdp, pkt, &header.l2, &f_value->next.hop))
 				return ACTION_DROP;
 
-			bpfw_debug("Redirect to ifindex %u", f_value->next.hop.ifindex);
-			*out_ifindex = f_value->next.hop.ifindex;
+			pkt->ifindex.out = f_value->next.hop.ifindex;
+			bpfw_debug("Redirect to ifindex %u", pkt->ifindex.out);
 
 			break;
 
@@ -144,7 +184,6 @@ __always_inline static __u8 bpfw_func(void *ctx, bool xdp, struct packet_data *p
 			bpfw_debug("Drop package");
 			break;
 
-		case ACTION_PASS:
 		default:
 			bpfw_debug("Pass package");
 	}
@@ -153,59 +192,57 @@ __always_inline static __u8 bpfw_func(void *ctx, bool xdp, struct packet_data *p
 }
 
 
+#ifndef BPFW_NO_XDP
 SEC("xdp")
-int bpfw_xdp(struct xdp_md *xdp_md) {
+int BPFW_XDP_PROG(struct xdp_md *xdp_md) {
 	// Save pointer to the first and last Byte of the received package
 	struct packet_data pkt = {
-		.ifindex  = xdp_md->ingress_ifindex,
-		.data 	  = (void*)(long)xdp_md->data,
-		.data_end = (void*)(long)xdp_md->data_end,
-		.p 		  = (void*)(long)xdp_md->data
+		.ifindex.in = xdp_md->ingress_ifindex,
+		.data 	  	= (void*)(long)xdp_md->data,
+		.data_end 	= (void*)(long)xdp_md->data_end,
+		.p 		  	= (void*)(long)xdp_md->data
 	};
 
-	__u32 out_ifindex;
-	__u8 action = bpfw_func(xdp_md, true, &pkt, &out_ifindex);
-
+	__u8 action = bpfw_func(xdp_md, true, &pkt);
 	switch (action) {
 		case ACTION_REDIRECT:
-			if (pkt.ifindex == out_ifindex)
+			if (pkt.ifindex.in == pkt.ifindex.out)
 				return XDP_TX;
 
-			return bpf_redirect(out_ifindex, 0);
+			return bpf_redirect(pkt.ifindex.out, 0);
 
 		case ACTION_DROP:
 			return XDP_DROP;
 
-		case ACTION_PASS:
 		default:
 			return XDP_PASS;
 	}
 }
+#endif
 
+#ifndef BPFW_NO_TC
 SEC("tc")
-int bpfw_tc(struct __sk_buff *skb) {
+int BPFW_TC_PROG(struct __sk_buff *skb) {
 	// Save pointer to the first and last Byte of the received package
 	struct packet_data pkt = {
-		.ifindex  = skb->ingress_ifindex,
-		.data 	  = (void*)(long)skb->data,
-		.data_end = (void*)(long)skb->data_end,
-		.p 		  = (void*)(long)skb->data
+		.ifindex.in = skb->ingress_ifindex,
+		.data 	  	= (void*)(long)skb->data,
+		.data_end 	= (void*)(long)skb->data_end,
+		.p 		  	= (void*)(long)skb->data
 	};
 
-	__u32 out_ifindex;
-	__u8 action = bpfw_func(skb, false, &pkt, &out_ifindex);
-
+	__u8 action = bpfw_func(skb, false, &pkt);
 	switch (action) {
 		case ACTION_REDIRECT:
-			return bpf_redirect(out_ifindex, 0);
+			return bpf_redirect(pkt.ifindex.out, 0);
 
 		case ACTION_DROP:
 			return TC_ACT_SHOT;
 
-		case ACTION_PASS:
 		default:
 			return TC_ACT_UNSPEC;
 	}
 }
+#endif
 
 char _license[] SEC("license") = "GPL";

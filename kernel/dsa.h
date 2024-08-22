@@ -4,6 +4,8 @@
 #include "common_kern.h"
 
 
+#define __packed __attribute__((packed))
+
 #define parse_dsa_tag(tag, get_port) \
 	__always_inline static bool tag(struct packet_data *pkt, struct l2_header *l2) { \
 		check_header(struct tag, *tag, pkt) \

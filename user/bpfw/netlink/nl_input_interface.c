@@ -10,6 +10,8 @@
 
 #include "../logging/logging.h"
 
+#define INTERFACE_NOT_FOUND 1
+
 
 struct dump_interface_cb {
     __u32 lower_ifindex;
@@ -33,8 +35,9 @@ static int dump_interface(struct netlink_handle *nl_h, const char *kind, mnl_cb_
 
 
 static int check_if_bridge_slave(struct netlink_handle* nl_h, __u32 *ifindex) {
-    if (request_interface(nl_h, *ifindex) != BPFW_RC_OK)
-        return BPFW_RC_ERROR;
+    int rc = request_interface(nl_h, *ifindex);
+    if (rc != BPFW_RC_OK)
+        return rc;
 
     struct nlmsghdr *nlh = nl_h->req.buf;
     struct ifinfomsg *ifinfom = mnl_nlmsg_get_payload(nlh);
@@ -62,10 +65,7 @@ static int check_if_bridge_slave(struct netlink_handle* nl_h, __u32 *ifindex) {
         }
     }
 
-    /*const char *ifname = mnl_attr_get_str(ifla[IFLA_IFNAME]);
-    bpfw_verbose("-> %s", ifname);*/
-
-    return NL_INTERFACE_NOT_FOUND;
+    return INTERFACE_NOT_FOUND;
 }
 
 static int get_upper_interface(struct netlink_handle* nl_h, __u32 *ifindex, const char *kind, __u16 id, mnl_cb_t cb_func) {
@@ -76,11 +76,11 @@ static int get_upper_interface(struct netlink_handle* nl_h, __u32 *ifindex, cons
         return BPFW_RC_ERROR;
 
     if (!dump_data.upper_ifindex) {
-        rc = check_if_bridge_slave(nl_h, &dump_data.upper_ifindex);
+        rc = check_if_bridge_slave(nl_h, ifindex);
         if (rc != BPFW_RC_OK)
             return rc;
 
-        return get_upper_interface(nl_h, &dump_data.upper_ifindex, kind, id, cb_func);
+        return get_upper_interface(nl_h, ifindex, kind, id, cb_func);
     }
 
     *ifindex = dump_data.upper_ifindex;
@@ -111,8 +111,8 @@ static int get_dsa_cb(const struct nlmsghdr *nlh, void *data) {
     return MNL_CB_OK;
 }
 
-static int dsa_get_upper(struct netlink_handle* nl_h, __u32 *ifindex, __u8 dsa_port) {
-    return get_upper_interface(nl_h, ifindex, "dsa", dsa_port & ~DSA_PORT_SET, get_dsa_cb);
+static int dsa_get_upper(struct netlink_handle* nl_h, struct flow_key_value* flow) {
+    return get_upper_interface(nl_h, &flow->value.next.iif, "dsa", flow->key.dsa_port & ~DSA_PORT_SET, get_dsa_cb);
 }
 
 
@@ -133,7 +133,9 @@ static int get_vlan_cb(const struct nlmsghdr *nlh, void *data) {
     __u16 vlan_proto = mnl_attr_get_u16(ifla_vlan[IFLA_VLAN_PROTOCOL]);
     __u16 vlan_id = mnl_attr_get_u16(ifla_vlan[IFLA_VLAN_ID]);
 
-    if (lower_ifindex == dump_data->lower_ifindex && vlan_proto == htons(ETH_P_8021Q) && vlan_id == dump_data->id) {
+    if (lower_ifindex == dump_data->lower_ifindex &&
+        vlan_proto == htons(ETH_P_8021Q) && vlan_id == dump_data->id)
+    {
         const char *ifname = mnl_attr_get_str(ifla[IFLA_IFNAME]);
         bpfw_verbose("-> %s (vlan) ", ifname);
 
@@ -143,14 +145,15 @@ static int get_vlan_cb(const struct nlmsghdr *nlh, void *data) {
     return MNL_CB_OK;
 }
 
-static int vlan_get_upper(struct netlink_handle *nl_h, __u32 *ifindex, __u16 vlan_id) {
-    return get_upper_interface(nl_h, ifindex, "vlan", vlan_id, get_vlan_cb);
+static int vlan_get_upper(struct netlink_handle *nl_h, struct flow_key_value* flow) {
+    return get_upper_interface(nl_h, &flow->value.next.iif, "vlan", flow->key.vlan_id, get_vlan_cb);
 }
 
 
 static int check_pppoe_interface(struct netlink_handle *nl_h, __u32 ifindex) {
-    if (request_interface(nl_h, ifindex) != BPFW_RC_OK)
-        return BPFW_RC_ERROR;
+    int rc = request_interface(nl_h, ifindex);
+    if (rc != BPFW_RC_OK)
+        return rc;
 
     struct nlmsghdr *nlh = nl_h->req.buf;
     struct ifinfomsg *ifinfom = mnl_nlmsg_get_payload(nlh);
@@ -162,7 +165,7 @@ static int check_pppoe_interface(struct netlink_handle *nl_h, __u32 ifindex) {
 
     if (ifinfom->ifi_type != ARPHRD_PPP) {
         bpfw_verbose("-> %s isn't a PPPoE interface.\n", ifname);
-        return NL_INTERFACE_NOT_FOUND;
+        return INTERFACE_NOT_FOUND;
     }
 
     bpfw_verbose("-> %s (ppp) ", ifname);
@@ -170,49 +173,49 @@ static int check_pppoe_interface(struct netlink_handle *nl_h, __u32 ifindex) {
     return BPFW_RC_OK;
 }
 
-static int pppoe_get_upper(struct netlink_handle *nl_h, __u32 *ifindex, __be16 pppoe_id) {
+static int pppoe_get_upper(struct netlink_handle *nl_h, struct flow_key_value* flow) {
     struct pppoe *pppoe = &nl_h->pppoe;
 
-    if (pppoe->id == pppoe_id && pppoe->device == *ifindex) {
+    if (pppoe->id == flow->key.pppoe_id && pppoe->device == flow->value.next.iif &&
+        memcmp(pppoe->address, flow->value.src_mac, ETH_ALEN) == 0)
+    {
         if (check_pppoe_interface(nl_h, pppoe->ifindex) == BPFW_RC_OK) {
-            *ifindex = pppoe->ifindex;
+            flow->value.next.iif = pppoe->ifindex;
             return BPFW_RC_OK;
         }
     }
     else
-        bpfw_verbose("-> Couldn't retrieve PPPoE interface yet.\n");
+        bpfw_verbose("-> Didn't retrieve PPPoE interface yet.\n");
 
-    return NL_PPPOE_MISS;
+    return INTERFACE_NOT_FOUND;
 }
 
 
-int get_input_interface(struct netlink_handle* nl_h, struct flow_key* f_key, __u32 *iif) {
+int get_input_interface(struct netlink_handle* nl_h, struct flow_key_value* flow) {
     int rc;
-    *iif = f_key->ifindex;
+    flow->value.next.iif = flow->key.ifindex;
 
-    if (f_key->dsa_port) {
-        rc = dsa_get_upper(nl_h, iif, f_key->dsa_port);
+    if (flow->key.dsa_port) {
+        rc = dsa_get_upper(nl_h, flow);
         if (rc != BPFW_RC_OK)
             return rc;
     }
 
-    if (f_key->vlan_id) {
-        rc = vlan_get_upper(nl_h, iif, f_key->vlan_id);
+    if (flow->key.vlan_id) {
+        rc = vlan_get_upper(nl_h, flow);
         if (rc != BPFW_RC_OK)
             return rc;
     }
 
-    if (f_key->pppoe_id) {
-        rc = pppoe_get_upper(nl_h, iif, f_key->pppoe_id);
+    if (flow->key.pppoe_id) {
+        rc = pppoe_get_upper(nl_h, flow);
         if (rc != BPFW_RC_OK)
             return rc;
     }
 
-    while ((rc = check_if_bridge_slave(nl_h, iif)) == BPFW_RC_OK);
+    while ((rc = check_if_bridge_slave(nl_h, &flow->value.next.iif)) == BPFW_RC_OK);
     if (rc == BPFW_RC_ERROR)
         return BPFW_RC_ERROR;
-
-    bpfw_verbose("\n");
 
     return BPFW_RC_OK;
 }

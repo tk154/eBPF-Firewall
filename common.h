@@ -9,18 +9,25 @@
 #include <sys/socket.h>
 
 
-#define __packed __attribute__((packed))
+#define STRINGIFY(x) 				 #x
+#define BPFW_NAME(x) 				 STRINGIFY(x)  // Used to get the prog/map name as a string (used for user space programs)
 
-#define STRINGIFY(x)  #x
-#define MAP_NAME(map) STRINGIFY(map)           // Used to get the map name as a string (used for user space programs)
+#define BPFW_XDP_PROG				 bpfw_xdp
+#define BPFW_TC_PROG				 bpfw_tc
 
-#define FLOW_MAP      flow_map
-#define FLOW_MAP_NAME MAP_NAME(FLOW_MAP)
+#define XDP_PROG_NAME				 BPFW_NAME(BPFW_XDP_PROG)
+#define TC_PROG_NAME				 BPFW_NAME(BPFW_TC_PROG)
+
+#define BPFW_FLOW_MAP      		  	 bpfw_flows
+#define FLOW_MAP_NAME 		  		 BPFW_NAME(BPFW_FLOW_MAP)
+#define FLOW_MAP_DEFAULT_MAX_ENTRIES 1024
+
+#define USERSPACE_TIME_SECTION 		 ".bss.time"
+
+#define DSA_TAG_SECTION			  	 ".rodata.dsa.tag"
+#define DSA_SWITCH_SECTION		  	 ".bss.dsa.switch"
 
 #define DSA_PROTO_MAX_LEN 8
-
-#define DSA_TAG_SECTION		".rodata.dsa.tag"
-#define DSA_SWITCH_SECTION	".bss.dsa.switch"
 
 #define IPV4_ALEN 4
 #define IPV6_ALEN 16
@@ -28,50 +35,71 @@
 
 struct flow_key {
 	__u32  ifindex;
+
 	__u16  vlan_id;
 	__be16 pppoe_id;
+
 	__be16 src_port;
 	__be16 dest_port;
-	__u8   src_ip[IPV6_ALEN];
+
+	__u8   src_ip [IPV6_ALEN];
 	__u8   dest_ip[IPV6_ALEN];
+
 	__u8   dsa_port;
 	__u8   family;
 	__u8   proto;
+
+	__u8   __pad;
 };
 
 
 struct next_hop {
 	__u32  ifindex;
+
 	__u16  vlan_id;
 	__be16 pppoe_id;
-	__u8   src_mac[ETH_ALEN];
+
+	__u8   src_mac [ETH_ALEN];
 	__u8   dest_mac[ETH_ALEN];
+
 	__u8   dsa_port;
+
 	__s8   l2_diff;
 };
 
 struct nat_entry {
 	__sum16 l4_cksum_diff;
+
 	__be16  src_port;
 	__be16  dest_port;
-	__u8 	src_ip[IPV6_ALEN];
+
+	__u8 	src_ip [IPV6_ALEN];
 	__u8 	dest_ip[IPV6_ALEN];
+
 	__u8    rewrite_flag;
 };
 
 struct next_entry {
 	struct next_hop hop;
 	struct nat_entry nat;
+
+	__u32	iif, oif;
 	__sum16 ipv4_cksum_diff;
 };
 
 struct flow_value {
-	__u32 idle;
+	__u64 time;
 	__u8  src_mac[ETH_ALEN];
 	__u8  action;
+
 	struct next_entry next;
 };
 
+
+struct user_time {
+	__u64 timeout;
+	__u64 last_time;
+};
 
 struct dsa_switch {
 	__u32 ifindex;
@@ -90,12 +118,12 @@ struct vlanhdr {
 };
 
 struct pppoehdr {
-	__u8 vertype;
-	__u8 code;
+	__u8   vertype;
+	__u8   code;
 	__be16 sid;
 	__be16 length;
     __be16 proto;
-} __packed;
+};
 
 
 #define DSA_PORT_SET	(1U << 7)
@@ -105,18 +133,18 @@ enum {
 	ACTION_PASS,
 	ACTION_DROP,
 	ACTION_REDIRECT,
-	ACTION_PASS_FOR_NOW
+	ACTION_PASS_TEMP
 };
 
 enum {
-	REWRITE_SRC_IP    = (1U << 0),
-	REWRITE_DEST_IP   = (1U << 1),
-	REWRITE_SRC_PORT  = (1U << 2),
-	REWRITE_DEST_PORT = (1U << 3)
+	REWRITE_SRC_IP    = 1U << 0,
+	REWRITE_DEST_IP   = 1U << 1,
+	REWRITE_SRC_PORT  = 1U << 2,
+	REWRITE_DEST_PORT = 1U << 3
 };
 
 
-__always_inline static void* ipcpy(void *dest, const void* src, __u8 family) {
+static void *ipcpy(void *dest, const void* src, __u8 family) {
     switch (family) {
         case AF_INET:
             return memcpy(dest, src, IPV4_ALEN);

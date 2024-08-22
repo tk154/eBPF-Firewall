@@ -42,7 +42,7 @@ static __u32 get_xdp_flag(enum bpfw_hook hook) {
     }
 }
 
-static void* bpf_get_section_data(struct bpf_handle *bpf, const char *sec_name, size_t *sec_size) {
+static void *bpf_get_section_data(struct bpf_handle *bpf, const char *sec_name, size_t *sec_size) {
     // Find the .rodata section
     struct bpf_map *section = bpf_object__find_map_by_name(bpf->obj, sec_name);
     if (!section) {
@@ -174,6 +174,17 @@ void bpf_ifnames_detach_program(struct bpf_handle* bpf, char* ifnames[], unsigne
 }
 
 
+int bpf_get_map_fd(struct bpf_handle *bpf, const char *map_name) {
+    // Get the file descriptor of the BPF flow map
+    int map_fd = bpf_object__find_map_fd_by_name(bpf->obj, map_name);
+    if (map_fd < 0) {
+        bpfw_error("Error: Couldn't find BPF map %s.\n", map_name);
+        return BPFW_RC_ERROR;
+    }
+
+    return map_fd;
+}
+
 int bpf_set_map_max_entries(struct bpf_handle *bpf, const char *map_name, __u32 new_max_entries) {
     struct bpf_map *map = bpf_object__find_map_by_name(bpf->obj, map_name);
     if (!map) {
@@ -189,17 +200,6 @@ int bpf_set_map_max_entries(struct bpf_handle *bpf, const char *map_name, __u32 
     }
 
     return BPFW_RC_OK;
-}
-
-int bpf_get_map_fd(struct bpf_handle *bpf, const char *map_name) {
-    // Get the file descriptor of the BPF flow map
-    int map_fd = bpf_object__find_map_fd_by_name(bpf->obj, map_name);
-    if (map_fd < 0) {
-        bpfw_error("Error: Couldn't find BPF map %s.\n", map_name);
-        return BPFW_RC_ERROR;
-    }
-
-    return map_fd;
 }
 
 int bpf_check_dsa(struct bpf_handle *bpf, __u32 dsa_switch, const char *dsa_proto, struct dsa_tag **dsa_tag) {
@@ -245,16 +245,14 @@ struct bpf_handle* bpf_open_object(const char *obj_path, enum bpfw_hook hook) {
 
     bpf->hook = hook;
 
-    const char *prog_name;
-    enum bpf_prog_type prog_type;
-
+    const char *load_prog, *unload_prog;
     if (hook & BPFW_HOOK_XDP) {
-        prog_name = "bpfw_xdp";
-        prog_type = BPF_PROG_TYPE_XDP;
+        load_prog   = XDP_PROG_NAME;
+        unload_prog = TC_PROG_NAME;
     }
     else {
-        prog_name = "bpfw_tc";
-        prog_type = BPF_PROG_TYPE_SCHED_CLS;
+        load_prog   = TC_PROG_NAME;
+        unload_prog = XDP_PROG_NAME;
     }
 
     // Try to open the BPF object file, return on error
@@ -264,13 +262,15 @@ struct bpf_handle* bpf_open_object(const char *obj_path, enum bpfw_hook hook) {
         goto free;
     }
 
-    bpf->prog = bpf_object__find_program_by_name(bpf->obj, prog_name);
+    bpf->prog = bpf_object__find_program_by_name(bpf->obj, load_prog);
     if (!bpf->prog) {
-        bpfw_error("Couldn't find %s BPF program in %s.\n", prog_name, obj_path);
+        bpfw_error("Couldn't find %s BPF program in %s.\n", load_prog, obj_path);
         goto bpf_object__close;
     }
-    
-    bpf_program__set_type(bpf->prog, prog_type);
+
+    struct bpf_program *bpf_unload_prog = bpf_object__find_program_by_name(bpf->obj, unload_prog);
+    if (bpf_unload_prog)
+        bpf_program__set_autoload(bpf_unload_prog, false);
 
     return bpf;
 
@@ -288,10 +288,10 @@ int bpf_load_program(struct bpf_handle* bpf) {
     // Try to load the BPF object into the kernel, return on error
     if (bpf_object__load(bpf->obj) != 0) {
         bpfw_error("Error loading BPF program into kernel: %s (-%d).\n", strerror(errno), errno);
-        return -1;
+        return BPFW_RC_ERROR;
     }
 
-    return 0;
+    return BPFW_RC_OK;
 }
 
 void bpf_unload_program(struct bpf_handle* bpf) {

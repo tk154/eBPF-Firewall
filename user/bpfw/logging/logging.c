@@ -161,8 +161,8 @@ void bpfw_log_next_hop(unsigned int log_level, const char *prefix, struct next_h
         fprintf(stdlog, " pppoe=0x%hx", ntohs(next_h->pppoe_id));
 
     fprintf(stdlog, " %02x:%02x:%02x:%02x:%02x:%02x\n",
-        next_h->src_mac[0], next_h->src_mac[1], next_h->src_mac[2],
-        next_h->src_mac[3], next_h->src_mac[4], next_h->src_mac[5]);
+        next_h->dest_mac[0], next_h->dest_mac[1], next_h->dest_mac[2],
+        next_h->dest_mac[3], next_h->dest_mac[4], next_h->dest_mac[5]);
 }
 
 void bpfw_log_route_type(unsigned int log_level, const char *prefix, unsigned char rtm_type) {
@@ -215,24 +215,23 @@ void bpfw_log_action(unsigned int log_level, const char *prefix, __u8 action) {
     fputs(prefix, stdlog);
 
     switch (action) {
-        case ACTION_PASS:
-            fputs("Pass\n", stdlog);
+        case ACTION_REDIRECT:
+            fputs("Redirect\n", stdlog);
             break;
 
         case ACTION_DROP:
             fputs("Drop\n", stdlog);
             break;
 
-        case ACTION_REDIRECT:
-            fputs("Redirect\n", stdlog);
-            break;
-
-        case ACTION_PASS_FOR_NOW:
-            fputs("Pass (for now)\n", stdlog);
+        case ACTION_PASS:
+            fputs("Pass\n", stdlog);
             break;
 
         default:
-            fputs("None\n", stdlog);
+            if (action & ACTION_PASS_TEMP)
+                fputs("Pass (temp)\n", stdlog);
+            else
+                fputs("?\n", stdlog);
     }
 }
 

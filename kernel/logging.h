@@ -84,10 +84,10 @@ __always_inline static void bpf_log_key(const char *header, struct flow_key *f_k
         bpf_log_ipv4("Src IPv4: ", &f_key->src_ip);
         bpf_log_ipv4("Dst IPv4: ", &f_key->dest_ip);
     }
-    else {
+    /*else {
         bpf_log_ipv6("Src IPv6: ", &f_key->src_ip);
         bpf_log_ipv6("Dst IPv6: ", &f_key->dest_ip);
-    }
+    }*/
 
     if (f_key->proto == IPPROTO_TCP) {
         bpf_printk("TCP Src Port: %u", bpf_ntohs(f_key->src_port));
