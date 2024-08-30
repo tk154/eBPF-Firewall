@@ -122,20 +122,25 @@ static int write_conntrack_sysfs_value(const char *filename, unsigned int value)
 }
 
 
-static bool tcp_not_established(struct nf_conntrack *ct) {
-    return nfct_get_attr_u8(ct, ATTR_L4PROTO) == IPPROTO_TCP &&
-        nfct_get_attr_u8(ct, ATTR_TCP_STATE) != TCP_CONNTRACK_ESTABLISHED;
-}
-
 // Callback to retrieve a specific conntrack entry
 static int nfct_get_cb(enum nf_conntrack_msg_type type, struct nf_conntrack *ct, void *data) {
     struct nfct_get_cb_args *args = data;
+    __u8 proto = nfct_get_attr_u8(ct, ATTR_L4PROTO);
 
-    if (tcp_not_established(ct)) {
-        // If the flow isn't established yet or anymore,
-        // the BPF program shouldn't forward its packages
-        args->state = CT_CONN_NOT_ESTABLISHED;
-        return NFCT_CB_CONTINUE;
+    if (proto == IPPROTO_TCP) {
+        __u32 status = nfct_get_attr_u32(ct, ATTR_STATUS);
+        if (status & IPS_OFFLOAD) {
+            args->state = CT_CONN_FLOWTABLE_OFFLOAD;
+            return NFCT_CB_CONTINUE;
+        }
+
+        __u8 tcp_state = nfct_get_attr_u8(ct, ATTR_TCP_STATE);
+        if (tcp_state != TCP_CONNTRACK_ESTABLISHED) {
+            // If the flow isn't established yet or anymore,
+            // the BPF program shouldn't forward its packages
+            args->state = CT_CONN_NOT_ESTABLISHED;
+            return NFCT_CB_CONTINUE;
+        }
     }
 
     // Mark the flow as established so that the BPF program can take over now

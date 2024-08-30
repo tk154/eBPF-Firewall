@@ -213,6 +213,11 @@ static int connection_not_found(struct flowtrack_handle *flowtrack_h, struct flo
     return FLOW_MAP_NEEDS_UPDATE;
 }
 
+static void connection_flowtable_offload(struct flow_key_value *flow) {
+    if (flow->value.action == ACTION_NONE)
+        bpfw_debug_key("\nConnection is offloaded to flowtable. Cannot read TCP state.\n", &flow->key);
+}
+
 static int connection_not_established(struct flow_value *f_value) {
     /* It could be possible that we have received the package here through the BPF map
     *  before it was processed by nf_conntrack, or it has been dropped
@@ -295,6 +300,9 @@ static int handle_bpf_entry(struct flowtrack_handle *flowtrack_h, struct flow_ke
         case CT_CONN_NOT_FOUND:
             rc = connection_not_found(flowtrack_h, flow);
             break;
+
+        case CT_CONN_FLOWTABLE_OFFLOAD:
+            connection_flowtable_offload(flow);
 
         case CT_CONN_NOT_ESTABLISHED:
             rc = connection_not_established(&flow->value);
