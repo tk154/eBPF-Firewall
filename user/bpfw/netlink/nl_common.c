@@ -185,10 +185,6 @@ int request_interface(struct netlink_handle* nl_h, __u32 ifindex) {
         case BPFW_RC_ERROR:
             return rc;
 
-        case ENODEV:
-            bpfw_debug("Device with ifindex %u is gone.\n", ifindex);
-            return INTERFACE_NOT_FOUND;
-
         default:
             bpfw_error_ifindex("Error retrieving link information for ", ifindex, "", rc);
             return BPFW_RC_ERROR;

@@ -311,23 +311,26 @@ static int get_route(struct netlink_handle* nl_h, struct flow_key_value* flow, v
 
     // Send request and receive response
     int rc = send_request(nl_h);
+    __u8 rtm_type;
+
     switch (rc) {
         case BPFW_RC_OK:
+            rtm_type = rtm->rtm_type;
             break;
 
         case BPFW_RC_ERROR:
             return BPFW_RC_ERROR;
 
         case EINVAL:
-            rtm->rtm_type = RTN_BLACKHOLE;
+            rtm_type = RTN_BLACKHOLE;
             break;
 
         case EHOSTUNREACH:
-            rtm->rtm_type = RTN_UNREACHABLE;
+            rtm_type = RTN_UNREACHABLE;
             break;
 
         case EACCES:
-            rtm->rtm_type = RTN_PROHIBIT;
+            rtm_type = RTN_PROHIBIT;
             break;
 
         default:
@@ -337,9 +340,9 @@ static int get_route(struct netlink_handle* nl_h, struct flow_key_value* flow, v
             return ACTION_PASS;
     }
 
-    bpfw_verbose_route_type("-> ", rtm->rtm_type);
+    bpfw_verbose_route_type("-> ", rtm_type);
 
-    switch (rtm->rtm_type) {
+    switch (rtm_type) {
         case RTN_UNICAST:
             break;
 
@@ -371,21 +374,24 @@ static int get_route(struct netlink_handle* nl_h, struct flow_key_value* flow, v
     return ACTION_REDIRECT;
 }
 
-static int get_input_interface_and_route(struct netlink_handle* nl_h, struct flow_key_value* flow, void *dest_ip) {
+static int get_iif_and_route(struct netlink_handle* nl_h, struct flow_key_value* flow, void *dest_ip) {
     int rc = get_input_interface(nl_h, flow);
-    if (rc == BPFW_RC_ERROR)
-        return BPFW_RC_ERROR;
+    switch (rc) {
+        case BPFW_RC_OK:
+            break;
 
-    if (rc != BPFW_RC_OK) {
-        flow->value.action = ACTION_PASS_TEMP;
-        return rc;
+        case BPFW_RC_ERROR:
+            return BPFW_RC_ERROR;
+
+        default:
+            return ACTION_PASS_TEMP;
     }
 
     return get_route(nl_h, flow, dest_ip);
 }
 
 int netlink_get_route(struct netlink_handle* nl_h, struct flow_key_value* flow) {
-    int rc = get_input_interface_and_route(nl_h, flow, NULL);
+    int rc = get_iif_and_route(nl_h, flow, NULL);
     if (rc == ACTION_REDIRECT)
         bpfw_verbose_ifindex("-> ", flow->value.next.hop.ifindex, "", 0);
 
@@ -395,7 +401,7 @@ int netlink_get_route(struct netlink_handle* nl_h, struct flow_key_value* flow) 
 int netlink_get_next_hop(struct netlink_handle* nl_h, struct flow_key_value* flow) {
     __u8 dest_ip[IPV6_ALEN];
 
-    int rc = get_input_interface_and_route(nl_h, flow, dest_ip);
+    int rc = get_iif_and_route(nl_h, flow, dest_ip);
     if (rc != ACTION_REDIRECT)
         return rc;
 

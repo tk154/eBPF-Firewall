@@ -20,8 +20,6 @@
 #include "../ucode/ucode.h"
 #endif
 
-#define FLOW_MAP_NEEDS_UPDATE 1
-
 
 struct flowtrack_handle {
     enum bpfw_hook hook;
@@ -184,6 +182,10 @@ static int new_bpf_interface(__u32 ifindex, void *data) {
 
 
 static int connection_not_found(struct flowtrack_handle *flowtrack_h, struct flow_key_value *flow) {
+    /* It could be possible that we have received the package here through the BPF map
+    *  before it was processed by nf_conntrack, or it has been dropped
+    */
+
     if (flow->value.action != ACTION_NONE)
         return BPFW_RC_OK;
 
@@ -203,14 +205,14 @@ static int connection_not_found(struct flowtrack_handle *flowtrack_h, struct flo
     }
 
 #ifdef OPENWRT_UCODE
-    if (rc != ACTION_DROP)
-        if (ucode_match_rule(flowtrack_h->ucode_h, flow) == BPFW_RC_ERROR)
+    if (rc != ACTION_DROP &&
+        ucode_match_rule(flowtrack_h->ucode_h, flow) != BPFW_RC_OK)
             return BPFW_RC_ERROR;
 #endif
 
     bpfw_debug_action("Act: ", flow->value.action);
 
-    return FLOW_MAP_NEEDS_UPDATE;
+    return BPFW_RC_OK;
 }
 
 static void connection_flowtable_offload(struct flow_key_value *flow) {
@@ -219,27 +221,18 @@ static void connection_flowtable_offload(struct flow_key_value *flow) {
 }
 
 static int connection_not_established(struct flow_value *f_value) {
-    /* It could be possible that we have received the package here through the BPF map
-    *  before it was processed by nf_conntrack, or it has been dropped
-    */
-    if (f_value->action != ACTION_PASS_TEMP) {
-        f_value->action = ACTION_PASS_TEMP;
-        return FLOW_MAP_NEEDS_UPDATE;
-    }
+    f_value->action = ACTION_PASS_TEMP;
 
     return BPFW_RC_OK;
 }
 
 static int connection_established(struct flowtrack_handle *flowtrack_h, struct flow_key_value *flow, __u32 last_packet_sec_ago) {
-    int rc = BPFW_RC_OK;
-
     switch (flow->value.action) {
-        case ACTION_NONE:
         case ACTION_PASS_TEMP:
-            bpfw_debug_key("\nCon: ", &flow->key);
+            memset(&flow->value.next, 0, sizeof(flow->value.next));
 
-            if (flow->value.action & ACTION_PASS_TEMP)
-                memset(&flow->value.next, 0, sizeof(flow->value.next));
+        case ACTION_NONE:
+            bpfw_debug_key("\nCon: ", &flow->key);
 
             // Since the TTL is decremented, we must increment the checksum for IPv4
             if (flow->key.family == AF_INET)
@@ -248,10 +241,10 @@ static int connection_established(struct flowtrack_handle *flowtrack_h, struct f
             // Check for NAT
             conntrack_check_nat(flowtrack_h->handle.conntrack, flow);
             
-            rc = netlink_get_next_hop(flowtrack_h->handle.netlink, flow);
+            int rc = netlink_get_next_hop(flowtrack_h->handle.netlink, flow);
             switch (rc) {
                 case BPFW_RC_ERROR:
-                    goto free_ct_entry;
+                    return BPFW_RC_ERROR;
 
                 case ACTION_REDIRECT:
                     if (calc_l2_diff(flowtrack_h, flow) != BPFW_RC_OK) {
@@ -264,21 +257,16 @@ static int connection_established(struct flowtrack_handle *flowtrack_h, struct f
             }
             
             bpfw_debug_action("Act: ", flow->value.action);
-
-            rc = FLOW_MAP_NEEDS_UPDATE;
             break;
 
         case ACTION_REDIRECT:
             // If there was a new package, update the nf_conntrack timeout
-            if (last_packet_sec_ago < flowtrack_h->map_poll_sec)
-                if (conntrack_update_timeout(flowtrack_h->handle.conntrack) != BPFW_RC_OK)
-                    rc = BPFW_RC_ERROR;
+            if (last_packet_sec_ago < flowtrack_h->map_poll_sec &&
+                conntrack_update_timeout(flowtrack_h->handle.conntrack) != BPFW_RC_OK)
+                    return BPFW_RC_ERROR;
     }
 
-free_ct_entry:
-    conntrack_free_ct_entry(flowtrack_h->handle.conntrack);
-
-    return rc;
+    return BPFW_RC_OK;
 }
 
 
@@ -292,7 +280,8 @@ static int handle_bpf_entry(struct flowtrack_handle *flowtrack_h, struct flow_ke
         // Flow timeout occured, so delete it from the BPF map
         return delete_bpf_entry(flowtrack_h->map_fd.flow, &flow->key);
 
-    if (flow->value.action == ACTION_DROP)
+    __u8 action = flow->value.action;
+    if (action == ACTION_DROP)
         return BPFW_RC_OK;
 
     int rc = conntrack_do_lookup(flowtrack_h->handle.conntrack, flow);
@@ -310,13 +299,14 @@ static int handle_bpf_entry(struct flowtrack_handle *flowtrack_h, struct flow_ke
 
         case CT_CONN_ESTABLISHED:
             rc = connection_established(flowtrack_h, flow, last_packet_sec_ago);
+            conntrack_free_ct_entry(flowtrack_h->handle.conntrack);
             break;
 
         default:
             return BPFW_RC_ERROR;
     }
 
-    if (rc != FLOW_MAP_NEEDS_UPDATE)
+    if (rc != BPFW_RC_OK || action == flow->value.action)
         return rc;
 
     return update_bpf_entry(flowtrack_h->map_fd.flow, flow);

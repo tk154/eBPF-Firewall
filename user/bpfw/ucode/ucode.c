@@ -100,7 +100,7 @@ static void vm_add_objects(uc_value_t *vm_scope, struct flow_key_value *flow) {
 	if_indextoname(flow->value.next.iif, iifname);
 	ucv_object_add(vm_scope, "iif", ucv_string_new(iifname));
 
-	if (flow->value.action == ACTION_REDIRECT) {
+	if (flow->value.next.oif) {
 		char oifname[IF_NAMESIZE];
 		if_indextoname(flow->value.next.oif, oifname);
 		ucv_object_add(vm_scope, "oif", ucv_string_new(oifname));
@@ -138,10 +138,8 @@ static int get_firewall_action(uc_value_t *last_expression_result, __u8 *action)
 	char *name   = ucv_string_get(name_obj);
 	char *target = ucv_string_get(target_obj);
 
-	if (!target || strcmp(target, "accept") == 0)
-		*action = ACTION_PASS_TEMP;
-	else if (strcmp(target, "reject") == 0)
-		*action = ACTION_PASS_TEMP;
+	if (!target || strcmp(target, "accept") == 0 || strcmp(target, "reject") == 0)
+		*action = ACTION_NONE;
 	else if (strcmp(target, "drop") == 0)
 		*action = ACTION_DROP;
 	else {
@@ -196,7 +194,7 @@ int ucode_match_rule(struct ucode_handle *ucode_h, struct flow_key_value *flow) 
 	int rc = uc_vm_execute(&vm, ucode_h->program, &last_expression_result);
 
 	/* handle return status */
-	rc = handle_result(rc, last_expression_result, &flow->value.action);
+	rc = handle_result(rc, last_expression_result, &flow->value.state);
 
 	/* free last expression result */
 	ucv_put(last_expression_result);

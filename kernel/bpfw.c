@@ -112,9 +112,12 @@ __always_inline static void fill_flow_key(struct flow_key *f_key, __u32 ifindex,
 __always_inline static long create_new_flow_entry(struct flow_key *f_key, __u64 curr_time, void *src_mac) {
 	bpfw_info_key("NEW", f_key);
 
-	struct flow_value f_value = {};
-	memcpy(f_value.src_mac, src_mac, ETH_ALEN);
+	struct flow_value f_value;
+	f_value.action = ACTION_NONE;
 	f_value.time = curr_time;
+
+	memcpy(f_value.src_mac, src_mac, ETH_ALEN);
+	memset(&f_value.next, 0, sizeof(f_value.next));
 
 	long rc = bpf_map_update_elem(&BPFW_FLOW_MAP, f_key, &f_value, BPF_NOEXIST);
 	if (rc != 0)
