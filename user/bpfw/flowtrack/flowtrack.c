@@ -52,6 +52,10 @@ static __u64 time_get_coarse_ns() {
     return ts.tv_sec * (__u64)1e9 + ts.tv_nsec;
 }
 
+static __u32 time_ns_to_sec(__u64 ns) {
+    return (__u32)(ns / (__u64)1e9);
+}
+
 static int update_userspace_time(struct flowtrack_handle *flowtrack_h, __u64 curr_time) {
     unsigned int index = 0;
 
@@ -271,7 +275,7 @@ static int connection_established(struct flowtrack_handle *flowtrack_h, struct f
 
 
 static int handle_bpf_entry(struct flowtrack_handle *flowtrack_h, struct flow_key_value *flow, __u32 time_sec) {
-    __u32 flow_time_sec = flow->value.time / (__u64)1e9;
+    __u32 flow_time_sec = time_ns_to_sec(flow->value.time);
     __u32 flow_timeout = flow->key.proto == IPPROTO_TCP ?
         flowtrack_h->flow_timeout.tcp : flowtrack_h->flow_timeout.udp;
 
@@ -316,7 +320,7 @@ int flowtrack_update(struct flowtrack_handle* flowtrack_h) {
     struct flow_key_value flow;
 
     __u64 time_ns  = time_get_coarse_ns();
-    __u32 time_sec = time_ns / (__u64)1e9;
+    __u32 time_sec = time_ns_to_sec(time_ns);
 
     // Iterate through all the flow entries
     bpf_flow_map_for_each_entry(flowtrack_h->map_fd.flow, flow, {

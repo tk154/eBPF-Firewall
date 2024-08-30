@@ -31,6 +31,11 @@ __u64 time_get_coarse_ns() {
     return ts.tv_sec * (__u64)1e9 + ts.tv_nsec;
 }
 
+__u32 time_ns_to_sec(__u64 ns) {
+    return (__u32)(ns / (__u64)1e9);
+}
+
+
 int print_ifname(__u32 ifindex) {
     char ifname[IF_NAMESIZE];
     if_indextoname(ifindex, ifname);
@@ -51,7 +56,7 @@ int print_pppoe(__be16 pppoe_id) {
 }
 
 int print_idle(__u64 flow_ns, __u64 curr_ns) {
-    return printf(" idle=%u", (__u32)((curr_ns - flow_ns) / (__u64)1e9));
+    return printf(" idle=%u", time_ns_to_sec(curr_ns - flow_ns));
 }
 
 int print_proto(__u8 proto) {
