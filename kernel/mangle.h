@@ -44,7 +44,7 @@ __always_inline static void apply_nat(struct l3_header* l3, struct l4_header* l4
 	if (n_entry->rewrite_flag & REWRITE_DEST_PORT)
 		*l4->dest_port = n_entry->dest_port;
 
-	if (*l4->cksum)
+	if (l3->proto == IPPROTO_TCP || *l4->cksum)
 		// Adjust the L4 checksum
 		cksum_add(l4->cksum, n_entry->l4_cksum_diff);
 }
