@@ -277,10 +277,8 @@ static int get_link(struct netlink_handle* nl_h, __u32 ifindex, struct flow_key_
             return NO_NEXT_HOP;
     }
 
-    if (rc != BPFW_RC_OK) {
-        flow->value.action = ACTION_PASS;
+    if (rc != BPFW_RC_OK)
         return rc;
-    }
 
     if (flow->value.next.hop.ifindex != ifindex)
         rc = get_link(nl_h, flow->value.next.hop.ifindex, flow, dest_ip);
@@ -371,7 +369,7 @@ static int get_route(struct netlink_handle* nl_h, struct flow_key_value* flow, v
         ipcpy(dest_ip, mnl_attr_get_payload(attr[dest_attr]), flow->key.family);
     }
 
-    return ACTION_REDIRECT;
+    return ACTION_FORWARD;
 }
 
 static int get_iif_and_route(struct netlink_handle* nl_h, struct flow_key_value* flow, void *dest_ip) {
@@ -384,7 +382,7 @@ static int get_iif_and_route(struct netlink_handle* nl_h, struct flow_key_value*
             return BPFW_RC_ERROR;
 
         default:
-            return ACTION_PASS_TEMP;
+            return ACTION_NONE;
     }
 
     return get_route(nl_h, flow, dest_ip);
@@ -392,7 +390,7 @@ static int get_iif_and_route(struct netlink_handle* nl_h, struct flow_key_value*
 
 int netlink_get_route(struct netlink_handle* nl_h, struct flow_key_value* flow) {
     int rc = get_iif_and_route(nl_h, flow, NULL);
-    if (rc == ACTION_REDIRECT)
+    if (rc == ACTION_FORWARD)
         bpfw_verbose_ifindex("-> ", flow->value.next.hop.ifindex, "", 0);
 
     return rc;
@@ -402,7 +400,7 @@ int netlink_get_next_hop(struct netlink_handle* nl_h, struct flow_key_value* flo
     __u8 dest_ip[IPV6_ALEN];
 
     int rc = get_iif_and_route(nl_h, flow, dest_ip);
-    if (rc != ACTION_REDIRECT)
+    if (rc != ACTION_FORWARD)
         return rc;
 
     rc = get_link(nl_h, flow->value.next.oif, flow, dest_ip);
@@ -411,5 +409,5 @@ int netlink_get_next_hop(struct netlink_handle* nl_h, struct flow_key_value* flo
 
     bpfw_verbose_next_hop("-> ", &flow->value.next.hop);
 
-    return ACTION_REDIRECT;
+    return ACTION_FORWARD;
 }

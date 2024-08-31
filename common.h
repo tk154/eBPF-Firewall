@@ -90,7 +90,7 @@ struct next_entry {
 struct flow_value {
 	__u64 time;
 	__u8  src_mac[ETH_ALEN];
-	__u8  action;
+	__u8  state;
 
 	struct next_entry next;
 };
@@ -129,11 +129,19 @@ struct pppoehdr {
 #define DSA_PORT_SET	(1U << 7)
 
 enum {
-	ACTION_NONE,
-	ACTION_PASS,
-	ACTION_DROP,
-	ACTION_REDIRECT,
-	ACTION_PASS_TEMP
+	STATE_NEW_FLOW,
+
+	STATE_NONE,
+	ACTION_NONE = STATE_NONE,
+
+	STATE_PASS,
+	ACTION_PASS = STATE_PASS,
+
+	STATE_DROP,
+	ACTION_DROP = STATE_DROP,
+
+	STATE_FORWARD,
+	ACTION_FORWARD = STATE_FORWARD,
 };
 
 enum {

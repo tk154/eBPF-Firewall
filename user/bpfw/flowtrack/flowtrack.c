@@ -190,7 +190,7 @@ static int connection_not_found(struct flowtrack_handle *flowtrack_h, struct flo
     *  before it was processed by nf_conntrack, or it has been dropped
     */
 
-    if (flow->value.action != ACTION_NONE)
+    if (flow->value.state != STATE_NEW_FLOW)
         return BPFW_RC_OK;
 
     bpfw_debug_key("\nNon: ", &flow->key);
@@ -200,12 +200,12 @@ static int connection_not_found(struct flowtrack_handle *flowtrack_h, struct flo
         case BPFW_RC_ERROR:
             return BPFW_RC_ERROR;
 
-        case ACTION_REDIRECT:
-            flow->value.action = ACTION_PASS_TEMP;
+        case ACTION_FORWARD:
+            flow->value.state = STATE_NONE;
             break;
 
         default:
-            flow->value.action = rc;
+            flow->value.state = rc;
     }
 
 #ifdef OPENWRT_UCODE
@@ -214,28 +214,28 @@ static int connection_not_found(struct flowtrack_handle *flowtrack_h, struct flo
             return BPFW_RC_ERROR;
 #endif
 
-    bpfw_debug_action("Act: ", flow->value.action);
+    bpfw_debug_action("Act: ", flow->value.state);
 
     return BPFW_RC_OK;
 }
 
 static void connection_flowtable_offload(struct flow_key_value *flow) {
-    if (flow->value.action == ACTION_NONE)
+    if (flow->value.state == STATE_NEW_FLOW)
         bpfw_debug_key("\nConnection is offloaded to flowtable. Cannot read TCP state.\n", &flow->key);
 }
 
 static int connection_not_established(struct flow_value *f_value) {
-    f_value->action = ACTION_PASS_TEMP;
+    f_value->state = STATE_NONE;
 
     return BPFW_RC_OK;
 }
 
 static int connection_established(struct flowtrack_handle *flowtrack_h, struct flow_key_value *flow, __u32 last_packet_sec_ago) {
-    switch (flow->value.action) {
-        case ACTION_PASS_TEMP:
+    switch (flow->value.state) {
+        case STATE_NONE:
             memset(&flow->value.next, 0, sizeof(flow->value.next));
 
-        case ACTION_NONE:
+        case STATE_NEW_FLOW:
             bpfw_debug_key("\nCon: ", &flow->key);
 
             // Since the TTL is decremented, we must increment the checksum for IPv4
@@ -250,20 +250,20 @@ static int connection_established(struct flowtrack_handle *flowtrack_h, struct f
                 case BPFW_RC_ERROR:
                     return BPFW_RC_ERROR;
 
-                case ACTION_REDIRECT:
+                case ACTION_FORWARD:
                     if (calc_l2_diff(flowtrack_h, flow) != BPFW_RC_OK) {
-                        flow->value.action = ACTION_PASS;
+                        flow->value.state = STATE_PASS;
                         break;
                     }
 
                 default:
-                    flow->value.action = rc;
+                    flow->value.state = rc;
             }
             
-            bpfw_debug_action("Act: ", flow->value.action);
+            bpfw_debug_action("Act: ", flow->value.state);
             break;
 
-        case ACTION_REDIRECT:
+        case STATE_FORWARD:
             // If there was a new package, update the nf_conntrack timeout
             if (last_packet_sec_ago < flowtrack_h->map_poll_sec &&
                 conntrack_update_timeout(flowtrack_h->handle.conntrack) != BPFW_RC_OK)
@@ -284,8 +284,8 @@ static int handle_bpf_entry(struct flowtrack_handle *flowtrack_h, struct flow_ke
         // Flow timeout occured, so delete it from the BPF map
         return delete_bpf_entry(flowtrack_h->map_fd.flow, &flow->key);
 
-    __u8 action = flow->value.action;
-    if (action == ACTION_DROP)
+    __u8 state = flow->value.state;
+    if (state == STATE_DROP)
         return BPFW_RC_OK;
 
     int rc = conntrack_do_lookup(flowtrack_h->handle.conntrack, flow);
@@ -310,7 +310,7 @@ static int handle_bpf_entry(struct flowtrack_handle *flowtrack_h, struct flow_ke
             return BPFW_RC_ERROR;
     }
 
-    if (rc != BPFW_RC_OK || action == flow->value.action)
+    if (rc != BPFW_RC_OK || state == flow->value.state)
         return rc;
 
     return update_bpf_entry(flowtrack_h->map_fd.flow, flow);

@@ -66,7 +66,7 @@ __always_inline static bool tcp_finished(struct flow_key *f_key, struct flow_val
 
 	if (tcp_flags.fin) {
 		// Mark the flow as finished
-		f_value->action = ACTION_PASS_TEMP;
+		f_value->state = STATE_NONE;
 		bpfw_info_key("FIN", f_key);
 
 		return true;
@@ -74,14 +74,14 @@ __always_inline static bool tcp_finished(struct flow_key *f_key, struct flow_val
 
 	if (tcp_flags.rst) {
 		// Mark the flow as finished
-		f_value->action = ACTION_PASS_TEMP;
+		f_value->state = STATE_NONE;
 
 		// Also mark the flow as finished for the reverse direction, if there is one
 		reverse_flow_key(f_key, &f_value->next);
 
 		f_value = bpf_map_lookup_elem(&BPFW_FLOW_MAP, f_key);
 		if (f_value)
-			f_value->action = ACTION_PASS_TEMP;
+			f_value->state = STATE_NONE;
 
 		bpfw_info_key("RST", f_key);
 
@@ -113,7 +113,7 @@ __always_inline static long create_new_flow_entry(struct flow_key *f_key, __u64 
 	bpfw_info_key("NEW", f_key);
 
 	struct flow_value f_value;
-	f_value.action = ACTION_NONE;
+	f_value.state = STATE_NEW_FLOW;
 	f_value.time = curr_time;
 
 	memcpy(f_value.src_mac, src_mac, ETH_ALEN);
@@ -166,8 +166,8 @@ __always_inline static __u8 bpfw_func(void *ctx, bool xdp, struct packet_data *p
 	// Reset the timeout
 	f_value->time = curr_time;
 
-	switch (f_value->action) {
-		case ACTION_REDIRECT:
+	switch (f_value->state) {
+		case STATE_FORWARD:
 			// Pass the package to the network stack if 
 			// there is a FIN or RST or the TTL expired
 			if (tcp_finished(&f_key, f_value, header.l4.tcp_flags))
@@ -183,15 +183,16 @@ __always_inline static __u8 bpfw_func(void *ctx, bool xdp, struct packet_data *p
 
 			break;
 
-		case ACTION_DROP:
+		case STATE_DROP:
 			bpfw_debug("Drop package");
 			break;
 
+		case STATE_PASS:
 		default:
 			bpfw_debug("Pass package");
 	}
 
-	return f_value->action;
+	return f_value->state;
 }
 
 
@@ -208,7 +209,7 @@ int BPFW_XDP_PROG(struct xdp_md *xdp_md) {
 
 	__u8 action = bpfw_func(xdp_md, true, &pkt);
 	switch (action) {
-		case ACTION_REDIRECT:
+		case ACTION_FORWARD:
 			if (pkt.ifindex.in == pkt.ifindex.out)
 				return XDP_TX;
 
@@ -217,6 +218,7 @@ int BPFW_XDP_PROG(struct xdp_md *xdp_md) {
 		case ACTION_DROP:
 			return XDP_DROP;
 
+		case ACTION_PASS:
 		default:
 			return XDP_PASS;
 	}
@@ -236,12 +238,13 @@ int BPFW_TC_PROG(struct __sk_buff *skb) {
 
 	__u8 action = bpfw_func(skb, false, &pkt);
 	switch (action) {
-		case ACTION_REDIRECT:
+		case ACTION_FORWARD:
 			return bpf_redirect(pkt.ifindex.out, 0);
 
 		case ACTION_DROP:
 			return TC_ACT_SHOT;
 
+		case ACTION_PASS:
 		default:
 			return TC_ACT_UNSPEC;
 	}

@@ -215,8 +215,8 @@ void bpfw_log_action(unsigned int log_level, const char *prefix, __u8 action) {
     fputs(prefix, stdlog);
 
     switch (action) {
-        case ACTION_REDIRECT:
-            fputs("Redirect\n", stdlog);
+        case ACTION_FORWARD:
+            fputs("Forward\n", stdlog);
             break;
 
         case ACTION_DROP:
@@ -227,11 +227,12 @@ void bpfw_log_action(unsigned int log_level, const char *prefix, __u8 action) {
             fputs("Pass\n", stdlog);
             break;
 
+        case ACTION_NONE:
+            fputs("\"Pass\"\n", stdlog);
+            break;
+
         default:
-            if (action & ACTION_PASS_TEMP)
-                fputs("Pass (temp)\n", stdlog);
-            else
-                fputs("?\n", stdlog);
+            fputs("?\n", stdlog);
     }
 }
 
