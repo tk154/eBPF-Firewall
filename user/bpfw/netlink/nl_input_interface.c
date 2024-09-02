@@ -10,8 +10,6 @@
 
 #include "../logging/logging.h"
 
-#define INTERFACE_NOT_FOUND 1
-
 
 struct dump_interface_cb {
     __u32 lower_ifindex;
@@ -65,7 +63,7 @@ static int check_if_bridge_slave(struct netlink_handle* nl_h, __u32 *ifindex) {
         }
     }
 
-    return INTERFACE_NOT_FOUND;
+    return ACTION_NONE;
 }
 
 static int get_upper_interface(struct netlink_handle* nl_h, __u32 *ifindex, const char *kind, __u16 id, mnl_cb_t cb_func) {
@@ -165,7 +163,7 @@ static int check_pppoe_interface(struct netlink_handle *nl_h, __u32 ifindex) {
 
     if (ifinfom->ifi_type != ARPHRD_PPP) {
         bpfw_verbose("-> %s isn't a PPPoE interface.\n", ifname);
-        return INTERFACE_NOT_FOUND;
+        return ACTION_NONE;
     }
 
     bpfw_verbose("-> %s (ppp) ", ifname);
@@ -187,7 +185,7 @@ static int pppoe_get_upper(struct netlink_handle *nl_h, struct flow_key_value* f
     else
         bpfw_verbose("-> Didn't retrieve PPPoE interface yet.\n");
 
-    return INTERFACE_NOT_FOUND;
+    return ACTION_NONE;
 }
 
 

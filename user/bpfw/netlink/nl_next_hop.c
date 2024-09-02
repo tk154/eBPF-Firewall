@@ -12,7 +12,6 @@
 #include "../logging/logging.h"
 
 #define NUD_VALID (NUD_PERMANENT | NUD_NOARP | NUD_REACHABLE | NUD_PROBE | NUD_STALE | NUD_DELAY)
-#define NO_NEXT_HOP 1
 
 
 static bool mac_not_set(__u8 *mac) {
@@ -71,14 +70,14 @@ static int get_neigh(struct netlink_handle* nl_h, __u32 ifindex, struct flow_key
             bpfw_warn_ip_on_ifindex("Couldn't retrieve MAC address of ",
                 dest_ip, flow->key.family, ifindex, rc);
 
-            return NO_NEXT_HOP;
+            return ACTION_NONE;
     }
 
     if (!(ndm->ndm_state & NUD_VALID)) {
         bpfw_debug_ip("\nCurrently unreachable: ", dest_ip, flow->key.family, 0);
         bpfw_verbose("NUD state: 0x%02x\n", ndm->ndm_state);
 
-        return NO_NEXT_HOP;
+        return ACTION_NONE;
     }
 
     struct nlattr *attr[NDA_MAX + 1] = {};
@@ -88,7 +87,7 @@ static int get_neigh(struct netlink_handle* nl_h, __u32 ifindex, struct flow_key
         bpfw_warn_ip_on_ifindex(STRINGIFY(RTM_GETNEIGH)" didn't return MAC address of ",
             dest_ip, flow->key.family, ifindex, 0);
 
-        return NO_NEXT_HOP;
+        return ACTION_NONE;
     }
 
     void *dest_mac = mnl_attr_get_payload(attr[NDA_LLADDR]);
@@ -129,13 +128,13 @@ static int parse_bridge_if(struct netlink_handle* nl_h, __u32 ifindex, struct fl
         
         /*case ENOENT:
             bpfw_debug_ip("\nCurrently unreachable: ", dest_ip, flow->key.family, 0);
-            return NO_NEXT_HOP;*/
+            return ACTION_NONE;*/
 
         default:
             bpfw_warn_ip_on_ifindex("Couldn't retrieve bridge port of ",
                 dest_ip, flow->key.family, ifindex, rc);
 
-            return NO_NEXT_HOP;
+            return ACTION_NONE;
     }
 }
 
@@ -152,14 +151,14 @@ static int parse_dsa_if(struct netlink_handle* nl_h, struct nlattr **ifla, struc
 
 static int parse_vlan_if(struct netlink_handle* nl_h, struct nlattr **ifla, struct nlattr **ifla_info, struct flow_value *f_value) {
     if (f_value->next.hop.vlan_id)
-        return NO_NEXT_HOP;
+        return ACTION_NONE;
 
     struct nlattr *ifla_vlan[IFLA_VLAN_MAX + 1] = {};
     mnl_attr_parse_nested(ifla_info[IFLA_INFO_DATA], mnl_attr_parse_cb, ifla_vlan);
 
     __u16 vlan_proto = mnl_attr_get_u16(ifla_vlan[IFLA_VLAN_PROTOCOL]);
     if (vlan_proto != htons(ETH_P_8021Q))
-        return NO_NEXT_HOP;
+        return ACTION_NONE;
 
     __u16 vlan_id = mnl_attr_get_u16(ifla_vlan[IFLA_VLAN_ID]);
     f_value->next.hop.vlan_id = vlan_id;
@@ -184,7 +183,7 @@ static int parse_ppp_if(struct netlink_handle* nl_h, __u32 ifindex, struct nlatt
 
     if (!peer_ip6) {
         bpfw_verbose_ifindex("-> Couldn't retrieve IPv6 peer address of ", ifindex, "", 0);
-        return NO_NEXT_HOP;
+        return ACTION_NONE;
     }
 
     rc = pppoe_get_device(peer_ip6, &nl_h->pppoe);
@@ -198,7 +197,7 @@ static int parse_ppp_if(struct netlink_handle* nl_h, __u32 ifindex, struct nlatt
 
         default:
             bpfw_verbose("Not a PPPoE interface?\n");
-            return NO_NEXT_HOP;
+            return ACTION_NONE;
     }
 
 fill_flow_value:
@@ -240,12 +239,15 @@ static int parse_eth_if(struct netlink_handle* nl_h, __u32 ifindex, struct nlatt
             else if (strcmp(if_type, "vlan") == 0)
                 rc = parse_vlan_if(nl_h, ifla, ifla_info, &flow->value);
 
-            else if (strcmp(if_type, "dsa") == 0 && nl_h->dsa)
-                rc = parse_dsa_if(nl_h, ifla, &flow->value.next.hop);
+            else if (strcmp(if_type, "dsa") == 0)
+                rc = nl_h->dsa ? parse_dsa_if(nl_h, ifla, &flow->value.next.hop) : BPFW_RC_OK;
+
+            else
+                rc = ACTION_NONE;
         }
     }
 
-    if (mac_not_set(flow->value.next.hop.dest_mac))
+    if (rc == BPFW_RC_OK && mac_not_set(flow->value.next.hop.dest_mac))
         rc = get_neigh(nl_h, ifindex, flow, dest_ip);
 
     return rc;
@@ -274,13 +276,10 @@ static int get_link(struct netlink_handle* nl_h, __u32 ifindex, struct flow_key_
 
         default:
             bpfw_debug("Interface type: %hu\n", ifinfom->ifi_type);
-            return NO_NEXT_HOP;
+            return ACTION_NONE;
     }
 
-    if (rc != BPFW_RC_OK)
-        return rc;
-
-    if (flow->value.next.hop.ifindex != ifindex)
+    if (rc == BPFW_RC_OK && flow->value.next.hop.ifindex != ifindex)
         rc = get_link(nl_h, flow->value.next.hop.ifindex, flow, dest_ip);
 
     return rc;
@@ -374,16 +373,8 @@ static int get_route(struct netlink_handle* nl_h, struct flow_key_value* flow, v
 
 static int get_iif_and_route(struct netlink_handle* nl_h, struct flow_key_value* flow, void *dest_ip) {
     int rc = get_input_interface(nl_h, flow);
-    switch (rc) {
-        case BPFW_RC_OK:
-            break;
-
-        case BPFW_RC_ERROR:
-            return BPFW_RC_ERROR;
-
-        default:
-            return ACTION_NONE;
-    }
+    if (rc != BPFW_RC_OK)
+        return rc;
 
     return get_route(nl_h, flow, dest_ip);
 }

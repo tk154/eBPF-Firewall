@@ -14,7 +14,6 @@
 #include "../logging/logging.h"
 
 #define NEW_INTERFACE UINT32_MAX
-#define INTERFACE_NOT_FOUND 1
 
 
 struct dump_cb_data {
