@@ -101,9 +101,11 @@ static int parse_bridge_if(struct netlink_handle* nl_h, __u32 ifindex, struct fl
         case BPFW_RC_ERROR:
             return rc;
         
-        /*case ENOENT:
-            bpfw_debug_ip("\nCurrently unreachable: ", dest_ip, flow->key.family, 0);
-            return ACTION_NONE;*/
+        case ENOENT:
+            bpfw_debug_ip_on_ifindex("\nCurrently unreachable: ",
+                dest_ip, flow->key.family, ifindex, 0);
+                
+            return ACTION_NONE;
 
         default:
             bpfw_warn_ip_on_ifindex("Couldn't retrieve bridge port of ",

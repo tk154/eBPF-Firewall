@@ -26,6 +26,7 @@
 #define bpfw_debug_ip(prefix, ip, family, error) bpfw_log_ip(BPFW_LOG_DEBUG, prefix, ip, family, error)
 
 #define bpfw_warn_ip_on_ifindex(prefix, ip, family, ifindex, error) bpfw_log_ip_on_ifindex(BPFW_LOG_WARN, prefix, ip, family, ifindex, error)
+#define bpfw_debug_ip_on_ifindex(prefix, ip, family, ifindex, error) bpfw_log_ip_on_ifindex(BPFW_LOG_DEBUG, prefix, ip, family, ifindex, error)
 
 
 #define bpfw_debug_key(prefix, f_key)             bpfw_log_key(BPFW_LOG_DEBUG, prefix, f_key)

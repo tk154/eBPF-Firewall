@@ -228,7 +228,9 @@ int request_interface(struct netlink_handle* nl_h, __u32 ifindex) {
             return rc;
 
         default:
-            bpfw_error_ifindex("Error retrieving link information for ", ifindex, "", rc);
+            bpfw_error("Error querying ifindex %u: %s (-%d).\n",
+                ifindex, strerror(rc), rc);
+
             return BPFW_RC_ERROR;
     }
 }
