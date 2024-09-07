@@ -11,14 +11,14 @@
 struct nl_sock_buf {
     struct mnl_socket *sock;
     void *buf;
+
+    unsigned int seq;
+    size_t buf_size;
 };
 
 struct netlink_handle {
     struct nl_sock_buf req;
     struct nl_sock_buf not;
-
-    __u32 seq;
-    size_t buffer_size;
 
     bool dsa;
     __u32 dsa_switch;
@@ -35,6 +35,8 @@ int send_dump_request(struct netlink_handle *nl_h, mnl_cb_t cb_func, void *cb_da
 
 int request_interface(struct netlink_handle* nl_h, __u32 ifindex);
 int get_input_interface(struct netlink_handle* nl_h, struct flow_key_value* flow);
+
+int get_pppoe_device(__u32 ifindex, struct pppoe *pppoe);
 
 
 #endif

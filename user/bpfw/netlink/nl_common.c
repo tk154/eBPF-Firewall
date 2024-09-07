@@ -29,6 +29,44 @@ struct not_cb_data {
 };
 
 
+static int open_socket_and_create_buffer(struct nl_sock_buf *nl, size_t buffer_size, unsigned int sock_groups) {
+    // Open a Netlink socket
+    nl->sock = mnl_socket_open(NETLINK_ROUTE);
+    if (!nl->sock) {
+        bpfw_error("Error opening netlink socket: %s (-%d).\n", strerror(errno), errno);
+        goto error;
+    }
+
+    // Bind the socket
+    if (mnl_socket_bind(nl->sock, sock_groups, MNL_SOCKET_AUTOPID) != 0) {
+        bpfw_error("Error binding netlink socket: %s (-%d).\n", strerror(errno), errno);
+        goto socket_close;
+    }
+
+    nl->buf = malloc(buffer_size);
+    if (!nl->buf) {
+        bpfw_error("Error allocating netlink buffer: %s (-%d).\n", strerror(errno), errno);
+        goto socket_close;
+    }
+
+    nl->seq = 0;
+    nl->buf_size = buffer_size;
+
+    return BPFW_RC_OK;
+
+socket_close:
+    mnl_socket_close(nl->sock);
+
+error:
+    return BPFW_RC_ERROR;
+}
+
+static void close_socket_and_free_buffer(struct nl_sock_buf *nl) {
+    // Close the socket
+    mnl_socket_close(nl->sock);
+    free(nl->buf);
+}
+
 static int socket_set_strict_check(struct mnl_socket *socket, int enable) {
 	if (setsockopt(mnl_socket_get_fd(socket), SOL_NETLINK,
             NETLINK_GET_STRICT_CHK, &enable, sizeof(enable)) != 0)
@@ -89,7 +127,7 @@ int mnl_attr_parse_cb_debug(const struct nlattr *attr, void *data) {
 int send_request(struct netlink_handle* nl_h) {
     struct nlmsghdr *nlh = (struct nlmsghdr*)nl_h->req.buf;
     nlh->nlmsg_flags = NLM_F_REQUEST;
-    nlh->nlmsg_seq = nl_h->seq++;
+    nlh->nlmsg_seq = nl_h->req.seq++;
 
     // Send the request
     if (mnl_socket_sendto(nl_h->req.sock, nlh, nlh->nlmsg_len) < 0) {
@@ -98,7 +136,7 @@ int send_request(struct netlink_handle* nl_h) {
     }
 
     // Receive and parse the response
-    ssize_t nbytes = mnl_socket_recvfrom(nl_h->req.sock, nl_h->req.buf, nl_h->buffer_size);
+    ssize_t nbytes = mnl_socket_recvfrom(nl_h->req.sock, nl_h->req.buf, nl_h->req.buf_size);
     if (nbytes < 0) {
         bpfw_error("\nError receiving netlink response: %s (-%d).\n", strerror(errno), errno);
         return BPFW_RC_ERROR;
@@ -133,28 +171,29 @@ static int send_dump_request_cb(const struct nlmsghdr *nlh, void *data) {
     return (*cb->func)(nlh, cb->data);
 }
 
-int send_dump_request(struct netlink_handle *nl_h, mnl_cb_t cb_func, void *cb_data) {
-    unsigned int seq = nl_h->seq++;
-    unsigned int portid = mnl_socket_get_portid(nl_h->req.sock);
+static int send_dump_req_sock_buf(struct nl_sock_buf *sock_buf, mnl_cb_t cb_func, void *cb_data) {
+    unsigned int seq = sock_buf->seq++;
+    unsigned int portid = mnl_socket_get_portid(sock_buf->sock);
 
-    struct nlmsghdr *nlh = (struct nlmsghdr*)nl_h->req.buf;
+    struct nlmsghdr *nlh = (struct nlmsghdr*)sock_buf->buf;
     nlh->nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
     nlh->nlmsg_seq = seq;
 
     // Send the request
-    if (mnl_socket_sendto(nl_h->req.sock, nlh, nlh->nlmsg_len) < 0) {
+    if (mnl_socket_sendto(sock_buf->sock, nlh, nlh->nlmsg_len) < 0) {
         bpfw_error("\nError sending netlink dump request: %s (-%d).\n", strerror(errno), errno);
         return BPFW_RC_ERROR;
     }
 
     // Receive and parse the response
     ssize_t nbytes;
-    while ((nbytes = mnl_socket_recvfrom(nl_h->req.sock, nl_h->req.buf, nl_h->buffer_size)) > 0) {
+    while ((nbytes = mnl_socket_recvfrom(sock_buf->sock, sock_buf->buf, sock_buf->buf_size)) > 0) {
         struct dump_cb_data cb = { .func = cb_func, .data = cb_data };
-        int rc = mnl_cb_run(nl_h->req.buf, nbytes, seq, portid, send_dump_request_cb, &cb);
+        int rc = mnl_cb_run(sock_buf->buf, nbytes, seq, portid, send_dump_request_cb, &cb);
 
         switch (rc) {
             case MNL_CB_ERROR:
+                printf("%d %s\n", errno, strerror(errno));
                 return BPFW_RC_ERROR;
             case MNL_CB_STOP:
                 return BPFW_RC_OK;
@@ -167,6 +206,10 @@ int send_dump_request(struct netlink_handle *nl_h, mnl_cb_t cb_func, void *cb_da
     }
 
     return BPFW_RC_OK;
+}
+
+int send_dump_request(struct netlink_handle *nl_h, mnl_cb_t cb_func, void *cb_data) {
+    return send_dump_req_sock_buf(&nl_h->req, cb_func, cb_data);
 }
 
 int request_interface(struct netlink_handle* nl_h, __u32 ifindex) {
@@ -188,6 +231,66 @@ int request_interface(struct netlink_handle* nl_h, __u32 ifindex) {
             bpfw_error_ifindex("Error retrieving link information for ", ifindex, "", rc);
             return BPFW_RC_ERROR;
     }
+}
+
+
+static int get_ppp_peer_ipv6_cb(const struct nlmsghdr *nlh, void *peer_ip6) {
+    struct nlattr *ifa[IFA_MAX + 1] = {};
+    mnl_attr_parse(nlh, sizeof(struct ifaddrmsg), mnl_attr_parse_cb, ifa);
+
+    if (ifa[IFA_ADDRESS])
+        *(void**)peer_ip6 = mnl_attr_get_payload(ifa[IFA_ADDRESS]);
+
+    return MNL_CB_OK;
+}
+
+static int get_ppp_peer_ipv6(__u32 ifindex, struct nl_sock_buf *sock_buf, void **peer_ip6) {
+    // Prepare a Netlink request message
+    struct nlmsghdr *nlh = mnl_nlmsg_put_header(sock_buf->buf);
+    nlh->nlmsg_type = RTM_GETADDR;
+
+    struct ifaddrmsg *ifaddrm = mnl_nlmsg_put_extra_header(nlh, sizeof(struct ifaddrmsg));
+    ifaddrm->ifa_family = AF_INET6;
+    ifaddrm->ifa_index  = ifindex;
+
+    *peer_ip6 = NULL;
+
+    // Send request and receive response
+    return send_dump_req_sock_buf(sock_buf, get_ppp_peer_ipv6_cb, (void*)peer_ip6);
+}
+
+int get_pppoe_device(__u32 ifindex, struct pppoe *pppoe) {
+    struct nl_sock_buf sock_buf;
+    if (open_socket_and_create_buffer(&sock_buf, MNL_SOCKET_BUFFER_SIZE, 0) != BPFW_RC_OK)
+        return BPFW_RC_ERROR;
+
+    void *peer_ip6;
+
+    int rc = get_ppp_peer_ipv6(ifindex, &sock_buf, &peer_ip6);
+    if (rc == BPFW_RC_ERROR)
+        goto close_socket_and_free_buffer;
+
+    if (!peer_ip6) {
+        bpfw_verbose_ifindex("-> Couldn't retrieve IPv6 peer address of ", ifindex, "", 0);
+        rc = ACTION_NONE;
+
+        goto close_socket_and_free_buffer;
+    }
+
+    rc = pppoe_get_device(peer_ip6, pppoe);
+    switch (rc) {
+        case BPFW_RC_OK:
+        case BPFW_RC_ERROR:
+            break;
+
+        default:
+            bpfw_verbose("Not a PPPoE interface?\n");
+    }
+
+close_socket_and_free_buffer:
+    close_socket_and_free_buffer(&sock_buf);
+
+    return rc;
 }
 
 
@@ -302,7 +405,7 @@ int netlink_check_notifications(struct netlink_handle *nl_h, newlink_cb_t newlin
     struct not_cb_data cb = { .nl_h = nl_h, .newlink_cb = newlink, .data = data };
 
     ssize_t nbytes;
-    while ((nbytes = mnl_socket_recvfrom(nl_h->not.sock, nl_h->not.buf, nl_h->buffer_size)) > 0) {
+    while ((nbytes = mnl_socket_recvfrom(nl_h->not.sock, nl_h->not.buf, nl_h->not.buf_size)) > 0) {
         int rc = mnl_cb_run(nl_h->not.buf, nbytes, 0, 0, notification_cb, &cb);
         if (rc == MNL_CB_ERROR) {
             bpfw_error("Error executing notification callback: %s (-%d).\n", strerror(errno), errno);
@@ -318,40 +421,6 @@ int netlink_check_notifications(struct netlink_handle *nl_h, newlink_cb_t newlin
     return BPFW_RC_OK;
 }
 
-static int open_socket_and_create_buffer(struct nl_sock_buf *nl, unsigned int sock_groups, size_t buffer_size) {
-    // Open a Netlink socket
-    nl->sock = mnl_socket_open(NETLINK_ROUTE);
-    if (!nl->sock) {
-        bpfw_error("Error opening netlink socket: %s (-%d).\n", strerror(errno), errno);
-        goto error;
-    }
-
-    // Bind the socket
-    if (mnl_socket_bind(nl->sock, sock_groups, MNL_SOCKET_AUTOPID) != 0) {
-        bpfw_error("Error binding netlink socket: %s (-%d).\n", strerror(errno), errno);
-        goto socket_close;
-    }
-
-    nl->buf = malloc(buffer_size);
-    if (!nl->buf) {
-        bpfw_error("Error allocating netlink buffer: %s (-%d).\n", strerror(errno), errno);
-        goto socket_close;
-    }
-
-    return BPFW_RC_OK;
-
-socket_close:
-    mnl_socket_close(nl->sock);
-
-error:
-    return BPFW_RC_ERROR;
-}
-
-static void close_socket_and_free_buffer(struct nl_sock_buf *nl) {
-    // Close the socket
-    mnl_socket_close(nl->sock);
-    free(nl->buf);
-}
 
 struct netlink_handle* netlink_init(bool auto_attach, bool dsa) {
     struct netlink_handle *nl_h = malloc(sizeof(struct netlink_handle));
@@ -360,13 +429,13 @@ struct netlink_handle* netlink_init(bool auto_attach, bool dsa) {
         goto error;
     }
 
-    nl_h->seq = 0;
-    nl_h->buffer_size = MNL_SOCKET_BUFFER_SIZE;
     nl_h->dsa = dsa;
     nl_h->dsa_switch = 0;
     nl_h->pppoe.ifindex = 0;
 
-    if (open_socket_and_create_buffer(&nl_h->req, 0, nl_h->buffer_size) != 0)
+    size_t buffer_size = MNL_SOCKET_BUFFER_SIZE;
+
+    if (open_socket_and_create_buffer(&nl_h->req, buffer_size, 0) != 0)
         goto free;
 
     if (socket_set_strict_check(nl_h->req.sock, true) != 0)
@@ -376,7 +445,7 @@ struct netlink_handle* netlink_init(bool auto_attach, bool dsa) {
     if (auto_attach)
         not_sock_groups |= RTMGRP_LINK;
 
-    if (open_socket_and_create_buffer(&nl_h->not, not_sock_groups, nl_h->buffer_size) != 0)
+    if (open_socket_and_create_buffer(&nl_h->not, buffer_size, not_sock_groups) != 0)
         goto close_req_socket;
 
     if (socket_set_blocking(nl_h->not.sock, false) != 0)

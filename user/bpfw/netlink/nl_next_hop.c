@@ -19,31 +19,6 @@ static bool mac_not_set(__u8 *mac) {
         && !mac[3] && !mac[4] && !mac[5];
 }
 
-static int get_ppp_peer_ipv6_cb(const struct nlmsghdr *nlh, void *peer_ip6) {
-    struct nlattr *ifa[IFA_MAX + 1] = {};
-    mnl_attr_parse(nlh, sizeof(struct ifaddrmsg), mnl_attr_parse_cb, ifa);
-
-    if (ifa[IFA_ADDRESS])
-        *(void**)peer_ip6 = mnl_attr_get_payload(ifa[IFA_ADDRESS]);
-
-    return MNL_CB_OK;
-}
-
-static int get_ppp_peer_ipv6(struct netlink_handle* nl_h, __u32 ifindex, void **peer_ip6) {
-    // Prepare a Netlink request message
-    struct nlmsghdr *nlh = mnl_nlmsg_put_header(nl_h->req.buf);
-    nlh->nlmsg_type = RTM_GETADDR;
-
-    struct ifaddrmsg *ifaddrm = mnl_nlmsg_put_extra_header(nlh, sizeof(struct ifaddrmsg));
-    ifaddrm->ifa_family = AF_INET6;
-    ifaddrm->ifa_index  = ifindex;
-
-    *peer_ip6 = NULL;
-
-    // Send request and receive response
-    return send_dump_request(nl_h, get_ppp_peer_ipv6_cb, (void*)peer_ip6);
-}
-
 
 static int get_neigh(struct netlink_handle* nl_h, __u32 ifindex, struct flow_key_value* flow, void *dest_ip) {
     // Prepare a Netlink request message
@@ -173,34 +148,14 @@ static int parse_ppp_if(struct netlink_handle* nl_h, __u32 ifindex, struct nlatt
     const char *ifname = mnl_attr_get_str(ifla[IFLA_IFNAME]);
     bpfw_verbose("-> %s (ppp) ", ifname);
 
-    if (ifindex == nl_h->pppoe.ifindex)
-        goto fill_flow_value;
+    if (ifindex != nl_h->pppoe.ifindex) {
+        int rc = get_pppoe_device(ifindex, &nl_h->pppoe);
+        if (rc != BPFW_RC_OK)
+            return rc;
 
-    void *peer_ip6;
-    int rc = get_ppp_peer_ipv6(nl_h, ifindex, &peer_ip6);
-    if (rc == BPFW_RC_ERROR)
-        return BPFW_RC_ERROR;
-
-    if (!peer_ip6) {
-        bpfw_verbose_ifindex("-> Couldn't retrieve IPv6 peer address of ", ifindex, "", 0);
-        return ACTION_NONE;
+        nl_h->pppoe.ifindex = ifindex;
     }
 
-    rc = pppoe_get_device(peer_ip6, &nl_h->pppoe);
-    switch (rc) {
-        case BPFW_RC_OK:
-            nl_h->pppoe.ifindex = ifindex;
-            break;
-        
-        case BPFW_RC_ERROR:
-            return BPFW_RC_ERROR;
-
-        default:
-            bpfw_verbose("Not a PPPoE interface?\n");
-            return ACTION_NONE;
-    }
-
-fill_flow_value:
     f_value->next.hop.ifindex = nl_h->pppoe.device;
     f_value->next.hop.pppoe_id = nl_h->pppoe.id;
     memcpy(f_value->next.hop.dest_mac, nl_h->pppoe.address, ETH_ALEN);

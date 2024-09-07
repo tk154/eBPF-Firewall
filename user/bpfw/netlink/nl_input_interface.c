@@ -12,6 +12,8 @@
 
 
 struct dump_interface_cb {
+    struct netlink_handle *nl_h;
+
     __u32 lower_ifindex;
     __u32 upper_ifindex;
     __u16 id;
@@ -67,7 +69,7 @@ static int check_if_bridge_slave(struct netlink_handle* nl_h, __u32 *ifindex) {
 }
 
 static int get_upper_interface(struct netlink_handle* nl_h, __u32 *ifindex, const char *kind, __u16 id, mnl_cb_t cb_func) {
-    struct dump_interface_cb dump_data = { .lower_ifindex = *ifindex, .id = id, .upper_ifindex = 0 };
+    struct dump_interface_cb dump_data = { .nl_h = nl_h, .lower_ifindex = *ifindex, .id = id, .upper_ifindex = 0 };
 
     int rc = dump_interface(nl_h, kind, cb_func, &dump_data);
     if (rc != BPFW_RC_OK)
@@ -171,21 +173,42 @@ static int check_pppoe_interface(struct netlink_handle *nl_h, __u32 ifindex) {
     return BPFW_RC_OK;
 }
 
-static int pppoe_get_upper(struct netlink_handle *nl_h, struct flow_key_value* flow) {
-    struct pppoe *pppoe = &nl_h->pppoe;
+static int get_ppp_cb(const struct nlmsghdr *nlh, void *data) {
+    struct dump_interface_cb *dump_data = data;
+    struct ifinfomsg *ifinfom = mnl_nlmsg_get_payload(nlh);
 
-    if (pppoe->id == flow->key.pppoe_id && pppoe->device == flow->value.next.iif &&
-        memcmp(pppoe->address, flow->value.src_mac, ETH_ALEN) == 0)
-    {
-        if (check_pppoe_interface(nl_h, pppoe->ifindex) == BPFW_RC_OK) {
-            flow->value.next.iif = pppoe->ifindex;
-            return BPFW_RC_OK;
-        }
+    struct pppoe pppoe;
+
+    int rc = get_pppoe_device(ifinfom->ifi_index, &pppoe);
+    if (rc != BPFW_RC_OK)
+        return MNL_CB_OK;
+
+    if (pppoe.device == dump_data->lower_ifindex && pppoe.id == dump_data->id) {
+        struct nlattr *ifla[IFLA_MAX + 1] = {};
+        mnl_attr_parse(nlh, sizeof(*ifinfom), mnl_attr_parse_cb, ifla);
+
+        const char *ifname = mnl_attr_get_str(ifla[IFLA_IFNAME]);
+        bpfw_verbose("-> %s (ppp) ", ifname);
+
+        dump_data->upper_ifindex = ifinfom->ifi_index;
+
+        dump_data->nl_h->pppoe.ifindex = ifinfom->ifi_index;
+        dump_data->nl_h->pppoe.device = pppoe.device;
+        dump_data->nl_h->pppoe.id = pppoe.id;
+        memcpy(dump_data->nl_h->pppoe.address, pppoe.address, ETH_ALEN);
     }
-    else
-        bpfw_verbose("-> Didn't retrieve PPPoE interface yet.\n");
 
-    return ACTION_NONE;
+    return MNL_CB_OK;
+}
+
+static int pppoe_get_upper(struct netlink_handle *nl_h, struct flow_key_value* flow) {
+    if (nl_h->pppoe.id == flow->key.pppoe_id &&
+        check_pppoe_interface(nl_h, nl_h->pppoe.ifindex) == BPFW_RC_OK) {
+            flow->value.next.iif = nl_h->pppoe.ifindex;
+            return BPFW_RC_OK;
+    }
+
+    return get_upper_interface(nl_h, &flow->value.next.iif, "ppp", flow->key.pppoe_id, get_ppp_cb);
 }
 
 
