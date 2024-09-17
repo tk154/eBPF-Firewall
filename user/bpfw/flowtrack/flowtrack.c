@@ -7,7 +7,6 @@
 #include <time.h>
 
 #include <bpf/bpf.h>
-#include <net/if.h>
 #include <netinet/in.h>
 
 #include "../bpf_loader/bpf_loader.h"
@@ -16,32 +15,21 @@
 
 #include "../logging/logging.h"
 
-#ifdef OPENWRT_UCODE
-#include "../ucode/ucode.h"
-#endif
-
 
 struct flowtrack_handle {
     enum bpfw_hook hook;
     __u32 map_poll_sec;
 
-    struct {
-        int flow, user_time;
-    } map_fd;
+    int flow_fd;
+    int user_time_fd;
 
     // Flow Timeouts
     struct flow_timeout flow_timeout;
     struct dsa_tag *dsa_tag;
 
-    struct {
-        struct bpf_handle *bpf;
-        struct netlink_handle *netlink;
-        struct conntrack_handle *conntrack;
-    } handle;
-
-#ifdef OPENWRT_UCODE
-    struct ucode_handle *ucode_h;
-#endif
+    struct bpf_handle *bpf_h;
+    struct netlink_handle *netlink_h;
+    struct conntrack_handle *conntrack_h;
 };
 
 
@@ -64,7 +52,7 @@ static int update_userspace_time(struct flowtrack_handle *flowtrack_h, __u64 cur
     };
 
     // Update the BPF flow entry, break out on error
-    if (bpf_map_update_elem(flowtrack_h->map_fd.user_time, &index, &user, BPF_EXIST) != 0) {
+    if (bpf_map_update_elem(flowtrack_h->user_time_fd, &index, &user, BPF_EXIST) != 0) {
         bpfw_error("Error updating BPF userspace time: %s (-%d).\n", strerror(errno), errno);
         return BPFW_RC_ERROR;
     }
@@ -104,61 +92,6 @@ static int calc_l2_diff(struct flowtrack_handle *flowtrack_h, struct flow_key_va
 }
 
 
-static int attach_bpf_program(struct bpf_handle* bpf, struct netlink_handle *netlink_h) {
-    // Retrieve the name and index of all network interfaces
-    struct if_nameindex* ifaces = if_nameindex();
-    if (!ifaces) {
-        bpfw_error("Error retrieving network interfaces: %s (-%d).\n", strerror(errno), errno);
-        return BPFW_RC_ERROR;
-    }
-
-    int rc = BPFW_RC_OK;
-    for (struct if_nameindex* iface = ifaces; iface->if_index && iface->if_name; iface++) {
-        rc = netlink_ifindex_should_attach(netlink_h, iface->if_index);
-        switch (rc) {
-            case BPFW_RC_ERROR:
-                goto error;
-
-            case NL_INTERFACE_DO_NOT_ATTACH:
-                continue;
-        }
-
-        rc = bpf_ifindex_attach_program(bpf, iface->if_index);
-        if (rc != BPFW_RC_OK) {
-error:
-            // If an error occured while attaching to one interface, detach all the already attached programs
-            while (--iface >= ifaces)
-                if (netlink_ifindex_should_attach(netlink_h, iface->if_index) == NL_INTERFACE_DO_ATTACH)
-                    bpf_ifindex_detach_program(bpf, iface->if_index);
-
-            break;
-        }
-    }
-
-    // Retrieved interfaces are dynamically allocated, so they must be freed
-    if_freenameindex(ifaces);
-
-    return rc;
-}
-
-static int detach_bpf_program(struct bpf_handle* bpf, struct netlink_handle *netlink_h) {
-    // Retrieve the name and index of all network interfaces
-    struct if_nameindex* ifaces = if_nameindex();
-    if (!ifaces) {
-        bpfw_error("Error retrieving network interfaces: %s (-%d).\n", strerror(errno), errno);
-        return BPFW_RC_ERROR;
-    }
-
-    for (struct if_nameindex* iface = ifaces; iface->if_index && iface->if_name; iface++)
-        if (netlink_ifindex_should_attach(netlink_h, iface->if_index) == NL_INTERFACE_DO_ATTACH)
-            bpf_ifindex_detach_program(bpf, iface->if_index);
-
-    // Retrieved interfaces are dynamically allocated, so they must be freed
-    if_freenameindex(ifaces);
-
-    return BPFW_RC_OK;
-}
-
 static int update_bpf_entry(int map_fd, struct flow_key_value *flow) {
     // Update the BPF flow entry, break out on error
     if (bpf_map_update_elem(map_fd, &flow->key, &flow->value, BPF_EXIST) != 0) {
@@ -181,51 +114,25 @@ static int delete_bpf_entry(int map_fd, void *key) {
 static int new_bpf_interface(__u32 ifindex, void *data) {
     struct flowtrack_handle *flowtrack_h = data;
 
-    return bpf_ifindex_attach_program(flowtrack_h->handle.bpf, ifindex);
+    return bpf_ifindex_attach_program(flowtrack_h->bpf_h, ifindex);
 }
 
-
-static int connection_not_found(struct flowtrack_handle *flowtrack_h, struct flow_key_value *flow) {
-    /* It could be possible that we have received the package here through the BPF map
-    *  before it was processed by nf_conntrack, or it has been dropped
-    */
-
-    if (flow->value.state != STATE_NEW_FLOW)
-        return BPFW_RC_OK;
-
-    bpfw_debug_key("\nNon: ", &flow->key);
-
-    int rc = netlink_get_route(flowtrack_h->handle.netlink, flow);
-    switch (rc) {
-        case BPFW_RC_ERROR:
-            return BPFW_RC_ERROR;
-
-        case ACTION_FORWARD:
-            flow->value.state = STATE_NONE;
-            break;
-
-        default:
-            flow->value.state = rc;
-    }
-
-#ifdef OPENWRT_UCODE
-    if (rc != ACTION_DROP &&
-        ucode_match_rule(flowtrack_h->ucode_h, flow) != BPFW_RC_OK)
-            return BPFW_RC_ERROR;
-#endif
-
-    bpfw_debug_action("Act: ", flow->value.state);
-
-    return BPFW_RC_OK;
-}
 
 static void connection_flowtable_offload(struct flow_key_value *flow) {
     if (flow->value.state == STATE_NEW_FLOW)
         bpfw_debug_key("\nConnection is offloaded to flowtable. Cannot read TCP state.\n", &flow->key);
 }
 
-static int connection_not_established(struct flow_value *f_value) {
-    f_value->state = STATE_NONE;
+static int connection_not_established(struct flow_key_value *flow) {
+    /* It could be possible that we have received the package here through the BPF map
+    *  before it was processed by nf_conntrack, or it has been dropped
+    */
+    if (flow->value.state == STATE_NEW_FLOW) {
+        bpfw_debug_key("\nNon: ", &flow->key);
+
+        flow->value.state = STATE_NONE;
+        bpfw_debug_action("Act: ", flow->value.state);
+    }
 
     return BPFW_RC_OK;
 }
@@ -243,9 +150,9 @@ static int connection_established(struct flowtrack_handle *flowtrack_h, struct f
                 flow->value.next.ipv4_cksum_diff = htons(0x0100);
 
             // Check for NAT
-            conntrack_check_nat(flowtrack_h->handle.conntrack, flow);
+            conntrack_check_nat(flowtrack_h->conntrack_h, flow);
             
-            int rc = netlink_get_next_hop(flowtrack_h->handle.netlink, flow);
+            int rc = netlink_get_next_hop(flowtrack_h->netlink_h, flow);
             switch (rc) {
                 case BPFW_RC_ERROR:
                     return BPFW_RC_ERROR;
@@ -266,7 +173,7 @@ static int connection_established(struct flowtrack_handle *flowtrack_h, struct f
         case STATE_FORWARD:
             // If there was a new package, update the nf_conntrack timeout
             if (last_packet_sec_ago < flowtrack_h->map_poll_sec &&
-                conntrack_update_timeout(flowtrack_h->handle.conntrack) != BPFW_RC_OK)
+                conntrack_update_timeout(flowtrack_h->conntrack_h) != BPFW_RC_OK)
                     return BPFW_RC_ERROR;
     }
 
@@ -282,28 +189,23 @@ static int handle_bpf_entry(struct flowtrack_handle *flowtrack_h, struct flow_ke
     __u32 last_packet_sec_ago = time_sec - flow_time_sec;
     if (last_packet_sec_ago >= flow_timeout)
         // Flow timeout occured, so delete it from the BPF map
-        return delete_bpf_entry(flowtrack_h->map_fd.flow, &flow->key);
+        return delete_bpf_entry(flowtrack_h->flow_fd, &flow->key);
 
     __u8 state = flow->value.state;
-    if (state == STATE_DROP)
-        return BPFW_RC_OK;
+    int rc = conntrack_do_lookup(flowtrack_h->conntrack_h, flow);
 
-    int rc = conntrack_do_lookup(flowtrack_h->handle.conntrack, flow);
     switch (rc) {
-        case CT_CONN_NOT_FOUND:
-            rc = connection_not_found(flowtrack_h, flow);
-            break;
-
         case CT_CONN_FLOWTABLE_OFFLOAD:
             connection_flowtable_offload(flow);
 
+        case CT_CONN_NOT_FOUND:
         case CT_CONN_NOT_ESTABLISHED:
-            rc = connection_not_established(&flow->value);
+            rc = connection_not_established(flow);
             break;
 
         case CT_CONN_ESTABLISHED:
             rc = connection_established(flowtrack_h, flow, last_packet_sec_ago);
-            conntrack_free_ct_entry(flowtrack_h->handle.conntrack);
+            conntrack_free_ct_entry(flowtrack_h->conntrack_h);
             break;
 
         default:
@@ -313,7 +215,7 @@ static int handle_bpf_entry(struct flowtrack_handle *flowtrack_h, struct flow_ke
     if (rc != BPFW_RC_OK || state == flow->value.state)
         return rc;
 
-    return update_bpf_entry(flowtrack_h->map_fd.flow, flow);
+    return update_bpf_entry(flowtrack_h->flow_fd, flow);
 }
 
 int flowtrack_update(struct flowtrack_handle* flowtrack_h) {
@@ -323,12 +225,12 @@ int flowtrack_update(struct flowtrack_handle* flowtrack_h) {
     __u32 time_sec = time_ns_to_sec(time_ns);
 
     // Iterate through all the flow entries
-    bpf_flow_map_for_each_entry(flowtrack_h->map_fd.flow, flow, {
+    bpf_flow_map_for_each_entry(flowtrack_h->flow_fd, flow, {
         if (handle_bpf_entry(flowtrack_h, &flow, time_sec) != BPFW_RC_OK)
             return BPFW_RC_ERROR;
     });
 
-    if (netlink_check_notifications(flowtrack_h->handle.netlink, new_bpf_interface, flowtrack_h) != BPFW_RC_OK)
+    if (netlink_check_notifications(flowtrack_h->netlink_h, new_bpf_interface, flowtrack_h) != BPFW_RC_OK)
         return BPFW_RC_ERROR;
 
     if (update_userspace_time(flowtrack_h, time_ns) != BPFW_RC_OK)
@@ -351,37 +253,37 @@ struct flowtrack_handle* flowtrack_init(struct cmd_args *args) {
 
     bpfw_info("Initializing netlink ...\n");
 
-    flowtrack_h->handle.netlink = netlink_init(args->if_count == 0, args->dsa);
-    if (!flowtrack_h->handle.netlink)
+    flowtrack_h->netlink_h = netlink_init(args->if_count == 0, args->dsa);
+    if (!flowtrack_h->netlink_h)
         goto free;
 
     __u32 dsa_switch;
     char dsa_proto[DSA_PROTO_MAX_LEN];
-    if (netlink_get_dsa(flowtrack_h->handle.netlink, &dsa_switch, dsa_proto) != BPFW_RC_OK)
+    if (netlink_get_dsa(flowtrack_h->netlink_h, &dsa_switch, dsa_proto) != BPFW_RC_OK)
         goto netlink_destroy;
 
     bpfw_info("Opening BPF object ...\n");
 
-    flowtrack_h->handle.bpf = bpf_open_object(args->obj_path, args->hook);
-    if (!flowtrack_h->handle.bpf)
+    flowtrack_h->bpf_h = bpf_open_object(args->obj_path, args->hook);
+    if (!flowtrack_h->bpf_h)
         goto netlink_destroy;
 
-    if (args->dsa && bpf_check_dsa(flowtrack_h->handle.bpf, dsa_switch, dsa_proto, &flowtrack_h->dsa_tag) != BPFW_RC_OK)
+    if (args->dsa && bpf_check_dsa(flowtrack_h->bpf_h, dsa_switch, dsa_proto, &flowtrack_h->dsa_tag) != BPFW_RC_OK)
         goto bpf_unload_program;
 
     if (args->map_max_entries != FLOW_MAP_DEFAULT_MAX_ENTRIES && 
-        bpf_set_map_max_entries(flowtrack_h->handle.bpf, FLOW_MAP_NAME, args->map_max_entries) != BPFW_RC_OK)
+        bpf_set_map_max_entries(flowtrack_h->bpf_h, FLOW_MAP_NAME, args->map_max_entries) != BPFW_RC_OK)
             goto bpf_unload_program;
 
     // Load the BPF object (including program and maps) into the kernel
     bpfw_info("Loading BPF program into kernel ...\n");
 
-    if (bpf_load_program(flowtrack_h->handle.bpf) != BPFW_RC_OK)
+    if (bpf_load_program(flowtrack_h->bpf_h) != BPFW_RC_OK)
         goto bpf_unload_program;
 
-    flowtrack_h->map_fd.flow = bpf_get_map_fd(flowtrack_h->handle.bpf, FLOW_MAP_NAME);
-    flowtrack_h->map_fd.user_time = bpf_get_map_fd(flowtrack_h->handle.bpf, USERSPACE_TIME_SECTION);
-    if (flowtrack_h->map_fd.flow < 0 || flowtrack_h->map_fd.user_time < 0)
+    flowtrack_h->flow_fd = bpf_get_map_fd(flowtrack_h->bpf_h, FLOW_MAP_NAME);
+    flowtrack_h->user_time_fd = bpf_get_map_fd(flowtrack_h->bpf_h, USERSPACE_TIME_SECTION);
+    if (flowtrack_h->flow_fd < 0 || flowtrack_h->user_time_fd < 0)
         goto bpf_unload_program;
 
     if (update_userspace_time(flowtrack_h, time_get_coarse_ns()) != BPFW_RC_OK)
@@ -390,8 +292,8 @@ struct flowtrack_handle* flowtrack_init(struct cmd_args *args) {
     bpfw_info("Attaching BPF program to network interfaces ...\n");
 
     // Attach the program to the specified interface names
-    int rc = args->if_count == 0 ? attach_bpf_program(flowtrack_h->handle.bpf, flowtrack_h->handle.netlink) :
-        bpf_ifnames_attach_program(flowtrack_h->handle.bpf, args->if_names, args->if_count);
+    int rc = args->if_count == 0 ? bpf_attach_program(flowtrack_h->bpf_h, flowtrack_h->netlink_h) :
+        bpf_ifnames_attach_program(flowtrack_h->bpf_h, args->if_names, args->if_count);
 
     if (rc != BPFW_RC_OK)
         goto bpf_unload_program;
@@ -399,35 +301,27 @@ struct flowtrack_handle* flowtrack_init(struct cmd_args *args) {
     bpfw_info("Initializing nf_conntrack ...\n");
 
     // Read the conntrack info and save it inside the BPF conntrack map
-    flowtrack_h->handle.conntrack = conntrack_init();
-    if (!flowtrack_h->handle.conntrack)
+    flowtrack_h->conntrack_h = conntrack_init();
+    if (!flowtrack_h->conntrack_h)
         goto bpf_detach_program;
-
-#ifdef OPENWRT_UCODE
-    bpfw_info("Initializing ucode ...\n");
-
-    flowtrack_h->ucode_h = ucode_init();
-    if (!flowtrack_h->ucode_h)
-        goto conntrack_destroy;
-#endif
 
     return flowtrack_h;
 
 conntrack_destroy:
     // De-Init conntrack
-    conntrack_destroy(flowtrack_h->handle.conntrack);
+    conntrack_destroy(flowtrack_h->conntrack_h);
 
 bpf_detach_program:
     // Detach the program from the specified interface names
-    args->if_count == 0 ? detach_bpf_program(flowtrack_h->handle.bpf, flowtrack_h->handle.netlink) :
-        bpf_ifnames_detach_program(flowtrack_h->handle.bpf, args->if_names, args->if_count);
+    args->if_count == 0 ? bpf_detach_program(flowtrack_h->bpf_h, flowtrack_h->netlink_h) :
+        bpf_ifnames_detach_program(flowtrack_h->bpf_h, args->if_names, args->if_count);
 
 bpf_unload_program:
     // Unload the BPF object from the kernel
-    bpf_unload_program(flowtrack_h->handle.bpf);
+    bpf_unload_program(flowtrack_h->bpf_h);
 
 netlink_destroy:
-    netlink_destroy(flowtrack_h->handle.netlink);
+    netlink_destroy(flowtrack_h->netlink_h);
 
 free:
     free(flowtrack_h);
@@ -436,23 +330,18 @@ free:
 }
 
 void flowtrack_destroy(struct flowtrack_handle* flowtrack_h, struct cmd_args *args) {
-#ifdef OPENWRT_UCODE
-    // De-Init ucode
-    ucode_destroy(flowtrack_h->ucode_h);
-#endif
-
     // De-Init conntrack
-    conntrack_destroy(flowtrack_h->handle.conntrack);
+    conntrack_destroy(flowtrack_h->conntrack_h);
 
     // Unload the BPF object from the kernel
-    bpf_unload_program(flowtrack_h->handle.bpf);
+    bpf_unload_program(flowtrack_h->bpf_h);
 
     // Detach the program from the specified interface names
-    args->if_count == 0 ? detach_bpf_program(flowtrack_h->handle.bpf, flowtrack_h->handle.netlink) :
-        bpf_ifnames_detach_program(flowtrack_h->handle.bpf, args->if_names, args->if_count);
+    args->if_count == 0 ? bpf_detach_program(flowtrack_h->bpf_h, flowtrack_h->netlink_h) :
+        bpf_ifnames_detach_program(flowtrack_h->bpf_h, args->if_names, args->if_count);
 
     // De-Init netlink
-    netlink_destroy(flowtrack_h->handle.netlink);
+    netlink_destroy(flowtrack_h->netlink_h);
 
     free(flowtrack_h);
 }

@@ -31,12 +31,9 @@ int mnl_attr_parse_cb(const struct nlattr *attr, void *data);
 void mnl_attr_put_ip(struct nlmsghdr *nlh, __u16 type, void *ip, __u8 family);
 
 int send_request(struct netlink_handle* nl_h);
-int send_dump_request(struct netlink_handle *nl_h, mnl_cb_t cb_func, void *cb_data);
-
 int request_interface(struct netlink_handle* nl_h, __u32 ifindex);
-int get_input_interface(struct netlink_handle* nl_h, struct flow_key_value* flow);
 
-int get_pppoe_device(__u32 ifindex, struct pppoe *pppoe);
+int get_pppoe_device(struct netlink_handle* nl_h, __u32 ifindex, struct pppoe *pppoe);
 
 
 #endif

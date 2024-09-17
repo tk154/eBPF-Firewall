@@ -8,6 +8,7 @@
 
 // Struct to keep BPF object and program pointers together
 struct bpf_handle;
+struct netlink_handle;
 
 /**
  * Load a BPF object including its map and program into the kernel
@@ -65,14 +66,14 @@ void bpf_ifnames_detach_program(struct bpf_handle* bpf, char* ifnames[], unsigne
  * @param prog A pointer to the to-be-attached BPF program
  * @returns 0 on success, -1 if the program is not of type XDP or TC, errno for other errors
  * **/
-//int bpf_attach_program(struct bpf_handle* bpf, struct netlink_handle *netlink_h);
+int bpf_attach_program(struct bpf_handle* bpf, struct netlink_handle *netlink_h);
 
 /**
  * Detach a BPF program from all non-virtual network interfaces
  * @param prog A pointer to the to-be-detached BPF program
  * @returns 0 on success, errno if the network interfaces couldn't be retrieved
  * **/
-//int bpf_detach_program(struct bpf_handle* bpf, struct netlink_handle *netlink_h);
+int bpf_detach_program(struct bpf_handle* bpf, struct netlink_handle *netlink_h);
 
 int   bpf_get_map_fd(struct bpf_handle* bpf, const char *map_name);
 //void *bpf_get_section_data(struct bpf_handle *bpf, const char *sec_name, size_t *sec_size);

@@ -6,18 +6,11 @@ BIN_DIR  := bin
 ARCH_DIR := $(BIN_DIR)/host
 
 MAIN_SRC 	 := $(SRC_DIR)/main.c
-UCODE_SOURCE := $(SRC_DIR)/ucode/ucode.c
-SOURCES  	 := $(shell find -name "*.c" ! -wholename "$(MAIN_SRC)" ! -wholename "$(UCODE_SOURCE)")
+SOURCES  	 := $(shell find -name "*.c" ! -wholename "$(MAIN_SRC)")
 
 ifdef OPENWRT_DIR
 include ../OpenWrt.mk
 ARCH_DIR := $(BIN_DIR)/$(ARCH)
-
-ifdef PACKAGE_DROPPER
-CFLAGS  += -DOPENWRT_UCODE
-LDLIBS  += -lucode -ljson-c
-SOURCES += $(UCODE_SOURCE)
-endif
 endif
 
 OUT_BIN := $(ARCH_DIR)/bpfw

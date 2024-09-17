@@ -151,7 +151,7 @@ static int parse_ppp_if(struct netlink_handle* nl_h, __u32 ifindex, struct nlatt
     bpfw_verbose("-> %s (ppp) ", ifname);
 
     if (ifindex != nl_h->pppoe.ifindex) {
-        int rc = get_pppoe_device(ifindex, &nl_h->pppoe);
+        int rc = get_pppoe_device(nl_h, ifindex, &nl_h->pppoe);
         if (rc != BPFW_RC_OK)
             return rc;
 
@@ -252,16 +252,16 @@ static int get_route(struct netlink_handle* nl_h, struct flow_key_value* flow, v
     rtm->rtm_src_len = rtm->rtm_dst_len = flow->key.family == AF_INET ? 32 : 128;
 
     // Add attributes
-    mnl_attr_put_u32(nlh, RTA_IIF, flow->value.next.iif);
-    mnl_attr_put_u8 (nlh, RTA_IP_PROTO, flow->key.proto);
+    //mnl_attr_put_u32(nlh, RTA_IIF, flow->value.next.iif);
+    //mnl_attr_put_u8 (nlh, RTA_IP_PROTO, flow->key.proto);
 
-    mnl_attr_put_ip (nlh, RTA_SRC, flow->key.src_ip, flow->key.family);
+    //mnl_attr_put_ip (nlh, RTA_SRC, flow->key.src_ip, flow->key.family);
     mnl_attr_put_ip (nlh, RTA_DST, flow->value.next.nat.rewrite_flag & REWRITE_DEST_IP ?
                                    flow->value.next.nat.dest_ip : flow->key.dest_ip, flow->key.family);
 
-    mnl_attr_put_u16(nlh, RTA_SPORT, flow->key.src_port);
+    /*mnl_attr_put_u16(nlh, RTA_SPORT, flow->key.src_port);
     mnl_attr_put_u16(nlh, RTA_DPORT, flow->value.next.nat.rewrite_flag & REWRITE_DEST_PORT ?
-                                     flow->value.next.nat.dest_port : flow->key.dest_port);
+                                     flow->value.next.nat.dest_port : flow->key.dest_port);*/
 
     // Send request and receive response
     int rc = send_request(nl_h);
@@ -318,40 +318,22 @@ static int get_route(struct netlink_handle* nl_h, struct flow_key_value* flow, v
     }
 
     __u32 oif = mnl_attr_get_u32(attr[RTA_OIF]);
-    flow->value.next.oif = flow->value.next.hop.ifindex = oif;
+    flow->value.next.hop.ifindex = oif;
 
-    if (dest_ip) {
-        __u16 dest_attr = attr[RTA_GATEWAY] ? RTA_GATEWAY : RTA_DST;
-        ipcpy(dest_ip, mnl_attr_get_payload(attr[dest_attr]), flow->key.family);
-    }
+    __u16 dest_attr = attr[RTA_GATEWAY] ? RTA_GATEWAY : RTA_DST;
+    ipcpy(dest_ip, mnl_attr_get_payload(attr[dest_attr]), flow->key.family);
 
     return ACTION_FORWARD;
-}
-
-static int get_iif_and_route(struct netlink_handle* nl_h, struct flow_key_value* flow, void *dest_ip) {
-    int rc = get_input_interface(nl_h, flow);
-    if (rc != BPFW_RC_OK)
-        return rc;
-
-    return get_route(nl_h, flow, dest_ip);
-}
-
-int netlink_get_route(struct netlink_handle* nl_h, struct flow_key_value* flow) {
-    int rc = get_iif_and_route(nl_h, flow, NULL);
-    if (rc == ACTION_FORWARD)
-        bpfw_verbose_ifindex("-> ", flow->value.next.hop.ifindex, "", 0);
-
-    return rc;
 }
 
 int netlink_get_next_hop(struct netlink_handle* nl_h, struct flow_key_value* flow) {
     __u8 dest_ip[IPV6_ALEN];
 
-    int rc = get_iif_and_route(nl_h, flow, dest_ip);
+    int rc = get_route(nl_h, flow, dest_ip);
     if (rc != ACTION_FORWARD)
         return rc;
 
-    rc = get_link(nl_h, flow->value.next.oif, flow, dest_ip);
+    rc = get_link(nl_h, flow->value.next.hop.ifindex, flow, dest_ip);
     if (rc != BPFW_RC_OK)
         return rc;
 

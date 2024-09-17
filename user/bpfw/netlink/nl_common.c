@@ -171,25 +171,25 @@ static int send_dump_request_cb(const struct nlmsghdr *nlh, void *data) {
     return (*cb->func)(nlh, cb->data);
 }
 
-static int send_dump_req_sock_buf(struct nl_sock_buf *sock_buf, mnl_cb_t cb_func, void *cb_data) {
-    unsigned int seq = sock_buf->seq++;
-    unsigned int portid = mnl_socket_get_portid(sock_buf->sock);
+static int send_dump_request(struct netlink_handle *nl_h, mnl_cb_t cb_func, void *cb_data) {
+    unsigned int seq = nl_h->req.seq++;
+    unsigned int portid = mnl_socket_get_portid(nl_h->req.sock);
 
-    struct nlmsghdr *nlh = (struct nlmsghdr*)sock_buf->buf;
+    struct nlmsghdr *nlh = (struct nlmsghdr*)nl_h->req.buf;
     nlh->nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
     nlh->nlmsg_seq = seq;
 
     // Send the request
-    if (mnl_socket_sendto(sock_buf->sock, nlh, nlh->nlmsg_len) < 0) {
+    if (mnl_socket_sendto(nl_h->req.sock, nlh, nlh->nlmsg_len) < 0) {
         bpfw_error("\nError sending netlink dump request: %s (-%d).\n", strerror(errno), errno);
         return BPFW_RC_ERROR;
     }
 
     // Receive and parse the response
     ssize_t nbytes;
-    while ((nbytes = mnl_socket_recvfrom(sock_buf->sock, sock_buf->buf, sock_buf->buf_size)) > 0) {
+    while ((nbytes = mnl_socket_recvfrom(nl_h->req.sock, nl_h->req.buf, nl_h->req.buf_size)) > 0) {
         struct dump_cb_data cb = { .func = cb_func, .data = cb_data };
-        int rc = mnl_cb_run(sock_buf->buf, nbytes, seq, portid, send_dump_request_cb, &cb);
+        int rc = mnl_cb_run(nl_h->req.buf, nbytes, seq, portid, send_dump_request_cb, &cb);
 
         switch (rc) {
             case MNL_CB_ERROR:
@@ -206,10 +206,6 @@ static int send_dump_req_sock_buf(struct nl_sock_buf *sock_buf, mnl_cb_t cb_func
     }
 
     return BPFW_RC_OK;
-}
-
-int send_dump_request(struct netlink_handle *nl_h, mnl_cb_t cb_func, void *cb_data) {
-    return send_dump_req_sock_buf(&nl_h->req, cb_func, cb_data);
 }
 
 int request_interface(struct netlink_handle* nl_h, __u32 ifindex) {
@@ -246,37 +242,29 @@ static int get_ppp_peer_ipv6_cb(const struct nlmsghdr *nlh, void *peer_ip6) {
     return MNL_CB_OK;
 }
 
-static int get_ppp_peer_ipv6(__u32 ifindex, struct nl_sock_buf *sock_buf, void **peer_ip6) {
+static int get_ppp_peer_ipv6(struct netlink_handle* nl_h, __u32 ifindex, void **peer_ip6) {
     // Prepare a Netlink request message
-    struct nlmsghdr *nlh = mnl_nlmsg_put_header(sock_buf->buf);
+    struct nlmsghdr *nlh = mnl_nlmsg_put_header(nl_h->req.buf);
     nlh->nlmsg_type = RTM_GETADDR;
 
     struct ifaddrmsg *ifaddrm = mnl_nlmsg_put_extra_header(nlh, sizeof(struct ifaddrmsg));
     ifaddrm->ifa_family = AF_INET6;
     ifaddrm->ifa_index  = ifindex;
 
-    *peer_ip6 = NULL;
-
     // Send request and receive response
-    return send_dump_req_sock_buf(sock_buf, get_ppp_peer_ipv6_cb, (void*)peer_ip6);
+    return send_dump_request(nl_h, get_ppp_peer_ipv6_cb, (void*)peer_ip6);
 }
 
-int get_pppoe_device(__u32 ifindex, struct pppoe *pppoe) {
-    struct nl_sock_buf sock_buf;
-    if (open_socket_and_create_buffer(&sock_buf, MNL_SOCKET_BUFFER_SIZE, 0) != BPFW_RC_OK)
-        return BPFW_RC_ERROR;
+int get_pppoe_device(struct netlink_handle* nl_h, __u32 ifindex, struct pppoe *pppoe) {
+    void *peer_ip6 = NULL;
 
-    void *peer_ip6;
-
-    int rc = get_ppp_peer_ipv6(ifindex, &sock_buf, &peer_ip6);
+    int rc = get_ppp_peer_ipv6(nl_h, ifindex, &peer_ip6);
     if (rc == BPFW_RC_ERROR)
-        goto close_socket_and_free_buffer;
+        return BPFW_RC_ERROR;
 
     if (!peer_ip6) {
         bpfw_verbose_ifindex("-> Couldn't retrieve IPv6 peer address of ", ifindex, "", 0);
-        rc = ACTION_NONE;
-
-        goto close_socket_and_free_buffer;
+        return ACTION_NONE;
     }
 
     rc = pppoe_get_device(peer_ip6, pppoe);
@@ -288,9 +276,6 @@ int get_pppoe_device(__u32 ifindex, struct pppoe *pppoe) {
         default:
             bpfw_verbose("Not a PPPoE interface?\n");
     }
-
-close_socket_and_free_buffer:
-    close_socket_and_free_buffer(&sock_buf);
 
     return rc;
 }

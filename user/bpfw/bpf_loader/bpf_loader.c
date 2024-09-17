@@ -9,6 +9,7 @@
 #include <net/if.h>
 #include <linux/if_link.h>
 
+#include "../netlink/netlink.h"
 #include "../logging/logging.h"
 
 
@@ -18,9 +19,6 @@ struct bpf_handle {
     struct bpf_program *prog;   // BPF program pointer
 
     enum bpfw_hook hook;
-
-    /*bool  dsa;
-    __u32 dsa_switch;*/
 
     //struct {
     //    __u32 handle;
@@ -171,6 +169,61 @@ void bpf_ifnames_detach_program(struct bpf_handle* bpf, char* ifnames[], unsigne
     // Iterate to all the given interfaces and detache the program from them
     for (int i = 0; i < ifname_size; i++)
         bpf_ifname_detach_program(bpf, ifnames[i]);
+}
+
+int bpf_attach_program(struct bpf_handle* bpf, struct netlink_handle *netlink_h) {
+    // Retrieve the name and index of all network interfaces
+    struct if_nameindex* ifaces = if_nameindex();
+    if (!ifaces) {
+        bpfw_error("Error retrieving network interfaces: %s (-%d).\n", strerror(errno), errno);
+        return BPFW_RC_ERROR;
+    }
+
+    int rc = BPFW_RC_OK;
+    for (struct if_nameindex* iface = ifaces; iface->if_index && iface->if_name; iface++) {
+        rc = netlink_ifindex_should_attach(netlink_h, iface->if_index);
+        switch (rc) {
+            case BPFW_RC_ERROR:
+                goto error;
+
+            case NL_INTERFACE_DO_NOT_ATTACH:
+                continue;
+        }
+
+        rc = bpf_ifindex_attach_program(bpf, iface->if_index);
+        if (rc != BPFW_RC_OK) {
+error:
+            // If an error occured while attaching to one interface, detach all the already attached programs
+            while (--iface >= ifaces)
+                if (netlink_ifindex_should_attach(netlink_h, iface->if_index) == NL_INTERFACE_DO_ATTACH)
+                    bpf_ifindex_detach_program(bpf, iface->if_index);
+
+            break;
+        }
+    }
+
+    // Retrieved interfaces are dynamically allocated, so they must be freed
+    if_freenameindex(ifaces);
+
+    return rc;
+}
+
+int bpf_detach_program(struct bpf_handle* bpf, struct netlink_handle *netlink_h) {
+    // Retrieve the name and index of all network interfaces
+    struct if_nameindex* ifaces = if_nameindex();
+    if (!ifaces) {
+        bpfw_error("Error retrieving network interfaces: %s (-%d).\n", strerror(errno), errno);
+        return BPFW_RC_ERROR;
+    }
+
+    for (struct if_nameindex* iface = ifaces; iface->if_index && iface->if_name; iface++)
+        if (netlink_ifindex_should_attach(netlink_h, iface->if_index) == NL_INTERFACE_DO_ATTACH)
+            bpf_ifindex_detach_program(bpf, iface->if_index);
+
+    // Retrieved interfaces are dynamically allocated, so they must be freed
+    if_freenameindex(ifaces);
+
+    return BPFW_RC_OK;
 }
 
 

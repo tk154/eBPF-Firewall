@@ -83,7 +83,6 @@ struct next_entry {
 	struct next_hop hop;
 	struct nat_entry nat;
 
-	__u32	iif, oif;
 	__sum16 ipv4_cksum_diff;
 };
 
