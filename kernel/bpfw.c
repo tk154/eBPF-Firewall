@@ -5,7 +5,7 @@
 #define BPFW_LOG_LEVEL BPFW_LOG_LEVEL_WARN
 #include "common_kern.h"
 
-#include "dsa.h"
+#include "dsa/dsa.h"
 #include "parse_header.h"
 #include "push_header.h"
 #include "mangle.h"
@@ -153,7 +153,7 @@ __always_inline static __u8 bpfw_func(void *ctx, bool xdp, struct packet_data *p
 
 	// Fill the flow key
 	struct flow_key f_key;
-	fill_flow_key(&f_key, pkt->ifindex.in, &header);
+	fill_flow_key(&f_key, pkt->in_ifindex, &header);
 
 	// Check if a flowtrack entry exists
 	struct flow_value* f_value = bpf_map_lookup_elem(&BPFW_FLOW_MAP, &f_key);
@@ -178,7 +178,7 @@ __always_inline static __u8 bpfw_func(void *ctx, bool xdp, struct packet_data *p
 			if (!push_l2_header(ctx, xdp, pkt, &header.l2, &f_value->next.hop))
 				return ACTION_DROP;
 
-			pkt->ifindex.out = f_value->next.hop.ifindex;
+			pkt->out_ifindex = f_value->next.hop.ifindex;
 			bpfw_debug("Redirect to ifindex %u", pkt->ifindex.out);
 
 			break;
@@ -201,7 +201,7 @@ SEC("xdp")
 int BPFW_XDP_PROG(struct xdp_md *xdp_md) {
 	// Save pointer to the first and last Byte of the received package
 	struct packet_data pkt = {
-		.ifindex.in = xdp_md->ingress_ifindex,
+		.in_ifindex = xdp_md->ingress_ifindex,
 		.data 	  	= (void*)(long)xdp_md->data,
 		.data_end 	= (void*)(long)xdp_md->data_end,
 		.p 		  	= (void*)(long)xdp_md->data
@@ -210,10 +210,10 @@ int BPFW_XDP_PROG(struct xdp_md *xdp_md) {
 	__u8 action = bpfw_func(xdp_md, true, &pkt);
 	switch (action) {
 		case ACTION_FORWARD:
-			if (pkt.ifindex.in == pkt.ifindex.out)
+			if (pkt.in_ifindex == pkt.out_ifindex)
 				return XDP_TX;
 
-			return bpf_redirect(pkt.ifindex.out, 0);
+			return bpf_redirect(pkt.out_ifindex, 0);
 
 		case ACTION_DROP:
 			return XDP_DROP;
@@ -230,7 +230,7 @@ SEC("tc")
 int BPFW_TC_PROG(struct __sk_buff *skb) {
 	// Save pointer to the first and last Byte of the received package
 	struct packet_data pkt = {
-		.ifindex.in = skb->ingress_ifindex,
+		.in_ifindex = skb->ingress_ifindex,
 		.data 	  	= (void*)(long)skb->data,
 		.data_end 	= (void*)(long)skb->data_end,
 		.p 		  	= (void*)(long)skb->data
@@ -239,7 +239,7 @@ int BPFW_TC_PROG(struct __sk_buff *skb) {
 	__u8 action = bpfw_func(skb, false, &pkt);
 	switch (action) {
 		case ACTION_FORWARD:
-			return bpf_redirect(pkt.ifindex.out, 0);
+			return bpf_redirect(pkt.out_ifindex, 0);
 
 		case ACTION_DROP:
 			return TC_ACT_SHOT;

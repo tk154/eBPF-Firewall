@@ -28,17 +28,14 @@ __always_inline static __be16 proto_ppp2eth(__be16 ppp_proto) {
 
 __always_inline static bool parse_eth_header(void *ctx, struct packet_data *pkt, struct l2_header *l2) {
 	// Parse the Ethernet header, will drop the package if out-of-bounds
-	if (pkt->ifindex.in == dsa_switch.ifindex) {
+	if (pkt->in_ifindex == dsa_switch.ifindex) {
 		if (!parse_dsa_header(pkt, l2))
 			return false;
 
 		bpfw_debug("Interface: %u@p%u", pkt->ifindex.in, l2->dsa_port & ~DSA_PORT_SET);
 	}
 	else {
-		check_header(struct ethhdr, *ethh, pkt);
-
-		l2->src_mac = ethh->h_source;
-		l2->proto = ethh->h_proto;
+		parse_ethhdr(struct ethhdr, ethh, pkt, l2);
 		l2->dsa_port = 0;
 
 		bpfw_debug("Interface: %u", pkt->ifindex.in);
@@ -50,7 +47,7 @@ __always_inline static bool parse_eth_header(void *ctx, struct packet_data *pkt,
 }
 
 __always_inline static bool parse_vlan_header(void *ctx, bool xdp, struct packet_data *pkt, struct l2_header *l2) {
-	if (xdp || pkt->ifindex.in == dsa_switch.ifindex) {
+	if (xdp || l2->dsa_port) {
 		// Check if there is a VLAN header
 		if (l2->proto == bpf_htons(ETH_P_8021Q)) {
 			// Parse the VLAN header, will drop the package if out-of-bounds

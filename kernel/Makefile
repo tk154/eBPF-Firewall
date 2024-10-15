@@ -6,7 +6,7 @@ OBJ_DIR := obj
 
 BPF_NAME := bpfw
 SOURCE   := $(SRC_DIR)/$(BPF_NAME).c
-HEADERS  := $(wildcard $(SRC_DIR)/*.h)
+HEADERS  := $(shell find $(SRC_DIR) -name "*.h")
 
 LE_OBJ_FILE := $(OBJ_DIR)/$(BPF_NAME)_le.o
 BE_OBJ_FILE := $(OBJ_DIR)/$(BPF_NAME)_be.o

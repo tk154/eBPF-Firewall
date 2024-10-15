@@ -7,11 +7,12 @@
 #include <netinet/in.h>
 
 
-#define BPFW_LOG_LEVEL_ERROR   0
-#define BPFW_LOG_LEVEL_WARN    1
-#define BPFW_LOG_LEVEL_INFO    2
-#define BPFW_LOG_LEVEL_DEBUG   3
-#define BPFW_LOG_LEVEL_VERBOSE 4
+#define BPFW_LOG_LEVEL_NONE     0 
+#define BPFW_LOG_LEVEL_ERROR    1
+#define BPFW_LOG_LEVEL_WARN     2
+#define BPFW_LOG_LEVEL_INFO     3
+#define BPFW_LOG_LEVEL_DEBUG    4
+#define BPFW_LOG_LEVEL_VERBOSE  5
 
 #if BPFW_LOG_LEVEL >= BPFW_LOG_LEVEL_ERROR
     #define bpfw_error(format, ...) bpf_printk(format, ##__VA_ARGS__)
