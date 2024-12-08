@@ -92,7 +92,7 @@ int print_action(__u8 action) {
             return fputs(" [PASS]", stdout);
         case ACTION_DROP:
             return fputs(" [DROP]", stdout);
-        case ACTION_REDIRECT:
+        case ACTION_FORWARD:
             return fputs(" [REDIRECT]", stdout);
         default:
             return 0;
@@ -120,7 +120,7 @@ void print_base(struct flow_key_value *flow, __u64 curr_ns) {
     print_port(flow->key.src_port, "sport");
     print_port(flow->key.dest_port, "dport");
 
-    print_action(flow->value.action);
+    print_action(flow->value.state);
 }
 
 void print_nat(struct nat_entry *n_entry, __u8 family) {
@@ -185,8 +185,8 @@ int print_flows(struct cmd_args *args) {
             return EXIT_FAILURE;
         }
 
-        if (args->action_only   && flow.value.action == ACTION_NONE ||
-            args->redirect_only && flow.value.action != ACTION_REDIRECT)
+        if (args->action_only   && flow.value.state == ACTION_NONE ||
+            args->redirect_only && flow.value.state != ACTION_FORWARD)
                 goto get_next_key;
 
         print_base(&flow, curr_ns);
@@ -194,7 +194,7 @@ int print_flows(struct cmd_args *args) {
         if (args->print_nat && flow.value.next.nat.rewrite_flag)
             print_nat(&flow.value.next.nat, flow.key.family);
 
-        if (args->print_hop && flow.value.action == ACTION_REDIRECT)
+        if (args->print_hop && flow.value.state == ACTION_FORWARD)
             print_hop(&flow.value.next.hop);
 
         print_endline();
