@@ -179,7 +179,7 @@ __always_inline static __u8 bpfw_func(void *ctx, bool xdp, struct packet_data *p
 				return ACTION_DROP;
 
 			pkt->out_ifindex = f_value->next.hop.ifindex;
-			bpfw_debug("Redirect to ifindex %u", pkt->ifindex.out);
+			bpfw_debug("Redirect to ifindex %u", pkt->out_ifindex);
 
 			break;
 

@@ -32,13 +32,13 @@ __always_inline static bool parse_eth_header(void *ctx, struct packet_data *pkt,
 		if (!parse_dsa_header(pkt, l2))
 			return false;
 
-		bpfw_debug("Interface: %u@p%u", pkt->ifindex.in, l2->dsa_port & ~DSA_PORT_SET);
+		bpfw_debug("Interface: %u@p%u", pkt->in_ifindex, l2->dsa_port & ~DSA_PORT_SET);
 	}
 	else {
 		parse_ethhdr(struct ethhdr, ethh, pkt, l2);
 		l2->dsa_port = 0;
 
-		bpfw_debug("Interface: %u", pkt->ifindex.in);
+		bpfw_debug("Interface: %u", pkt->in_ifindex);
 	}
 
 	bpfw_debug_mac("Src MAC: ", l2->src_mac);
