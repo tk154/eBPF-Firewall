@@ -139,6 +139,11 @@ __always_inline static __u8 bpfw_func(void *ctx, bool xdp, struct packet_data *p
 		return ACTION_PASS;
 	}
 
+	if (!pkt->in_ifindex) {
+		bpfw_warn("ifindex is not set.");
+		return ACTION_PASS;
+	}
+
 	bpfw_debug("---------- New Package ----------");
 
 	struct packet_header header;
