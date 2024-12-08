@@ -86,15 +86,17 @@ static int get_pppoe_line(FILE *pppoe_file, struct pppoe *pppoe) {
 
 int pppoe_get_device(void *peer_ip6, struct pppoe *pppoe) {
     __u8 mac[ETH_ALEN];
+    FILE *pppoe_file;
+    int rc;
+
     ipv6_to_mac(peer_ip6, mac);
 
-    FILE *pppoe_file = open_pppoe_file();
+    pppoe_file = open_pppoe_file();
     if (!pppoe_file)
         return BPFW_RC_ERROR;
 
-    int rc;
     while ((rc = get_pppoe_line(pppoe_file, pppoe)) == BPFW_RC_OK) {
-        if (memcmp(pppoe->address, mac, ETH_ALEN) == 0)
+        if (memcmp(pppoe->address, mac, ETH_ALEN - 3) == 0)
             break;
     }
 
