@@ -2,6 +2,7 @@
 #define BPFW_FLOWTRACK_H
 
 #include "../common_user.h"
+#include "../arguments/arguments.h"
 
 
 struct flowtrack_handle;

@@ -1,10 +1,7 @@
 #ifndef BPFW_COMMON_USER_H
 #define BPFW_COMMON_USER_H
 
-#include <stdbool.h>
-
 #include "../../common.h"
-//#include "logging/logging.h"
 
 
 enum {
@@ -30,21 +27,6 @@ struct flow_key_value {
 
 struct flow_timeout {
     __u32 tcp, udp;
-};
-
-struct cmd_args {
-    char* obj_path;
-    enum bpfw_hook hook;
-
-    char** if_names;
-    unsigned int if_count;
-
-    bool dsa;
-
-    __u32 map_poll_sec;
-    __u32 map_max_entries;
-
-    struct flow_timeout flow_timeout;
 };
 
 
