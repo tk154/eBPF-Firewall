@@ -1,13 +1,19 @@
+LIBC ?= musl
 ARCH ?= $(shell uname -m)
+SUFFIX ?= *
 
-TOOLCHAIN_DIR := $(lastword $(wildcard $(OPENWRT_DIR)/staging_dir/toolchain-$(ARCH)_*gcc-*_musl*))
-TARGET_DIR    :=            $(wildcard $(OPENWRT_DIR)/staging_dir/target-$(ARCH)_*musl*)
+TOOLCHAIN_DIR := $(lastword $(wildcard $(OPENWRT_DIR)/staging_dir/toolchain-$(ARCH)_$(SUFFIX)_gcc-*_$(LIBC)*))
+TARGET_DIR    := $(lastword $(wildcard $(OPENWRT_DIR)/staging_dir/target-$(ARCH)_$(SUFFIX)_$(LIBC)*))
+CC			  := $(notdir   $(wildcard $(TOOLCHAIN_DIR)/bin/$(ARCH)*-openwrt-linux-musl*-gcc))
 
 ifndef TOOLCHAIN_DIR
-$(error "No toolchain directory found in $(OPENWRT_DIR)/staging_dir for arch $(ARCH)")
+$(error "'$(OPENWRT_DIR)/staging_dir/toolchain-$(ARCH)_$(SUFFIX)' not found")
 endif
 
-CC := $(notdir $(wildcard $(TOOLCHAIN_DIR)/bin/$(ARCH)-openwrt-linux-musl*-gcc))
+ifndef CC
+$(error "GCC compiler '$(TOOLCHAIN_DIR)/bin/$(ARCH)*-openwrt-linux-musl*' not found")
+endif
+
 CFLAGS 	+= -I$(TARGET_DIR)/usr/include
 LDFLAGS += -L$(TARGET_DIR)/usr/lib
 

@@ -29,21 +29,18 @@
 
 #define DSA_PROTO_MAX_LEN 8
 
-#define IPV4_ALEN 4
-#define IPV6_ALEN 16
-
 
 struct flow_key {
 	__u32  ifindex;
 
-	__u16  vlan_id;
+	__be32 src_ip[4];
+	__be32 dest_ip[4];
+
+	__le16 vlan_id;
 	__be16 pppoe_id;
 
 	__be16 src_port;
 	__be16 dest_port;
-
-	__u8   src_ip [IPV6_ALEN];
-	__u8   dest_ip[IPV6_ALEN];
 
 	__u8   dsa_port;
 	__u8   family;
@@ -56,26 +53,24 @@ struct flow_key {
 struct next_hop {
 	__u32  ifindex;
 
-	__u16  vlan_id;
-	__be16 pppoe_id;
-
 	__u8   src_mac [ETH_ALEN];
 	__u8   dest_mac[ETH_ALEN];
 
-	__u8   dsa_port;
+	__le16 vlan_id;
+	__be16 pppoe_id;
 
+	__u8   dsa_port;
 	__s8   l2_diff;
 };
 
 struct nat_entry {
-	__sum16 l4_cksum_diff;
+	__be32  src_ip[4];
+	__be32  dest_ip[4];
 
 	__be16  src_port;
 	__be16  dest_port;
 
-	__u8 	src_ip [IPV6_ALEN];
-	__u8 	dest_ip[IPV6_ALEN];
-
+	__sum16 l4_cksum_diff;
 	__u8    rewrite_flag;
 };
 
@@ -151,14 +146,14 @@ enum {
 };
 
 
-static void *ipcpy(void *dest, const void* src, __u8 family) {
+__always_inline static void ipcpy(__be32 *dest, const __be32* src, __u8 family) {
     switch (family) {
-        case AF_INET:
-            return memcpy(dest, src, IPV4_ALEN);
         case AF_INET6:
-            return memcpy(dest, src, IPV6_ALEN);
-		default:
-			return NULL;
+            dest[3] = src[3];
+			dest[2] = src[2];
+			dest[1] = src[1];
+        case AF_INET:
+            dest[0] = src[0];
     }
 }
 

@@ -1,10 +1,13 @@
-#include "arguments.h"
+#include "args.h"
 
 #include <getopt.h>
+#include <limits.h>
 #include <stdlib.h>
 
 #include "../common_user.h"
-#include "../logging/logging.h"
+#include "../log/log.h"
+
+#define NUM_REQUIRED_ARGS   1
 
 #define DEFAULT_BPF_MAP_POLL_SEC    5
 #define DEFAULT_BPF_MAP_MAX_ENTRIES FLOW_MAP_DEFAULT_MAX_ENTRIES
@@ -33,23 +36,24 @@ static void print_usage(char* prog) {
 }
 
 static unsigned int parse_decimal(char* number) {
-    return strtoul(number, NULL, 10);
+    unsigned long value = strtoul(number, NULL, 10);
+    return value <= UINT_MAX ? value : 0;
 }
 
-static enum bpfw_hook parse_hook(char* prog_hook) {
-    if (strcmp(prog_hook, "tc") == 0)
-        return BPFW_HOOK_TC;
-    if (strcmp(prog_hook, "xdp") == 0)
-        return BPFW_HOOK_XDP;
-
+static enum bpf_hook parse_hook(char* prog_hook) {
     size_t arg_len = strlen(prog_hook);
 
+    if (strcmp(prog_hook, "tc") == 0)
+        return BPF_HOOK_TC;
+    if (strcmp(prog_hook, "xdp") == 0)
+        return BPF_HOOK_XDP;
+
     if (strncmp(prog_hook, "xdpgeneric", arg_len) == 0)
-        return BPFW_HOOK_XDP_GENERIC;
+        return BPF_HOOK_XDP_GENERIC;
     if (strncmp(prog_hook, "xdpnative",  arg_len) == 0)
-        return BPFW_HOOK_XDP_NATIVE;
+        return BPF_HOOK_XDP_NATIVE;
     if (strncmp(prog_hook, "xdpoffload", arg_len) == 0)
-        return BPFW_HOOK_XDP_OFFLOAD;
+        return BPF_HOOK_XDP_OFFLOAD;
 
     return 0;
 }
@@ -73,10 +77,53 @@ static bool parse_log_level(char* log_level) {
     return true;
 }
 
+static bool parse_interfaces(struct list_entry **if_hooks, char **if_names, unsigned int if_count) {
+    struct list_entry *entry;
+    struct if_hook *if_hook;
+    const char *delim = ":";
+    char *if_name, *hook;
+
+    for (unsigned int i = 0; i < if_count; i++) {
+        entry = list_new_entry(if_hooks, sizeof(struct if_hook));
+        if (!entry)
+            goto error;
+
+        if (!*if_hooks)
+            *if_hooks = entry;
+
+        if_hook = entry->data;
+
+        if_name = strtok(if_names[i], delim);
+        strncpy(if_hook->ifname, if_name, IF_NAMESIZE - 1);
+        if_hook->ifname[IF_NAMESIZE - 1] = '\0';
+
+        hook = strtok(NULL, delim);
+        if (hook) {
+            if_hook->hook = parse_hook(hook);
+            if (!if_hook->hook)
+                goto error;
+        }
+        else
+            if_hook->hook = BPF_HOOK_AUTO;
+    }
+
+    return true;
+
+error:
+    list_delete(*if_hooks);
+    return false;
+}
+
 // Checks if the given arguments are valid and determines the BPF hook
 static bool parse_cmd_args(int argc, char* argv[], struct cmd_args *args) {
+    unsigned int if_count;
+    int opt, opt_index;
+    char **if_names;
+
     struct option options[] = {
+        { "all",         no_argument,       0, 'a' },
         { "dsa",         no_argument,       0, 'd' },
+        { "hook",        required_argument, 0, 'h' },
         { "interval",    required_argument, 0, 'i' },
         { "log-level",   required_argument, 0, 'l' },
         { "max-flows",   required_argument, 0, 'm' },
@@ -85,16 +132,26 @@ static bool parse_cmd_args(int argc, char* argv[], struct cmd_args *args) {
         { 0,             0,                 0,  0  }
     };
 
-    int opt, opt_index;
-    while ((opt = getopt_long(argc, argv, "di:l:m:t:u:", options, &opt_index)) != -1) {
+    while ((opt = getopt_long(argc, argv, "adh:i:l:m:t:u:", options, &opt_index)) != -1) {
         switch (opt) {
+            case 'a':
+                args->auto = true;
+            break;
+
             case 'd':
                 args->dsa = true;
             break;
 
+            case 'h':
+                // Check the hook argument
+                args->hook = parse_hook(argv[optind]);
+                if (!args->hook)
+                    return false;
+            break;
+
             case 'i':
-                args->map_poll_sec = parse_decimal(optarg);
-                if (!args->map_poll_sec)
+                args->map.poll_sec = parse_decimal(optarg);
+                if (!args->map.poll_sec)
                     return false;
             break;
 
@@ -104,8 +161,8 @@ static bool parse_cmd_args(int argc, char* argv[], struct cmd_args *args) {
             break;
 
             case 'm':
-                args->map_max_entries = parse_decimal(optarg);
-                if (!args->map_max_entries)
+                args->map.max_entries = parse_decimal(optarg);
+                if (!args->map.max_entries)
                     return false;
 
             case 't':
@@ -125,29 +182,30 @@ static bool parse_cmd_args(int argc, char* argv[], struct cmd_args *args) {
         }
     }
 
-    // Check if BPF hook and object are provided in the command line
-    if (argc - optind < 2)
+    // Check if the BPF object is provided in the command line
+    if (argc - optind < NUM_REQUIRED_ARGS)
         return false;
 
-    // Check the hook argument
-    args->hook = parse_hook(argv[optind]);
-    if (!args->hook)
-        return false;
+    args->bpf_obj_path = argv[optind + 1];
 
-    args->obj_path = argv[optind + 1];
-    args->if_count = argc - optind - 2;
-
-    if (args->if_count > 0)
-        args->if_names = &argv[optind + 2];
+    if_count = argc - optind - 2;
+    if (if_count > 0) {
+        if_names = &argv[optind + 2];
+        return parse_interfaces(&args->if_hooks, if_names, if_count);
+    }
 
     return true;
 }
 
 bool check_cmd_args(int argc, char* argv[], struct cmd_args *args) {
+    args->if_hooks = NULL;
+    args->hook = BPF_HOOK_AUTO;
+
+    args->auto = false;
     args->dsa = false;
 
-    args->map_poll_sec    = DEFAULT_BPF_MAP_POLL_SEC;
-    args->map_max_entries = DEFAULT_BPF_MAP_MAX_ENTRIES;
+    args->map.poll_sec    = DEFAULT_BPF_MAP_POLL_SEC;
+    args->map.max_entries = DEFAULT_BPF_MAP_MAX_ENTRIES;
 
     args->flow_timeout.tcp = DEFAULT_TCP_FLOW_TIMEOUT;
     args->flow_timeout.udp = DEFAULT_UDP_FLOW_TIMEOUT;
@@ -159,4 +217,9 @@ bool check_cmd_args(int argc, char* argv[], struct cmd_args *args) {
     }
 
     return true;
+}
+
+void free_cmd_args(struct cmd_args *args) {
+    list_delete(args->if_hooks);
+    args->if_hooks = NULL;
 }

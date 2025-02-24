@@ -1,4 +1,4 @@
-#include "bpf_loader.h"
+#include "bpf.h"
 
 #include <errno.h>
 #include <stdlib.h>
@@ -284,6 +284,53 @@ int bpf_check_dsa(struct bpf_handle *bpf, __u32 dsa_switch, const char *dsa_prot
     dsa_switch_sec->proto   = index + 1;
 
     *dsa_tag = &dsa_tag_sec[index];
+
+    return BPFW_RC_OK;
+}
+
+
+int bpf_map_update_entry(struct bpf_map *map, const void *key, const void *value) {
+    // Update the BPF flow entry, break out on error
+    if (bpf_map_update_elem(map->fd, key, value, BPF_EXIST) != 0) {
+        bpfw_error("Error updating %s entry: %s (-%d).\n",
+            map->name, strerror(errno), errno);
+        return BPFW_RC_ERROR;
+    }
+
+    return BPFW_RC_OK;
+}
+
+int bpf_map_delete_entry(struct bpf_map *map, const void *key) {
+    if (bpf_map_delete_elem(map->fd, key) != 0) {
+        bpfw_error("Error deleting %s entry: %s (-%d).\n",
+            map->name, strerror(errno), errno);
+        return BPFW_RC_ERROR;
+    }
+
+    return BPFW_RC_OK;
+}
+
+int bpf_map_for_each_entry(struct bpf_map *map, void *key, void *value, bpf_cb_t func, void *data) {
+    int rc = bpf_map_get_next_key(map->fd, NULL, key);
+
+    while (rc == 0) {
+        if (bpf_map_lookup_elem(map->fd, key, value) != 0) {
+            bpfw_error("Error looking up %s entry: %s (-%d).\n",
+                map->name, strerror(errno), errno);
+            return BPFW_RC_ERROR;
+        }
+        
+        if (func(map, key, value, data) != BPFW_RC_OK)
+            return BPFW_RC_ERROR;
+
+        rc = bpf_map_get_next_key(map->fd, key, key);
+    }
+
+    if (rc != -ENOENT) {
+        bpfw_error("Error retrieving %s key: %s (-%d).\n",
+            map->name, strerror(errno), errno);
+        return BPFW_RC_ERROR;
+    }
 
     return BPFW_RC_OK;
 }

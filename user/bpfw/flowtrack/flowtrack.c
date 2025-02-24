@@ -5,11 +5,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
-#include <bpf/bpf.h>
 #include <netinet/in.h>
 
-#include "../bpf_loader/bpf_loader.h"
+#include "../bpf/bpf.h"
 #include "../conntrack/conntrack.h"
 #include "../netlink/netlink.h"
 
@@ -20,8 +20,9 @@ struct flowtrack_handle {
     enum bpfw_hook hook;
     __u32 map_poll_sec;
 
-    int flow_fd;
-    int user_time_fd;
+    struct {
+        struct bpf_map flow, user_time;
+    } map;
 
     // Flow Timeouts
     struct flow_timeout flow_timeout;
@@ -30,6 +31,13 @@ struct flowtrack_handle {
     struct bpf_handle *bpf_h;
     struct netlink_handle *netlink_h;
     struct conntrack_handle *conntrack_h;
+
+    struct netlink_cb link_cb;
+};
+
+struct update_flows_cb_data {
+    struct flowtrack_handle *flowtrack_h;
+    __u32 time_sec;
 };
 
 
@@ -52,18 +60,16 @@ static int update_userspace_time(struct flowtrack_handle *flowtrack_h, __u64 cur
     };
 
     // Update the BPF flow entry, break out on error
-    if (bpf_map_update_elem(flowtrack_h->user_time_fd, &index, &user, BPF_EXIST) != 0) {
-        bpfw_error("Error updating BPF userspace time: %s (-%d).\n", strerror(errno), errno);
+    if (bpf_map_update_entry(&flowtrack_h->map.user_time, &index, &user) != BPFW_RC_OK)
         return BPFW_RC_ERROR;
-    }
 
     return BPFW_RC_OK;
 }
 
 
 static int calc_l2_diff(struct flowtrack_handle *flowtrack_h, struct flow_key_value *flow) {
-    enum bpfw_hook hook = flowtrack_h->hook;
     struct dsa_tag *tag = flowtrack_h->dsa_tag;
+    enum bpfw_hook hook = flowtrack_h->hook;
     __s8 diff = 0;
     
     if (flow->key.dsa_port)
@@ -92,29 +98,32 @@ static int calc_l2_diff(struct flowtrack_handle *flowtrack_h, struct flow_key_va
 }
 
 
-static int update_bpf_entry(int map_fd, struct flow_key_value *flow) {
-    // Update the BPF flow entry, break out on error
-    if (bpf_map_update_elem(map_fd, &flow->key, &flow->value, BPF_EXIST) != 0) {
-        bpfw_error("Error updating flow entry: %s (-%d).\n", strerror(errno), errno);
-        return BPFW_RC_ERROR;
-    }
-
-    return BPFW_RC_OK;
-}
-
-static int delete_bpf_entry(int map_fd, void *key) {
-    if (bpf_map_delete_elem(map_fd, key) != 0) {
-        bpfw_error("Error deleting flow entry: %s (-%d).\n", strerror(errno), errno);
-        return BPFW_RC_ERROR;
-    }
-
-    return BPFW_RC_OK;
-}
-
 static int new_bpf_interface(__u32 ifindex, void *data) {
     struct flowtrack_handle *flowtrack_h = data;
 
     return bpf_ifindex_attach_program(flowtrack_h->bpf_h, ifindex);
+}
+
+static int del_bpf_interface_cb(struct bpf_map *map, void *key, void *value, void *data) {
+    struct flow_key_value *flow = key;
+    __u32 *ifindex = data;
+
+    if ((flow->key.ifindex == *ifindex || flow->value.next.hop.ifindex == *ifindex) &&
+         bpf_map_delete_entry(map, key) != BPFW_RC_OK)
+            return BPFW_RC_ERROR;
+
+    return BPFW_RC_OK;
+}
+
+static int del_bpf_interface(__u32 ifindex, void *data) {
+    struct flowtrack_handle *flowtrack_h = data;
+    struct flow_key_value flow;
+
+    if (bpf_map_for_each_entry(&flowtrack_h->map.flow, &flow.key, &flow.value,
+                               del_bpf_interface_cb, &ifindex) != BPFW_RC_OK)
+        return BPFW_RC_ERROR;
+
+    return BPFW_RC_OK;
 }
 
 
@@ -181,18 +190,28 @@ static int connection_established(struct flowtrack_handle *flowtrack_h, struct f
 }
 
 
-static int handle_bpf_entry(struct flowtrack_handle *flowtrack_h, struct flow_key_value *flow, __u32 time_sec) {
-    __u32 flow_time_sec = time_ns_to_sec(flow->value.time);
-    __u32 flow_timeout = flow->key.proto == IPPROTO_TCP ?
+static int update_flows_cb(struct bpf_map *map, void *key, void *value, void *data) {
+    __u32 time_sec, flow_time_sec, flow_timeout, last_packet_sec_ago;
+    struct update_flows_cb_data *cb_data = data;
+    struct flowtrack_handle *flowtrack_h;
+    struct flow_key_value *flow = key;
+    __u8 state;
+    int rc;
+
+    flowtrack_h = cb_data->flowtrack_h;
+    time_sec = cb_data->time_sec;
+
+    flow_time_sec = time_ns_to_sec(flow->value.time);
+    flow_timeout = flow->key.proto == IPPROTO_TCP ?
         flowtrack_h->flow_timeout.tcp : flowtrack_h->flow_timeout.udp;
 
-    __u32 last_packet_sec_ago = time_sec - flow_time_sec;
+    last_packet_sec_ago = time_sec - flow_time_sec;
     if (last_packet_sec_ago >= flow_timeout)
         // Flow timeout occured, so delete it from the BPF map
-        return delete_bpf_entry(flowtrack_h->flow_fd, &flow->key);
+        return bpf_map_delete_entry(map, &flow->key);
 
-    __u8 state = flow->value.state;
-    int rc = conntrack_do_lookup(flowtrack_h->conntrack_h, flow);
+    state = flow->value.state;
+    rc = conntrack_do_lookup(flowtrack_h->conntrack_h, flow);
 
     switch (rc) {
         case CT_CONN_FLOWTABLE_OFFLOAD:
@@ -215,22 +234,20 @@ static int handle_bpf_entry(struct flowtrack_handle *flowtrack_h, struct flow_ke
     if (rc != BPFW_RC_OK || state == flow->value.state)
         return rc;
 
-    return update_bpf_entry(flowtrack_h->flow_fd, flow);
+    return bpf_map_update_entry(map, &flow->key, &flow->value);
 }
 
-int flowtrack_update(struct flowtrack_handle* flowtrack_h) {
+static int update_flows(struct flowtrack_handle* flowtrack_h) {
+    __u64 time_ns = time_get_coarse_ns();
+    struct update_flows_cb_data cb_data;
     struct flow_key_value flow;
 
-    __u64 time_ns  = time_get_coarse_ns();
-    __u32 time_sec = time_ns_to_sec(time_ns);
+    cb_data.flowtrack_h = flowtrack_h;
+    cb_data.time_sec = time_ns_to_sec(time_ns);
 
     // Iterate through all the flow entries
-    bpf_flow_map_for_each_entry(flowtrack_h->flow_fd, flow, {
-        if (handle_bpf_entry(flowtrack_h, &flow, time_sec) != BPFW_RC_OK)
-            return BPFW_RC_ERROR;
-    });
-
-    if (netlink_check_notifications(flowtrack_h->netlink_h, new_bpf_interface, flowtrack_h) != BPFW_RC_OK)
+    if (bpf_map_for_each_entry(&flowtrack_h->map.flow, &flow.key, &flow.value,
+                               update_flows_cb, &cb_data) != BPFW_RC_OK)
         return BPFW_RC_ERROR;
 
     if (update_userspace_time(flowtrack_h, time_ns) != BPFW_RC_OK)
@@ -239,8 +256,30 @@ int flowtrack_update(struct flowtrack_handle* flowtrack_h) {
     return BPFW_RC_OK;
 }
 
+int flowtrack_loop(struct flowtrack_handle* flowtrack_h) {
+    unsigned int i = 0;
+
+    while (1) {
+        sleep(1);
+
+        if (netlink_check_notifications(flowtrack_h->netlink_h, flowtrack_h->link_cb, flowtrack_h) != BPFW_RC_OK)
+            return BPFW_RC_ERROR;
+
+        if (i == 0 && update_flows(flowtrack_h) != BPFW_RC_OK)
+            return BPFW_RC_ERROR;
+
+        i = (i + 1) % flowtrack_h->map_poll_sec;
+    }
+
+    return BPFW_RC_OK;
+}
+
 
 struct flowtrack_handle* flowtrack_init(struct cmd_args *args) {
+    char dsa_proto[DSA_PROTO_MAX_LEN];
+    __u32 dsa_switch;
+    int rc;
+
     struct flowtrack_handle* flowtrack_h = (struct flowtrack_handle*)malloc(sizeof(struct flowtrack_handle));
     if (!flowtrack_h) {
         bpfw_error("Error allocating flowtrack handle: %s (-%d).\n", strerror(errno), errno);
@@ -251,39 +290,50 @@ struct flowtrack_handle* flowtrack_init(struct cmd_args *args) {
     flowtrack_h->flow_timeout = args->flow_timeout;
     flowtrack_h->hook         = args->hook;
 
+    flowtrack_h->map.flow.name = FLOW_MAP_NAME;
+    flowtrack_h->map.user_time.name = USERSPACE_TIME_SECTION;
+
+    flowtrack_h->link_cb.newlink = new_bpf_interface;
+    flowtrack_h->link_cb.dellink = del_bpf_interface;
+
     bpfw_info("Initializing netlink ...\n");
 
     flowtrack_h->netlink_h = netlink_init(args->if_count == 0, args->dsa);
     if (!flowtrack_h->netlink_h)
         goto free;
-
-    __u32 dsa_switch;
-    char dsa_proto[DSA_PROTO_MAX_LEN];
+    
     if (netlink_get_dsa(flowtrack_h->netlink_h, &dsa_switch, dsa_proto) != BPFW_RC_OK)
+        goto netlink_destroy;
+
+    bpfw_info("Initializing nf_conntrack ...\n");
+
+    // Read the conntrack info and save it inside the BPF conntrack map
+    flowtrack_h->conntrack_h = conntrack_init();
+    if (!flowtrack_h->conntrack_h)
         goto netlink_destroy;
 
     bpfw_info("Opening BPF object ...\n");
 
     flowtrack_h->bpf_h = bpf_open_object(args->obj_path, args->hook);
     if (!flowtrack_h->bpf_h)
-        goto netlink_destroy;
+        goto conntrack_destroy;
 
     if (args->dsa && bpf_check_dsa(flowtrack_h->bpf_h, dsa_switch, dsa_proto, &flowtrack_h->dsa_tag) != BPFW_RC_OK)
-        goto bpf_unload_program;
+        goto conntrack_destroy;
 
     if (args->map_max_entries != FLOW_MAP_DEFAULT_MAX_ENTRIES && 
         bpf_set_map_max_entries(flowtrack_h->bpf_h, FLOW_MAP_NAME, args->map_max_entries) != BPFW_RC_OK)
-            goto bpf_unload_program;
+            goto conntrack_destroy;
 
     // Load the BPF object (including program and maps) into the kernel
     bpfw_info("Loading BPF program into kernel ...\n");
 
     if (bpf_load_program(flowtrack_h->bpf_h) != BPFW_RC_OK)
-        goto bpf_unload_program;
+        goto conntrack_destroy;
 
-    flowtrack_h->flow_fd = bpf_get_map_fd(flowtrack_h->bpf_h, FLOW_MAP_NAME);
-    flowtrack_h->user_time_fd = bpf_get_map_fd(flowtrack_h->bpf_h, USERSPACE_TIME_SECTION);
-    if (flowtrack_h->flow_fd < 0 || flowtrack_h->user_time_fd < 0)
+    flowtrack_h->map.flow.fd = bpf_get_map_fd(flowtrack_h->bpf_h, FLOW_MAP_NAME);
+    flowtrack_h->map.user_time.fd = bpf_get_map_fd(flowtrack_h->bpf_h, USERSPACE_TIME_SECTION);
+    if (flowtrack_h->map.flow.fd < 0 || flowtrack_h->map.user_time.fd < 0)
         goto bpf_unload_program;
 
     if (update_userspace_time(flowtrack_h, time_get_coarse_ns()) != BPFW_RC_OK)
@@ -292,24 +342,13 @@ struct flowtrack_handle* flowtrack_init(struct cmd_args *args) {
     bpfw_info("Attaching BPF program to network interfaces ...\n");
 
     // Attach the program to the specified interface names
-    int rc = args->if_count == 0 ? bpf_attach_program(flowtrack_h->bpf_h, flowtrack_h->netlink_h) :
+    rc = args->if_count == 0 ? bpf_attach_program(flowtrack_h->bpf_h, flowtrack_h->netlink_h) :
         bpf_ifnames_attach_program(flowtrack_h->bpf_h, args->if_names, args->if_count);
 
     if (rc != BPFW_RC_OK)
         goto bpf_unload_program;
 
-    bpfw_info("Initializing nf_conntrack ...\n");
-
-    // Read the conntrack info and save it inside the BPF conntrack map
-    flowtrack_h->conntrack_h = conntrack_init();
-    if (!flowtrack_h->conntrack_h)
-        goto bpf_detach_program;
-
     return flowtrack_h;
-
-conntrack_destroy:
-    // De-Init conntrack
-    conntrack_destroy(flowtrack_h->conntrack_h);
 
 bpf_detach_program:
     // Detach the program from the specified interface names
@@ -319,6 +358,10 @@ bpf_detach_program:
 bpf_unload_program:
     // Unload the BPF object from the kernel
     bpf_unload_program(flowtrack_h->bpf_h);
+
+conntrack_destroy:
+    // De-Init conntrack
+    conntrack_destroy(flowtrack_h->conntrack_h);
 
 netlink_destroy:
     netlink_destroy(flowtrack_h->netlink_h);
@@ -330,15 +373,15 @@ free:
 }
 
 void flowtrack_destroy(struct flowtrack_handle* flowtrack_h, struct cmd_args *args) {
-    // De-Init conntrack
-    conntrack_destroy(flowtrack_h->conntrack_h);
+    // Detach the program from the specified interface names
+    args->if_count == 0 ? bpf_detach_program(flowtrack_h->bpf_h, flowtrack_h->netlink_h) :
+        bpf_ifnames_detach_program(flowtrack_h->bpf_h, args->if_names, args->if_count);
 
     // Unload the BPF object from the kernel
     bpf_unload_program(flowtrack_h->bpf_h);
 
-    // Detach the program from the specified interface names
-    args->if_count == 0 ? bpf_detach_program(flowtrack_h->bpf_h, flowtrack_h->netlink_h) :
-        bpf_ifnames_detach_program(flowtrack_h->bpf_h, args->if_names, args->if_count);
+    // De-Init conntrack
+    conntrack_destroy(flowtrack_h->conntrack_h);
 
     // De-Init netlink
     netlink_destroy(flowtrack_h->netlink_h);

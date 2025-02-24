@@ -1,5 +1,5 @@
-#ifndef BPF_LOADER_H
-#define BPF_LOADER_H
+#ifndef BPFW_BPF_H
+#define BPFW_BPF_H
 
 #include <stdbool.h>
 
@@ -9,6 +9,13 @@
 // Struct to keep BPF object and program pointers together
 struct bpf_handle;
 struct netlink_handle;
+
+struct bpf_map {
+    const char *name;
+    int fd;
+};
+
+typedef int (*bpf_cb_t)(struct bpf_map *map, void *key, void *value, void *data);
 
 /**
  * Load a BPF object including its map and program into the kernel
@@ -75,11 +82,13 @@ int bpf_attach_program(struct bpf_handle* bpf, struct netlink_handle *netlink_h)
  * **/
 int bpf_detach_program(struct bpf_handle* bpf, struct netlink_handle *netlink_h);
 
-int   bpf_get_map_fd(struct bpf_handle* bpf, const char *map_name);
+int bpf_get_map_fd(struct bpf_handle* bpf, const char *map_name);
 //void *bpf_get_section_data(struct bpf_handle *bpf, const char *sec_name, size_t *sec_size);
-int   bpf_set_map_max_entries(struct bpf_handle *bpf, const char *map_name, __u32 new_max_entries);
-
+int bpf_set_map_max_entries(struct bpf_handle *bpf, const char *map_name, __u32 new_max_entries);
 int bpf_check_dsa(struct bpf_handle *bpf, __u32 dsa_switch, const char *dsa_proto, struct dsa_tag **dsa_tag);
 
+int bpf_map_update_entry(struct bpf_map *map, const void *key, const void *value);
+int bpf_map_delete_entry(struct bpf_map *map, const void *key);
+int bpf_map_for_each_entry(struct bpf_map *map, void *key, void *value, bpf_cb_t func, void *data);
 
 #endif

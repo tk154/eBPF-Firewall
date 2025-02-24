@@ -1,9 +1,6 @@
 #define _XOPEN_SOURCE 700   // Needed for sigaction
 #include <signal.h>
-
-#include <stdbool.h>
 #include <stdlib.h>
-#include <unistd.h>
 
 #include "common_user.h"
 #include "arguments/arguments.h"
@@ -40,12 +37,10 @@ int main(int argc, char* argv[]) {
 
     bpfw_info("Successfully loaded BPF program. Press CTRL+C to unload.\n");
 
-    while (1) {
-        sleep(args.map_poll_sec);
-
-        if (flowtrack_update(flowtrack_h) != 0) {
-            flowtrack_destroy(flowtrack_h, &args);
-            return EXIT_FAILURE;
-        }
+    if (flowtrack_loop(flowtrack_h) != BPFW_RC_OK) {
+        flowtrack_destroy(flowtrack_h, &args);
+        return EXIT_FAILURE;
     }
+
+    return EXIT_SUCCESS;
 }

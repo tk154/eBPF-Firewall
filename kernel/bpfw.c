@@ -24,17 +24,17 @@ SEC(USERSPACE_TIME_SECTION)
 struct user_time user;
 
 
-__always_inline static void *ipcpy_fill_zeros(void *dest, const void* src, __u8 family) {
+__always_inline static void ipcpy_fill_zeros(__be32 *dest, const __be32* src, __u8 family) {
     switch (family) {
         case AF_INET:
-			memset(dest + IPV4_ALEN, 0, IPV6_ALEN - IPV4_ALEN);
-            return memcpy(dest, src, IPV4_ALEN);
+			dest[0] = src[0];
+			dest[1] = dest[2] = dest[3] = 0;
+		break;
 
         case AF_INET6:
-            return memcpy(dest, src, IPV6_ALEN);
-
-		default:
-			return NULL;
+			dest[0] = src[0]; dest[1] = src[1];
+			dest[2] = src[2]; dest[3] = src[3];
+		break;
     }
 }
 

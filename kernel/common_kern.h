@@ -74,7 +74,7 @@ struct packet_data {
 };
 
 struct l2_header {
-    void *src_mac;
+    __u8   *src_mac;
     __u16  vlan_id;
     __be16 pppoe_id;
     __u16  payload_len;
@@ -83,10 +83,10 @@ struct l2_header {
 };
 
 struct l3_header {
-    void *src_ip, *dest_ip;
+    __be32 *src_ip, *dest_ip;
     __sum16 *cksum;
     __u8 *ttl;
-    __u8 family, proto;
+    __u8 offset, family, proto;
 };
 
 struct l4_header {

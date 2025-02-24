@@ -10,6 +10,7 @@
 
 #include <stdbool.h>
 #include "common_kern.h"
+#include "dsa/dsa.h"
 
 #define IP_MF		0x2000	/* "More Fragments" */
 #define IP_OFFSET	0x1fff	/* "Fragment Offset" */
@@ -149,6 +150,8 @@ __always_inline static bool parse_ipv4_header(struct packet_data *pkt, struct l3
 	l3->ttl 	= &iph->ttl;
 	l3->cksum   = &iph->check;
 
+	//l3->tot_len = iph->tot_len;
+
 	return true;
 }
 
@@ -160,17 +163,21 @@ __always_inline static bool parse_ipv6_header(struct packet_data *pkt, struct l3
 	bpfw_debug_ipv6("Dst IPv6: ", &ipv6h->daddr);
 
 	l3->family	= AF_INET6;
-	l3->src_ip  = &ipv6h->saddr;
-	l3->dest_ip = &ipv6h->daddr;
+	l3->src_ip  = ipv6h->saddr.__in6_u.__u6_addr32;
+	l3->dest_ip = ipv6h->daddr.__in6_u.__u6_addr32;
 
 	l3->proto   =  ipv6h->nexthdr;
 	l3->ttl     = &ipv6h->hop_limit;
+
+	//l3->tot_len = ipv6h->payload_len + sizeof(*ipv6h);
 
 	return true;
 }
 
 __always_inline static bool parse_l3_header(struct packet_data *pkt, __be16 proto, struct l3_header *l3) {
 	bool success;
+	
+	l3->offset = pkt->p - pkt->data;
 
 	switch (proto) {
 		case bpf_ntohs(ETH_P_IP):
