@@ -9,7 +9,7 @@
 #include <arpa/inet.h>
 #include <net/if_arp.h>
 
-#include "../logging/logging.h"
+#include "../log/log.h"
 
 #define NUD_VALID (NUD_PERMANENT | NUD_NOARP | NUD_REACHABLE | NUD_PROBE | NUD_STALE | NUD_DELAY)
 
@@ -18,7 +18,6 @@ static bool mac_not_set(__u8 *mac) {
     return !mac[0] && !mac[1] && !mac[2]
         && !mac[3] && !mac[4] && !mac[5];
 }
-
 
 static int get_neigh(struct netlink_handle* nl_h, __u32 ifindex, struct flow_key_value* flow, __be32 *dest_ip) {
     const struct nlattr *nda[NDA_MAX + 1] = {};

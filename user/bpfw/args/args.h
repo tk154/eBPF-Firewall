@@ -2,13 +2,13 @@
 #define ARGUMENTS_H
 
 #include "../common_user.h"
-#include "../list/list.h"
+#include "../map/map.h"
 
 
 struct cmd_args {
     char *bpf_obj_path;
 
-    struct list_entry *if_hooks;
+    struct map *iface_hooks;
     enum bpf_hook hook;
     bool auto_attach, dsa;
 

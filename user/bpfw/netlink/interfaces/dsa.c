@@ -5,7 +5,7 @@
 
 #include <net/if.h>
 
-#include "../../logging/logging.h"
+#include "../../log/log.h"
 
 
 int dsa_get_tag_proto(__u32 ifindex, char *tag_proto) {

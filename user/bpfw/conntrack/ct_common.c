@@ -11,7 +11,7 @@
 #include <linux/netfilter/nf_conntrack_tcp.h>
 #include <libnetfilter_conntrack/libnetfilter_conntrack.h>
 
-#include "../logging/logging.h"
+#include "../log/log.h"
 
 
 struct nfct_get_cb_args {

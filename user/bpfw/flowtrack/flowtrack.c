@@ -13,31 +13,25 @@
 #include "../conntrack/conntrack.h"
 #include "../netlink/netlink.h"
 
-#include "../logging/logging.h"
+#include "../log/log.h"
 
 
 struct flowtrack_handle {
-    enum bpfw_hook hook;
-    __u32 map_poll_sec;
-
-    struct {
-        struct bpf_map flow, user_time;
-    } map;
-
-    // Flow Timeouts
-    struct flow_timeout flow_timeout;
-    struct dsa_tag *dsa_tag;
-
     struct bpf_handle *bpf_h;
     struct netlink_handle *netlink_h;
     struct conntrack_handle *conntrack_h;
 
     struct netlink_cb link_cb;
-};
 
-struct update_flows_cb_data {
-    struct flowtrack_handle *flowtrack_h;
-    __u32 time_sec;
+    // Flow Timeouts
+    struct flow_timeout flow_timeout;
+    struct dsa_tag *dsa_tag;
+
+    struct bpf_map flow_map, user_time_map;
+    __u32 map_poll_sec;
+
+    struct map *iface_hooks;
+    enum bpf_hook hook;
 };
 
 
@@ -60,7 +54,7 @@ static int update_userspace_time(struct flowtrack_handle *flowtrack_h, __u64 cur
     };
 
     // Update the BPF flow entry, break out on error
-    if (bpf_map_update_entry(&flowtrack_h->map.user_time, &index, &user) != BPFW_RC_OK)
+    if (bpf_map_update_entry(&flowtrack_h->user_time_map, &index, &user) != BPFW_RC_OK)
         return BPFW_RC_ERROR;
 
     return BPFW_RC_OK;
@@ -69,17 +63,21 @@ static int update_userspace_time(struct flowtrack_handle *flowtrack_h, __u64 cur
 
 static int calc_l2_diff(struct flowtrack_handle *flowtrack_h, struct flow_key_value *flow) {
     struct dsa_tag *tag = flowtrack_h->dsa_tag;
-    enum bpfw_hook hook = flowtrack_h->hook;
+    enum bpf_hook hook = flowtrack_h->hook;
+    char ifname[IF_NAMESIZE];
     __s8 diff = 0;
-    
+
+    if_indextoname(flow->key.ifindex, ifname);
+    map_lookup_entry(flowtrack_h->iface_hooks, ifname, &hook);
+
     if (flow->key.dsa_port)
         diff -= tag->rx_size;
     if (flow->value.next.hop.dsa_port)
         diff += tag->tx_size;
 
-    if ((hook & BPFW_HOOK_XDP || flow->key.dsa_port) && flow->key.vlan_id)
+    if ((hook & BPF_HOOK_XDP || flow->key.dsa_port) && flow->key.vlan_id)
         diff -= sizeof(struct vlanhdr);
-    if ((hook & BPFW_HOOK_XDP || flow->value.next.hop.dsa_port) && flow->value.next.hop.vlan_id)
+    if ((hook & BPF_HOOK_XDP || flow->value.next.hop.dsa_port) && flow->value.next.hop.vlan_id)
         diff += sizeof(struct vlanhdr);
 
     if (flow->key.pppoe_id)
@@ -87,9 +85,9 @@ static int calc_l2_diff(struct flowtrack_handle *flowtrack_h, struct flow_key_va
     if (flow->value.next.hop.pppoe_id)
         diff += sizeof(struct pppoehdr);
 
-	if ((hook & BPFW_HOOK_TC) && diff < 0) {
+	if ((hook & BPF_HOOK_TC) && diff < 0) {
         bpfw_debug("TC cannot shrink L2 Header (L2 diff = %hhd).\n", diff);
-        return 1;
+        return EOPNOTSUPP;
     }
 
     flow->value.next.hop.l2_diff = diff;
@@ -98,32 +96,21 @@ static int calc_l2_diff(struct flowtrack_handle *flowtrack_h, struct flow_key_va
 }
 
 
-static int new_bpf_interface(__u32 ifindex, void *data) {
+static int new_interface(__u32 ifindex, const char *ifname, void *data) {
     struct flowtrack_handle *flowtrack_h = data;
 
-    return bpf_ifindex_attach_program(flowtrack_h->bpf_h, ifindex);
+    return bpf_iface_attach_program(flowtrack_h->bpf_h, flowtrack_h->netlink_h, ifindex, ifname);
 }
 
-static int del_bpf_interface_cb(struct bpf_map *map, void *key, void *value, void *data) {
-    struct flow_key_value *flow = key;
-    __u32 *ifindex = data;
-
-    if ((flow->key.ifindex == *ifindex || flow->value.next.hop.ifindex == *ifindex) &&
-         bpf_map_delete_entry(map, key) != BPFW_RC_OK)
-            return BPFW_RC_ERROR;
-
-    return BPFW_RC_OK;
-}
-
-static int del_bpf_interface(__u32 ifindex, void *data) {
+static int del_interface(__u32 ifindex, const char *ifname, void *data) {
     struct flowtrack_handle *flowtrack_h = data;
     struct flow_key_value flow;
 
-    if (bpf_map_for_each_entry(&flowtrack_h->map.flow, &flow.key, &flow.value,
-                               del_bpf_interface_cb, &ifindex) != BPFW_RC_OK)
-        return BPFW_RC_ERROR;
-
-    return BPFW_RC_OK;
+    bpf_map_for_each_entry(&flowtrack_h->flow_map, &flow.key, &flow.value, {
+        if (flow.key.ifindex == ifindex || flow.value.next.hop.ifindex == ifindex)
+            if (bpf_map_delete_entry(&flowtrack_h->flow_map, &flow.key) != BPFW_RC_OK)
+                return BPFW_RC_ERROR;
+    });
 }
 
 
@@ -190,16 +177,10 @@ static int connection_established(struct flowtrack_handle *flowtrack_h, struct f
 }
 
 
-static int update_flows_cb(struct bpf_map *map, void *key, void *value, void *data) {
-    __u32 time_sec, flow_time_sec, flow_timeout, last_packet_sec_ago;
-    struct update_flows_cb_data *cb_data = data;
-    struct flowtrack_handle *flowtrack_h;
-    struct flow_key_value *flow = key;
+static int handle_bpf_entry(struct flowtrack_handle *flowtrack_h, struct flow_key_value *flow, __u32 time_sec) {
+    __u32 flow_time_sec, flow_timeout, last_packet_sec_ago;
     __u8 state;
     int rc;
-
-    flowtrack_h = cb_data->flowtrack_h;
-    time_sec = cb_data->time_sec;
 
     flow_time_sec = time_ns_to_sec(flow->value.time);
     flow_timeout = flow->key.proto == IPPROTO_TCP ?
@@ -208,7 +189,7 @@ static int update_flows_cb(struct bpf_map *map, void *key, void *value, void *da
     last_packet_sec_ago = time_sec - flow_time_sec;
     if (last_packet_sec_ago >= flow_timeout)
         // Flow timeout occured, so delete it from the BPF map
-        return bpf_map_delete_entry(map, &flow->key);
+        return bpf_map_delete_entry(&flowtrack_h->flow_map, &flow->key);
 
     state = flow->value.state;
     rc = conntrack_do_lookup(flowtrack_h->conntrack_h, flow);
@@ -234,21 +215,22 @@ static int update_flows_cb(struct bpf_map *map, void *key, void *value, void *da
     if (rc != BPFW_RC_OK || state == flow->value.state)
         return rc;
 
-    return bpf_map_update_entry(map, &flow->key, &flow->value);
+    return bpf_map_update_entry(&flowtrack_h->flow_map, &flow->key, &flow->value);
 }
 
 static int update_flows(struct flowtrack_handle* flowtrack_h) {
-    __u64 time_ns = time_get_coarse_ns();
-    struct update_flows_cb_data cb_data;
     struct flow_key_value flow;
+    __u32 time_sec;
+    __u64 time_ns;
 
-    cb_data.flowtrack_h = flowtrack_h;
-    cb_data.time_sec = time_ns_to_sec(time_ns);
+    time_ns = time_get_coarse_ns();
+    time_sec = time_ns_to_sec(time_ns);
 
     // Iterate through all the flow entries
-    if (bpf_map_for_each_entry(&flowtrack_h->map.flow, &flow.key, &flow.value,
-                               update_flows_cb, &cb_data) != BPFW_RC_OK)
-        return BPFW_RC_ERROR;
+    bpf_map_for_each_entry(&flowtrack_h->flow_map, &flow.key, &flow.value, {
+        if (handle_bpf_entry(flowtrack_h, &flow, time_sec) != BPFW_RC_OK)
+            return BPFW_RC_ERROR;
+    });
 
     if (update_userspace_time(flowtrack_h, time_ns) != BPFW_RC_OK)
         return BPFW_RC_ERROR;
@@ -257,18 +239,14 @@ static int update_flows(struct flowtrack_handle* flowtrack_h) {
 }
 
 int flowtrack_loop(struct flowtrack_handle* flowtrack_h) {
-    unsigned int i = 0;
-
     while (1) {
-        sleep(1);
+        sleep(flowtrack_h->map_poll_sec);
 
         if (netlink_check_notifications(flowtrack_h->netlink_h, flowtrack_h->link_cb, flowtrack_h) != BPFW_RC_OK)
             return BPFW_RC_ERROR;
 
-        if (i == 0 && update_flows(flowtrack_h) != BPFW_RC_OK)
+        if (update_flows(flowtrack_h) != BPFW_RC_OK)
             return BPFW_RC_ERROR;
-
-        i = (i + 1) % flowtrack_h->map_poll_sec;
     }
 
     return BPFW_RC_OK;
@@ -286,19 +264,18 @@ struct flowtrack_handle* flowtrack_init(struct cmd_args *args) {
         return NULL;
     }
 
-    flowtrack_h->map_poll_sec = args->map_poll_sec;
+    flowtrack_h->map_poll_sec = args->map.poll_sec;
     flowtrack_h->flow_timeout = args->flow_timeout;
-    flowtrack_h->hook         = args->hook;
 
-    flowtrack_h->map.flow.name = FLOW_MAP_NAME;
-    flowtrack_h->map.user_time.name = USERSPACE_TIME_SECTION;
+    flowtrack_h->iface_hooks = args->iface_hooks;
+    flowtrack_h->hook = args->hook;
 
-    flowtrack_h->link_cb.newlink = new_bpf_interface;
-    flowtrack_h->link_cb.dellink = del_bpf_interface;
+    flowtrack_h->link_cb.newlink = new_interface;
+    flowtrack_h->link_cb.dellink = del_interface;
 
     bpfw_info("Initializing netlink ...\n");
 
-    flowtrack_h->netlink_h = netlink_init(args->if_count == 0, args->dsa);
+    flowtrack_h->netlink_h = netlink_init(args->auto_attach, args->dsa);
     if (!flowtrack_h->netlink_h)
         goto free;
     
@@ -314,50 +291,38 @@ struct flowtrack_handle* flowtrack_init(struct cmd_args *args) {
 
     bpfw_info("Opening BPF object ...\n");
 
-    flowtrack_h->bpf_h = bpf_open_object(args->obj_path, args->hook);
+    flowtrack_h->bpf_h = bpf_init(args->bpf_obj_path, args->iface_hooks, args->hook);
     if (!flowtrack_h->bpf_h)
         goto conntrack_destroy;
 
     if (args->dsa && bpf_check_dsa(flowtrack_h->bpf_h, dsa_switch, dsa_proto, &flowtrack_h->dsa_tag) != BPFW_RC_OK)
-        goto conntrack_destroy;
+        goto bpf_destroy;
 
-    if (args->map_max_entries != FLOW_MAP_DEFAULT_MAX_ENTRIES && 
-        bpf_set_map_max_entries(flowtrack_h->bpf_h, FLOW_MAP_NAME, args->map_max_entries) != BPFW_RC_OK)
-            goto conntrack_destroy;
+    if (args->map.max_entries != FLOW_MAP_DEFAULT_MAX_ENTRIES && 
+        bpf_set_map_max_entries(flowtrack_h->bpf_h, FLOW_MAP_NAME, args->map.max_entries) != BPFW_RC_OK)
+            goto bpf_destroy;
 
     // Load the BPF object (including program and maps) into the kernel
-    bpfw_info("Loading BPF program into kernel ...\n");
-
-    if (bpf_load_program(flowtrack_h->bpf_h) != BPFW_RC_OK)
-        goto conntrack_destroy;
-
-    flowtrack_h->map.flow.fd = bpf_get_map_fd(flowtrack_h->bpf_h, FLOW_MAP_NAME);
-    flowtrack_h->map.user_time.fd = bpf_get_map_fd(flowtrack_h->bpf_h, USERSPACE_TIME_SECTION);
-    if (flowtrack_h->map.flow.fd < 0 || flowtrack_h->map.user_time.fd < 0)
-        goto bpf_unload_program;
-
-    if (update_userspace_time(flowtrack_h, time_get_coarse_ns()) != BPFW_RC_OK)
-        goto bpf_unload_program;
-
-    bpfw_info("Attaching BPF program to network interfaces ...\n");
+    bpfw_info("Loading BPF program and attaching to network interfaces ...\n");
 
     // Attach the program to the specified interface names
-    rc = args->if_count == 0 ? bpf_attach_program(flowtrack_h->bpf_h, flowtrack_h->netlink_h) :
-        bpf_ifnames_attach_program(flowtrack_h->bpf_h, args->if_names, args->if_count);
+    if (bpf_attach_program(flowtrack_h->bpf_h, flowtrack_h->netlink_h, args->auto_attach) != BPFW_RC_OK)
+        goto bpf_destroy;
 
-    if (rc != BPFW_RC_OK)
-        goto bpf_unload_program;
+    flowtrack_h->flow_map = bpf_get_map(flowtrack_h->bpf_h, FLOW_MAP_NAME);
+    flowtrack_h->user_time_map = bpf_get_map(flowtrack_h->bpf_h, USERSPACE_TIME_SECTION);
+    if (flowtrack_h->flow_map.fd < 0 || flowtrack_h->user_time_map.fd < 0)
+        goto bpf_detach_program;
 
     return flowtrack_h;
 
 bpf_detach_program:
     // Detach the program from the specified interface names
-    args->if_count == 0 ? bpf_detach_program(flowtrack_h->bpf_h, flowtrack_h->netlink_h) :
-        bpf_ifnames_detach_program(flowtrack_h->bpf_h, args->if_names, args->if_count);
+    bpf_detach_program(flowtrack_h->bpf_h, flowtrack_h->netlink_h, args->auto_attach);
 
-bpf_unload_program:
+bpf_destroy:
     // Unload the BPF object from the kernel
-    bpf_unload_program(flowtrack_h->bpf_h);
+    bpf_destroy(flowtrack_h->bpf_h);
 
 conntrack_destroy:
     // De-Init conntrack
@@ -374,11 +339,10 @@ free:
 
 void flowtrack_destroy(struct flowtrack_handle* flowtrack_h, struct cmd_args *args) {
     // Detach the program from the specified interface names
-    args->if_count == 0 ? bpf_detach_program(flowtrack_h->bpf_h, flowtrack_h->netlink_h) :
-        bpf_ifnames_detach_program(flowtrack_h->bpf_h, args->if_names, args->if_count);
+    bpf_detach_program(flowtrack_h->bpf_h, flowtrack_h->netlink_h, args->auto_attach);
 
     // Unload the BPF object from the kernel
-    bpf_unload_program(flowtrack_h->bpf_h);
+    bpf_destroy(flowtrack_h->bpf_h);
 
     // De-Init conntrack
     conntrack_destroy(flowtrack_h->conntrack_h);

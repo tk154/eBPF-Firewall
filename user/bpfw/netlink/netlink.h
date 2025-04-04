@@ -9,7 +9,7 @@ enum {
     NL_INTERFACE_DO_ATTACH
 };
 
-typedef int (*link_cb_t)(__u32 ifindex, void *data);
+typedef int (*link_cb_t)(__u32 ifindex, const char *ifname, void *data);
 
 struct netlink_cb {
     link_cb_t newlink, dellink;

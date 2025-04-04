@@ -7,7 +7,7 @@
 
 #include <net/if.h>
 
-#include "../../logging/logging.h"
+#include "../../log/log.h"
 
 #define PPPOE_FILE_PATH "/proc/net/pppoe"
 #define PPPOE_FILE_EOF  1

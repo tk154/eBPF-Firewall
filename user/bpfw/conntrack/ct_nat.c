@@ -5,7 +5,7 @@
 
 #include <libnetfilter_conntrack/libnetfilter_conntrack.h>
 
-#include "../logging/logging.h"
+#include "../log/log.h"
 
 
 /* Modified versions originally from include/net/checksum.h */

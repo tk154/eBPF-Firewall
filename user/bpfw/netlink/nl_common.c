@@ -11,7 +11,7 @@
 #include <net/if_arp.h>
 
 #include "interfaces/dsa.h"
-#include "../logging/logging.h"
+#include "../log/log.h"
 
 #define IPV6_LEN 16
 #define NEW_INTERFACE UINT32_MAX
@@ -330,7 +330,7 @@ int get_pppoe_device(struct netlink_handle* nl_h, __u32 ifindex, struct pppoe *p
         return BPFW_RC_ERROR;
 
     if (!peer_ip6) {
-        bpfw_verbose_ifindex("-> Couldn't retrieve IPv6 peer address of ", ifindex, "", 0);
+        bpfw_verbose_ifindex("-> Couldn't retrieve IPv6 peer address of ", ifindex, 0);
         return ACTION_NONE;
     }
 
@@ -434,11 +434,13 @@ static int handle_newlink(const struct nlmsghdr *nlh, void *data) {
     DECLARE_ATTR_TB(ifla);
     struct not_cb_data *cb = data;
 
-    if (ifinfom->ifi_change == NEW_INTERFACE && should_attach(cb->nl_h, nlh)) {
+    if (ifinfom->ifi_change == NEW_INTERFACE) {
         mnl_attr_parse(nlh, sizeof(*ifinfom), mnl_attr_parse_cb, &ifla_tb);
-        bpfw_debug("\nNew interface: %s\n", mnl_attr_get_str(ifla[IFLA_IFNAME]));
 
-        if ((*cb->link_cb.newlink)(ifinfom->ifi_index, cb->data) != BPFW_RC_OK)
+        const char *ifname = mnl_attr_get_str(ifla[IFLA_IFNAME]);
+        bpfw_debug("\nNew Interface: %s\n", ifname);
+
+        if ((*cb->link_cb.newlink)(ifinfom->ifi_index, ifname, cb->data) != BPFW_RC_OK)
             return MNL_CB_ERROR;
     }
 
@@ -452,9 +454,11 @@ static int handle_dellink(const struct nlmsghdr *nlh, void *data) {
     struct not_cb_data *cb = data;
 
     mnl_attr_parse(nlh, sizeof(*ifinfom), mnl_attr_parse_cb, &ifla_tb);
-    bpfw_debug("\nInterface deleted: %s\n", mnl_attr_get_str(ifla[IFLA_IFNAME]));
 
-    if ((*cb->link_cb.dellink)(ifinfom->ifi_index, cb->data) != BPFW_RC_OK)
+    const char *ifname = mnl_attr_get_str(ifla[IFLA_IFNAME]);
+    bpfw_debug("\nInterface deleted: %s\n", ifname);
+
+    if ((*cb->link_cb.dellink)(ifinfom->ifi_index, ifname, cb->data) != BPFW_RC_OK)
         return MNL_CB_ERROR;
 
     return MNL_CB_OK;
