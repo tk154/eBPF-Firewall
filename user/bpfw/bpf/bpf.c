@@ -55,6 +55,16 @@ static const char *get_xdp_str(__u32 xdp_flag) {
     }
 }
 
+
+static void libbpf_enable_messages(libbpf_print_fn_t fn) {
+    libbpf_set_print(fn);
+}
+
+static libbpf_print_fn_t libbpf_disable_messages() {
+    return libbpf_set_print(NULL);
+}
+
+
 static void *bpf_get_section_data(struct bpf_handle *bpf, const char *sec_name, size_t *sec_size) {
     // Find the .rodata section
     struct bpf_map *section = bpf_object__find_map_by_name(bpf->obj, sec_name);
@@ -90,7 +100,7 @@ static int bpf_load_object(struct bpf_handle *bpf) {
         return BPFW_RC_ERROR;
     }
 
-    bpf->obj_loaded = true;
+    bpf->obj_loaded  = true;
     bpf->xdp_prog_fd = bpf_get_program_fd(bpf->obj, XDP_PROG_NAME);
     bpf->tc_prog_fd  = bpf_get_program_fd(bpf->obj, TC_PROG_NAME);
 
@@ -105,32 +115,43 @@ static int bpf_load_object(struct bpf_handle *bpf) {
 
 static int bpf_attach_xdp_program(struct bpf_handle *bpf, __u32 ifindex, __u32 xdp_flag, bool try) {
     const char *xdp_str = get_xdp_str(xdp_flag);
+    libbpf_print_fn_t fn;
+    int rc;
+
+    if (try)
+        fn = libbpf_disable_messages();
 
     // Attach the program to the XDP hook
     if (bpf_xdp_attach(ifindex, bpf->xdp_prog_fd, xdp_flag, NULL) != 0) {
         if (try && (errno == EOPNOTSUPP || xdp_flag == XDP_FLAGS_HW_MODE && errno == EINVAL))
-            return EOPNOTSUPP;
-
-        bpfw_error_ifindex("Error attaching %s program to ", ifindex, errno, xdp_str);
-        return BPFW_RC_ERROR;
+            rc = EOPNOTSUPP;
+        else {
+            bpfw_error_ifindex("Error attaching %s program to ", ifindex, errno, xdp_str);
+            rc = BPFW_RC_ERROR;
+        }
+    }
+    else {
+        bpfw_debug_ifindex("  Attached %s hook to ", ifindex, 0, xdp_str);
+        rc = BPFW_RC_OK;
     }
 
-    bpfw_debug_ifindex("  Attached %s hook to ", ifindex, 0, xdp_str);
+    if (try)
+        libbpf_enable_messages(fn);
 
-    return BPFW_RC_OK;
+    return rc;
 }
 
 static int bpf_attach_tc_program(struct bpf_handle *bpf, __u32 ifindex) {
     DECLARE_LIBBPF_OPTS(bpf_tc_hook, hook, .ifindex = ifindex, .attach_point = BPF_TC_INGRESS);
     DECLARE_LIBBPF_OPTS(bpf_tc_opts, opts, .prog_fd = bpf->tc_prog_fd);
-    libbpf_print_fn_t fn = libbpf_set_print(NULL);
+    libbpf_print_fn_t fn = libbpf_disable_messages();
     struct tc_opts tc;
     int rc;
 
     // Create a TC hook on the ingress of the interface
     // bpf_tc_hook_create will return an error and print an error message if the hook already exists
     rc = bpf_tc_hook_create(&hook);
-    libbpf_set_print(fn);
+    libbpf_enable_messages(fn);
 
     if (rc != 0 && rc != -EEXIST) {
         bpfw_errno("Error creating TC hook", errno);
@@ -215,7 +236,7 @@ static void bpf_detach_program_auto(struct bpf_handle *bpf, __u32 ifindex) {
 }
 
 
-static int bpf_ifindex_attach_program(struct bpf_handle* bpf, __u32 ifindex, enum bpf_hook hook) {
+static int bpf_ifindex_attach_program(struct bpf_handle* bpf, __u32 ifindex, enum bpf_hook hook, bool try) {
     if (hook == BPF_HOOK_AUTO)
         return bpf_attach_program_auto(bpf, ifindex);
 
@@ -225,7 +246,7 @@ static int bpf_ifindex_attach_program(struct bpf_handle* bpf, __u32 ifindex, enu
             return BPFW_RC_ERROR;
         }
 
-        return bpf_attach_xdp_program(bpf, ifindex, get_xdp_flag(hook), false);
+        return bpf_attach_xdp_program(bpf, ifindex, get_xdp_flag(hook), try);
     }
 
     if (bpf->tc_prog_fd < 0) {
@@ -246,7 +267,7 @@ static void bpf_ifindex_detach_program(struct bpf_handle* bpf, __u32 ifindex, en
     return bpf_detach_tc_program(bpf, ifindex);
 }
 
-static int bpf_ifname_attach_program(struct bpf_handle* bpf, char* ifname, enum bpf_hook hook) {
+static int bpf_ifname_attach_program(struct bpf_handle* bpf, char* ifname, enum bpf_hook hook, bool try) {
     // Get the interface index from the interface name
     __u32 ifindex = if_nametoindex(ifname);
     if (!ifindex) {
@@ -255,7 +276,7 @@ static int bpf_ifname_attach_program(struct bpf_handle* bpf, char* ifname, enum 
         return BPFW_RC_ERROR;
     }
 
-    return bpf_ifindex_attach_program(bpf, ifindex, hook);
+    return bpf_ifindex_attach_program(bpf, ifindex, hook, try);
 }
 
 static int bpf_ifname_detach_program(struct bpf_handle* bpf, char* ifname, enum bpf_hook hook) {
@@ -271,6 +292,20 @@ static int bpf_ifname_detach_program(struct bpf_handle* bpf, char* ifname, enum 
     return BPFW_RC_OK;
 }
 
+
+static void bpf_auto_attach_error(struct bpf_handle *bpf, struct netlink_handle *netlink,
+                                 struct if_nameindex *ifaces, struct if_nameindex *iface) {
+    enum bpf_hook hook;
+
+    // If an error occured while attaching to one interface, detach all the already attached programs
+    while (--iface >= ifaces) {
+        if (map_lookup_entry(bpf->iface_hooks, iface->if_name, &hook) == 0)
+            continue;
+
+        if (netlink_ifindex_should_attach(netlink, iface->if_index) == NL_INTERFACE_DO_ATTACH)
+            bpf_ifindex_detach_program(bpf, iface->if_index, bpf->hook);
+    }
+}
 
 static int bpf_auto_attach_program(struct bpf_handle *bpf, struct netlink_handle *netlink) {
     // Retrieve the name and index of all network interfaces
@@ -291,28 +326,26 @@ static int bpf_auto_attach_program(struct bpf_handle *bpf, struct netlink_handle
         rc = netlink_ifindex_should_attach(netlink, iface->if_index);
         switch (rc) {
             case BPFW_RC_ERROR:
-                goto error;
+                bpf_auto_attach_error(bpf, netlink, iface, ifaces);
+                goto free;
 
             case NL_INTERFACE_DO_NOT_ATTACH:
                 continue;
         }
 
-        rc = bpf_ifindex_attach_program(bpf, iface->if_index, bpf->hook);
-        if (rc != BPFW_RC_OK) {
-error:
-            // If an error occured while attaching to one interface, detach all the already attached programs
-            while (--iface >= ifaces) {
-                if (map_lookup_entry(bpf->iface_hooks, iface->if_name, &hook) == 0)
-                    continue;
+        rc = bpf_ifindex_attach_program(bpf, iface->if_index, bpf->hook, true);
+        switch (rc) {
+            case BPFW_RC_ERROR:
+                bpf_auto_attach_error(bpf, netlink, iface, ifaces);
+                goto free;
 
-                if (netlink_ifindex_should_attach(netlink, iface->if_index) == NL_INTERFACE_DO_ATTACH)
-                    bpf_ifindex_detach_program(bpf, iface->if_index, bpf->hook);
-            }
-
-            break;
+            case EOPNOTSUPP:
+                bpfw_warn("Warning: %s doesn't support %s.\n",
+                    iface->if_name, get_xdp_str(get_xdp_flag(bpf->hook)));
         }
     }
 
+free:
     // Retrieved interfaces are dynamically allocated, so they must be freed
     if_freenameindex(ifaces);
 
@@ -325,7 +358,7 @@ static int bpf_manual_attach_program(struct bpf_handle *bpf) {
     int rc;
 
     map_for_each_entry(bpf->iface_hooks, ifname, &hook, {
-        rc = bpf_ifname_attach_program(bpf, ifname, hook);
+        rc = bpf_ifname_attach_program(bpf, ifname, hook, false);
 
         if (rc != BPFW_RC_OK) {
             // If an error occured while attaching to one interface, detach all the already attached programs
@@ -415,7 +448,7 @@ int bpf_iface_attach_program(struct bpf_handle *bpf, struct netlink_handle *nl, 
             return BPFW_RC_OK;
 
         case NL_INTERFACE_DO_ATTACH:
-            return bpf_ifindex_attach_program(bpf, ifindex, hook);
+            return bpf_ifindex_attach_program(bpf, ifindex, hook, true);
 
         default:
             return rc;
