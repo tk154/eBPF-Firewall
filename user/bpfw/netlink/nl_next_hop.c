@@ -221,6 +221,7 @@ static int parse_eth_if(struct netlink_handle* nl_h, __u32 ifindex, const struct
 static int get_link(struct netlink_handle* nl_h, __u32 ifindex, struct flow_key_value *flow, __be32 *dest_ip) {
     const struct nlattr *ifla[IFLA_MAX + 1] = {};
     DECLARE_ATTR_TB(ifla);
+    __u16 mtu;
 
     int rc = request_interface(nl_h, ifindex);
     if (rc != BPFW_RC_OK)
@@ -245,10 +246,15 @@ static int get_link(struct netlink_handle* nl_h, __u32 ifindex, struct flow_key_
             return ACTION_NONE;
     }
 
-    if (rc == BPFW_RC_OK && flow->value.next.hop.ifindex != ifindex)
-        rc = get_link(nl_h, flow->value.next.hop.ifindex, flow, dest_ip);
+    if (rc != BPFW_RC_OK)
+        return rc;
 
-    return rc;
+    if (flow->value.next.hop.ifindex != ifindex)
+        return get_link(nl_h, flow->value.next.hop.ifindex, flow, dest_ip);
+
+    flow->value.next.hop.mtu = mnl_attr_get_u16(ifla[IFLA_MTU]);
+
+    return BPFW_RC_OK;
 }
 
 static int get_route(struct netlink_handle* nl_h, struct flow_key_value* flow, __be32 *dest_ip) {

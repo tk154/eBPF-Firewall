@@ -150,7 +150,7 @@ __always_inline static bool parse_ipv4_header(struct packet_data *pkt, struct l3
 	l3->ttl 	= &iph->ttl;
 	l3->cksum   = &iph->check;
 
-	//l3->tot_len = iph->tot_len;
+	l3->tot_len = bpf_ntohs(iph->tot_len);
 
 	return true;
 }
@@ -169,7 +169,7 @@ __always_inline static bool parse_ipv6_header(struct packet_data *pkt, struct l3
 	l3->proto   =  ipv6h->nexthdr;
 	l3->ttl     = &ipv6h->hop_limit;
 
-	//l3->tot_len = ipv6h->payload_len + sizeof(*ipv6h);
+	l3->tot_len = bpf_ntohs(ipv6h->payload_len) + sizeof(*ipv6h);
 
 	return true;
 }

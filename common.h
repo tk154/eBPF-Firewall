@@ -56,6 +56,7 @@ struct next_hop {
 	__u8   src_mac [ETH_ALEN];
 	__u8   dest_mac[ETH_ALEN];
 
+	__u16  mtu;
 	__le16 vlan_id;
 	__be16 pppoe_id;
 

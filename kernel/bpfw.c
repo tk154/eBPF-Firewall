@@ -178,6 +178,13 @@ __always_inline static __u8 bpfw_func(void *ctx, bool xdp, struct packet_data *p
 			if (tcp_finished(&f_key, f_value, header.l4.tcp_flags))
 				return ACTION_PASS;
 
+			if (header.l3.tot_len > f_value->next.hop.mtu) {
+				bpfw_debug("MTU exceeded (%u > %u)",
+					header.l3.tot_len, f_value->next.hop.mtu);
+		
+				return ACTION_PASS;
+			}
+
 			mangle_packet(&header.l3, &header.l4, &f_value->next);
 
 			if (!push_l2_header(ctx, xdp, pkt, &header.l2, &f_value->next.hop))

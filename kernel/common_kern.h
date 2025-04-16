@@ -86,6 +86,7 @@ struct l3_header {
     __be32 *src_ip, *dest_ip;
     __sum16 *cksum;
     __u8 *ttl;
+    __u16 tot_len;
     __u8 offset, family, proto;
 };
 
