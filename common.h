@@ -85,7 +85,10 @@ struct next_entry {
 struct flow_value {
 	__u64 time;
 	__u8  src_mac[ETH_ALEN];
-	__u8  state;
+
+	union {
+		__u8 action, state;
+	};
 
 	struct next_entry next;
 };

@@ -126,8 +126,8 @@ static int connection_not_established(struct flow_key_value *flow) {
     if (flow->value.state == STATE_NEW_FLOW) {
         bpfw_debug_key("\nNon: ", &flow->key);
 
-        flow->value.state = STATE_NONE;
-        bpfw_debug_action("Act: ", flow->value.state);
+        flow->value.action = ACTION_NONE;
+        bpfw_debug_action("Act: ", flow->value.action);
     }
 
     return BPFW_RC_OK;
@@ -155,15 +155,15 @@ static int connection_established(struct flowtrack_handle *flowtrack_h, struct f
 
                 case ACTION_FORWARD:
                     if (calc_l2_diff(flowtrack_h, flow) != BPFW_RC_OK) {
-                        flow->value.state = STATE_PASS;
+                        flow->value.action = ACTION_PASS;
                         break;
                     }
 
                 default:
-                    flow->value.state = rc;
+                    flow->value.action = rc;
             }
             
-            bpfw_debug_action("Act: ", flow->value.state);
+            bpfw_debug_action("Act: ", flow->value.action);
             break;
 
         case STATE_FORWARD:
@@ -179,7 +179,7 @@ static int connection_established(struct flowtrack_handle *flowtrack_h, struct f
 
 static int handle_bpf_entry(struct flowtrack_handle *flowtrack_h, struct flow_key_value *flow, __u32 time_sec) {
     __u32 flow_time_sec, flow_timeout, last_packet_sec_ago;
-    __u8 state;
+    __u8 old_state;
     int rc;
 
     flow_time_sec = time_ns_to_sec(flow->value.time);
@@ -191,7 +191,7 @@ static int handle_bpf_entry(struct flowtrack_handle *flowtrack_h, struct flow_ke
         // Flow timeout occured, so delete it from the BPF map
         return bpf_map_delete_entry(&flowtrack_h->flow_map, &flow->key);
 
-    state = flow->value.state;
+    old_state = flow->value.state;
     rc = conntrack_do_lookup(flowtrack_h->conntrack_h, flow);
 
     switch (rc) {
@@ -212,7 +212,7 @@ static int handle_bpf_entry(struct flowtrack_handle *flowtrack_h, struct flow_ke
             return BPFW_RC_ERROR;
     }
 
-    if (rc != BPFW_RC_OK || state == flow->value.state)
+    if (rc != BPFW_RC_OK || old_state == flow->value.state)
         return rc;
 
     return bpf_map_update_entry(&flowtrack_h->flow_map, &flow->key, &flow->value);
@@ -242,8 +242,9 @@ int flowtrack_loop(struct flowtrack_handle* flowtrack_h) {
     while (1) {
         sleep(flowtrack_h->map_poll_sec);
 
-        if (netlink_check_notifications(flowtrack_h->netlink_h, flowtrack_h->link_cb, flowtrack_h) != BPFW_RC_OK)
-            return BPFW_RC_ERROR;
+        if (netlink_check_notifications(flowtrack_h->netlink_h,
+                flowtrack_h->link_cb, flowtrack_h) != BPFW_RC_OK)
+                    return BPFW_RC_ERROR;
 
         if (update_flows(flowtrack_h) != BPFW_RC_OK)
             return BPFW_RC_ERROR;

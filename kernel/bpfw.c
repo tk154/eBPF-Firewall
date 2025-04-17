@@ -204,7 +204,7 @@ __always_inline static __u8 bpfw_func(void *ctx, bool xdp, struct packet_data *p
 			bpfw_debug("Pass package");
 	}
 
-	return f_value->state;
+	return f_value->action;
 }
 
 
