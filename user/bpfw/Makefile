@@ -8,7 +8,7 @@ ARCH_DIR := $(BIN_DIR)/host
 MAIN_SRC 	 := $(SRC_DIR)/main.c
 SOURCES  	 := $(shell find -name "*.c" ! -wholename "$(MAIN_SRC)")
 
-ifdef OPENWRT_DIR
+ifdef OPENWRT
 include ../OpenWrt.mk
 ARCH_DIR := $(BIN_DIR)/$(ARCH)
 endif

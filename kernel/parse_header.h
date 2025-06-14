@@ -10,10 +10,18 @@
 
 #include <stdbool.h>
 #include "common_kern.h"
-#include "dsa/dsa.h"
 
-#define IP_MF		0x2000	/* "More Fragments" */
-#define IP_OFFSET	0x1fff	/* "Fragment Offset" */
+#ifndef NO_DSA
+#include "dsa/dsa.h"
+#endif
+
+#define IP_MF			0x2000	/* "More Fragments" */
+#define IP_OFFSET		0x1FFF	/* "Fragment Offset" */
+#define IP_VERSION(ip)	(*(__u8 *)(ip) >> 4)
+
+#define TCP_FLAGS(tcp)	(*((__u8 *)(tcp) + 13))
+#define TCP_FIN(flags)	((flags) & BIT(0))
+#define TCP_RST(flags)	((flags) & BIT(2))
 
 
 __always_inline static __be16 proto_ppp2eth(__be16 ppp_proto) {
@@ -29,14 +37,19 @@ __always_inline static __be16 proto_ppp2eth(__be16 ppp_proto) {
 
 __always_inline static bool parse_eth_header(void *ctx, struct packet_data *pkt, struct l2_header *l2) {
 	// Parse the Ethernet header, will drop the package if out-of-bounds
+#ifndef NO_DSA
 	if (pkt->in_ifindex == dsa_switch.ifindex) {
 		if (!parse_dsa_header(pkt, l2))
 			return false;
 
 		bpfw_debug("Interface: %u@p%u", pkt->in_ifindex, l2->dsa_port & ~DSA_PORT_SET);
 	}
-	else {
-		parse_ethhdr(struct ethhdr, ethh, pkt, l2);
+	else
+#endif
+	{
+		struct ethhdr *ethh;
+		parse_ethhdr(ethh, pkt, l2);
+
 		l2->dsa_port = 0;
 
 		bpfw_debug("Interface: %u", pkt->in_ifindex);
@@ -48,11 +61,13 @@ __always_inline static bool parse_eth_header(void *ctx, struct packet_data *pkt,
 }
 
 __always_inline static bool parse_vlan_header(void *ctx, bool xdp, struct packet_data *pkt, struct l2_header *l2) {
+	struct vlanhdr *vlan_h;
+
 	if (xdp || l2->dsa_port) {
 		// Check if there is a VLAN header
 		if (l2->proto == bpf_htons(ETH_P_8021Q)) {
 			// Parse the VLAN header, will drop the package if out-of-bounds
-			check_header(struct vlanhdr, *vlan_h, pkt);
+			check_header(vlan_h, pkt);
 
 			// Save the VLAN ID (last 12 Byte)
 			l2->vlan_id = bpf_ntohs(vlan_h->tci) & 0x0FFF;
@@ -84,15 +99,17 @@ __always_inline static bool parse_vlan_header(void *ctx, bool xdp, struct packet
 }
 
 __always_inline static bool parse_pppoe_header(struct packet_data *pkt, struct l2_header *l2) {
+	struct pppoehdr *pppoe_h;
+
 	if (l2->proto == bpf_ntohs(ETH_P_PPP_SES)) {
 		// Parse the PPPoE header, will drop the package if out-of-bounds
-		check_header(struct pppoehdr, *pppoe_h, pkt);
+		check_header(pppoe_h, pkt);
 
 		l2->pppoe_id = pppoe_h->sid;
+		l2->proto = proto_ppp2eth(pppoe_h->proto);
 
 		bpfw_debug("PPPoE Session ID: 0x%x", l2->pppoe_id);
 
-		l2->proto = proto_ppp2eth(pppoe_h->proto);
 		if (!l2->proto) {
 			bpfw_debug("PPPoE Protocol: 0x%04x", pppoe_h->proto);
 			return false;
@@ -123,18 +140,19 @@ __always_inline static bool parse_l2_header(void *ctx, bool xdp, struct packet_d
 
 __always_inline static bool parse_ipv4_header(struct packet_data *pkt, struct l3_header *l3) {
 	// Parse the IPv4 header, will drop the package if out-of-bounds
-	check_header(struct iphdr, *iph, pkt);
+	struct iphdr *iph;
+	check_header(iph, pkt);
 
 	bpfw_debug_ipv4("Src IPv4: ", &iph->saddr);
 	bpfw_debug_ipv4("Dst IPv4: ", &iph->daddr);
 
-	__u8 ihl = ((struct iphdr_ver_ihl*)iph)->ihl;
+	/*__u8 ihl = ((struct iphdr_ver_ihl*)iph)->ihl;
 
-	/* ip options */
+	// ip options
 	if (ihl * 4 != sizeof(*iph)) {
 		bpfw_debug("IHL words (%u) doesn't equal IPv4 Header size.", ihl);
 		return false;
-	}
+	}*/
 
 	/* ip fragmented traffic */
 	if (iph->frag_off & bpf_htons(IP_MF | IP_OFFSET)) {
@@ -157,14 +175,15 @@ __always_inline static bool parse_ipv4_header(struct packet_data *pkt, struct l3
 
 __always_inline static bool parse_ipv6_header(struct packet_data *pkt, struct l3_header *l3) {
 	// Parse the IPv6 header, will drop the package if out-of-bounds
-	check_header(struct ipv6hdr, *ipv6h, pkt);
+	struct ipv6hdr *ipv6h;
+	check_header(ipv6h, pkt);
 
 	bpfw_debug_ipv6("Src IPv6: ", &ipv6h->saddr);
 	bpfw_debug_ipv6("Dst IPv6: ", &ipv6h->daddr);
 
 	l3->family	= AF_INET6;
-	l3->src_ip  = ipv6h->saddr.__in6_u.__u6_addr32;
-	l3->dest_ip = ipv6h->daddr.__in6_u.__u6_addr32;
+	l3->src_ip  = ipv6h->saddr.s6_addr32;
+	l3->dest_ip = ipv6h->daddr.s6_addr32;
 
 	l3->proto   =  ipv6h->nexthdr;
 	l3->ttl     = &ipv6h->hop_limit;
@@ -206,7 +225,8 @@ __always_inline static bool parse_l3_header(struct packet_data *pkt, __be16 prot
 
 __always_inline static bool parse_tcp_header(struct packet_data *pkt, struct l4_header *l4) {
 	// Parse the TCP header, will drop the package if out-of-bounds
-	check_header(struct tcphdr, *tcph, pkt);
+	struct tcphdr *tcph;
+	check_header(tcph, pkt);
 
 	bpfw_debug("TCP Src Port: %u", bpf_ntohs(tcph->source));
 	bpfw_debug("TCP Dst Port: %u", bpf_ntohs(tcph->dest));
@@ -217,14 +237,15 @@ __always_inline static bool parse_tcp_header(struct packet_data *pkt, struct l4_
 	l4->cksum 	  = &tcph->check;
 
 	// Save the TCP Flags
-	l4->tcp_flags = *(struct tcphdr_flags*)((void*)tcph + TCP_HEADER_FLAGS_OFFSET);
+	l4->tcp_flags = TCP_FLAGS(tcph);
 
 	return true;
 }
 
 __always_inline static bool parse_udp_header(struct packet_data *pkt, struct l4_header *l4) {
 	// Parse the UDP header, will drop the package if out-of-bounds
-	check_header(struct udphdr, *udph, pkt);
+	struct udphdr *udph;
+	check_header(udph, pkt);
 
 	bpfw_debug("UDP Src Port: %u", bpf_ntohs(udph->source));
 	bpfw_debug("UDP Dst Port: %u", bpf_ntohs(udph->dest));
@@ -233,6 +254,8 @@ __always_inline static bool parse_udp_header(struct packet_data *pkt, struct l4_
 	l4->src_port  = &udph->source;
 	l4->dest_port = &udph->dest;
 	l4->cksum 	  = &udph->check;
+
+	l4->payload_len = bpf_ntohs(udph->len) - sizeof(*udph);
 
 	return true;
 }

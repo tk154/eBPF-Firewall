@@ -25,7 +25,7 @@ enum ct_ip_attr {
 
 
 const void* nfct_get_attr_ip(struct nf_conntrack *ct, const enum ct_ip_attr type, __u8 family);
-void nfct_set_attr_ip(struct nf_conntrack *ct, const enum ct_ip_attr type, void* ip, __u8 family);
+//void nfct_set_attr_ip(struct nf_conntrack *ct, const enum ct_ip_attr type, const void* ip, __u8 family);
 
 
 #endif

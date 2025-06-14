@@ -13,8 +13,7 @@
 #include "interfaces/dsa.h"
 #include "../log/log.h"
 
-#define IPV6_LEN 16
-#define NEW_INTERFACE UINT32_MAX
+#define NEW_INTERFACE   UINT32_MAX
 
 
 struct dump_cb_data {
@@ -113,12 +112,12 @@ static int socket_set_blocking(struct mnl_socket *socket, bool block) {
     return BPFW_RC_OK;
 }
 
-void mnl_attr_put_ip(struct nlmsghdr *nlh, uint16_t type, __be32 *ip, __u8 family) {
+void mnl_attr_put_ip(struct nlmsghdr *nlh, uint16_t type, const void *ip, __u8 family) {
     switch (family) {
         case AF_INET:
-            return mnl_attr_put_u32(nlh, type, ip[0]);
+            return mnl_attr_put(nlh, type, sizeof(struct in_addr), ip);
         case AF_INET6:
-            return mnl_attr_put(nlh, type, IPV6_LEN, ip);
+            return mnl_attr_put(nlh, type, sizeof(struct in6_addr), ip);
     }
 }
 

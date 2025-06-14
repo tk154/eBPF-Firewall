@@ -19,7 +19,7 @@ static bool mac_not_set(__u8 *mac) {
         && !mac[3] && !mac[4] && !mac[5];
 }
 
-static int get_neigh(struct netlink_handle* nl_h, __u32 ifindex, struct flow_key_value* flow, __be32 *dest_ip) {
+static int get_neigh(struct netlink_handle* nl_h, __u32 ifindex, struct flow *flow, __be32 *dest_ip) {
     const struct nlattr *nda[NDA_MAX + 1] = {};
     DECLARE_ATTR_TB(nda);
 
@@ -73,7 +73,7 @@ static int get_neigh(struct netlink_handle* nl_h, __u32 ifindex, struct flow_key
 }
 
 
-static int parse_bridge_if(struct netlink_handle* nl_h, __u32 ifindex, struct flow_key_value *flow, __be32 *dest_ip) {
+static int parse_bridge_if(struct netlink_handle* nl_h, __u32 ifindex, struct flow *flow, __be32 *dest_ip) {
     int rc;
 
     if (mac_not_set(flow->value.next.hop.dest_mac)) {
@@ -170,8 +170,34 @@ static int parse_ppp_if(struct netlink_handle* nl_h, __u32 ifindex,
     return BPFW_RC_OK;
 }
 
+static int parse_wireguard_if() {
+    return ACTION_NONE;
+}
+
+static int parse_none_if(struct netlink_handle* nl_h, __u32 ifindex,
+                         const struct nlattr **ifla, struct flow_value *f_value) {
+    const struct nlattr *ifla_info[IFLA_INFO_MAX + 1] = {};
+    DECLARE_ATTR_TB(ifla_info);
+
+    if (ifla[IFLA_LINKINFO]) {
+        parse_nested_attr(ifla[IFLA_LINKINFO], &ifla_info_tb);
+
+        if (ifla_info[IFLA_INFO_KIND]) {
+            const char *ifname = mnl_attr_get_str(ifla[IFLA_IFNAME]);
+            const char *if_type = mnl_attr_get_str(ifla_info[IFLA_INFO_KIND]);
+
+            bpfw_verbose("-> %s (%s) ", ifname, if_type);
+
+            if (strcmp(if_type, "wireguard") == 0)
+                return parse_wireguard_if();
+        }
+    }
+
+    return ACTION_NONE;
+}
+
 static int parse_eth_if(struct netlink_handle* nl_h, __u32 ifindex, const struct nlattr **ifla,
-                        struct flow_key_value *flow, __be32 *dest_ip) {
+                        struct flow *flow, __be32 *dest_ip) {
     const struct nlattr *ifla_info[IFLA_INFO_MAX + 1] = {};
     DECLARE_ATTR_TB(ifla_info);
     int rc = BPFW_RC_OK;
@@ -218,7 +244,7 @@ static int parse_eth_if(struct netlink_handle* nl_h, __u32 ifindex, const struct
 }
 
 
-static int get_link(struct netlink_handle* nl_h, __u32 ifindex, struct flow_key_value *flow, __be32 *dest_ip) {
+static int get_link(struct netlink_handle* nl_h, __u32 ifindex, struct flow *flow, __be32 *dest_ip) {
     const struct nlattr *ifla[IFLA_MAX + 1] = {};
     DECLARE_ATTR_TB(ifla);
     __u16 mtu;
@@ -231,6 +257,7 @@ static int get_link(struct netlink_handle* nl_h, __u32 ifindex, struct flow_key_
     struct ifinfomsg *ifinfom = mnl_nlmsg_get_payload(nlh);
 
     parse_attr(nlh, sizeof(*ifinfom), &ifla_tb);
+    mtu = mnl_attr_get_u32(ifla[IFLA_MTU]);
 
     switch (ifinfom->ifi_type) {
         case ARPHRD_ETHER:
@@ -240,6 +267,9 @@ static int get_link(struct netlink_handle* nl_h, __u32 ifindex, struct flow_key_
         case ARPHRD_PPP:
             rc = parse_ppp_if(nl_h, ifindex, ifla, &flow->value);
             break;
+
+        case ARPHRD_NONE:
+            return parse_none_if(nl_h, ifindex, ifla, &flow->value);
 
         default:
             bpfw_debug("Interface type: %hu\n", ifinfom->ifi_type);
@@ -252,12 +282,13 @@ static int get_link(struct netlink_handle* nl_h, __u32 ifindex, struct flow_key_
     if (flow->value.next.hop.ifindex != ifindex)
         return get_link(nl_h, flow->value.next.hop.ifindex, flow, dest_ip);
 
-    flow->value.next.hop.mtu = mnl_attr_get_u16(ifla[IFLA_MTU]);
+    flow->value.next.hop.mtu = mtu;
 
     return BPFW_RC_OK;
 }
 
-static int get_route(struct netlink_handle* nl_h, struct flow_key_value* flow, __be32 *dest_ip) {
+static int get_route(struct netlink_handle* nl_h, struct flow* flow, __be32 *dest_ip) {
+    __be32 *flow_dest_ip = flow_ip_get_dest(&flow->key.ip, flow->key.family);
     const struct nlattr *rta[RTA_MAX + 1] = {};
     DECLARE_ATTR_TB(rta);
 
@@ -275,7 +306,7 @@ static int get_route(struct netlink_handle* nl_h, struct flow_key_value* flow, _
 
     //mnl_attr_put_ip (nlh, RTA_SRC, flow->key.src_ip, flow->key.family);
     mnl_attr_put_ip (nlh, RTA_DST, flow->value.next.nat.rewrite_flag & REWRITE_DEST_IP ?
-                                   flow->value.next.nat.dest_ip : flow->key.dest_ip, flow->key.family);
+                                   flow->value.next.nat.dest_ip : flow_dest_ip, flow->key.family);
 
     /*mnl_attr_put_u16(nlh, RTA_SPORT, flow->key.src_port);
     mnl_attr_put_u16(nlh, RTA_DPORT, flow->value.next.nat.rewrite_flag & REWRITE_DEST_PORT ?
@@ -307,7 +338,7 @@ static int get_route(struct netlink_handle* nl_h, struct flow_key_value* flow, _
 
         default:
             bpfw_debug_ip("Couldn't retrieve route for ",
-                flow->key.dest_ip, flow->key.family, rc);
+                flow_dest_ip, flow->key.family, rc);
 
             return ACTION_PASS;
     }
@@ -329,7 +360,7 @@ static int get_route(struct netlink_handle* nl_h, struct flow_key_value* flow, _
 
     if (!rta[RTA_OIF]) {
         bpfw_error_ip(STRINGIFY(RTM_GETROUTE)" didn't return output ifindex for ",
-            flow->key.dest_ip, flow->key.family, 0);
+            flow_dest_ip, flow->key.family, 0);
 
         return BPFW_RC_ERROR;
     }
@@ -343,7 +374,7 @@ static int get_route(struct netlink_handle* nl_h, struct flow_key_value* flow, _
     return ACTION_FORWARD;
 }
 
-int netlink_get_next_hop(struct netlink_handle* nl_h, struct flow_key_value* flow) {
+int netlink_get_next_hop(struct netlink_handle* nl_h, struct flow* flow) {
     __be32 dest_ip[4];
 
     int rc = get_route(nl_h, flow, dest_ip);

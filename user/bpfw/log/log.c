@@ -4,9 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include <net/if.h>
 #include <arpa/inet.h>
-
 #include <linux/rtnetlink.h>
 
 
@@ -51,7 +49,7 @@ void bpfw_log_ifindex(enum bpfw_log_level level, __u32 ifindex, int error, const
     LOG_ERROR(error)
 }
 
-void bpfw_log_ip(enum bpfw_log_level level, __be32 *ip, __u8 family, int error, const char *prefix, ...) {
+void bpfw_log_ip(enum bpfw_log_level level, const void *ip, __u8 family, int error, const char *prefix, ...) {
     LOG_HEAD(level, prefix)
 
     char ip_str[INET6_ADDRSTRLEN];
@@ -63,7 +61,7 @@ void bpfw_log_ip(enum bpfw_log_level level, __be32 *ip, __u8 family, int error, 
     LOG_ERROR(error)
 }
 
-void bpfw_log_ip_on_ifindex(enum bpfw_log_level level, __be32 *ip, __u8 family, __u32 ifindex, int error, const char *prefix, ...) {
+void bpfw_log_ip_on_ifindex(enum bpfw_log_level level, const void *ip, __u8 family, __u32 ifindex, int error, const char *prefix, ...) {
     LOG_HEAD(level, prefix)
 
     char ifname[IF_NAMESIZE], ip_str[INET6_ADDRSTRLEN];;
@@ -77,14 +75,16 @@ void bpfw_log_ip_on_ifindex(enum bpfw_log_level level, __be32 *ip, __u8 family, 
 
 
 void bpfw_log_key(enum bpfw_log_level level, struct flow_key *f_key, const char *prefix, ...) {
+    char ifname[IF_NAMESIZE], src_ip_str[INET6_ADDRSTRLEN], dest_ip_str[INET6_ADDRSTRLEN];
+    const char *proto = f_key->proto == IPPROTO_TCP ? "tcp" : "udp";
+    __be32 *dest_ip = flow_ip_get_dest(&f_key->ip, f_key->family);
+    __be32 *src_ip = flow_ip_get_src(&f_key->ip, f_key->family);
+
     LOG_HEAD(level, prefix)
 
-    char ifname[IF_NAMESIZE], src_ip[INET6_ADDRSTRLEN], dest_ip[INET6_ADDRSTRLEN];
-    const char *proto = f_key->proto == IPPROTO_TCP ? "tcp" : "udp";
-
     if_indextoname(f_key->ifindex, ifname);
-    inet_ntop(f_key->family, &f_key->src_ip, src_ip, sizeof(src_ip));
-    inet_ntop(f_key->family, &f_key->dest_ip, dest_ip, sizeof(dest_ip));
+    inet_ntop(f_key->family, src_ip, src_ip_str, sizeof(src_ip_str));
+    inet_ntop(f_key->family, dest_ip, dest_ip_str, sizeof(dest_ip_str));
 
     fputs(ifname, log_file);
 
@@ -98,7 +98,7 @@ void bpfw_log_key(enum bpfw_log_level level, struct flow_key *f_key, const char 
         fprintf(log_file, " pppoe=0x%hx", ntohs(f_key->pppoe_id));
 
     fprintf(log_file, " %s %s %hu %s %hu\n", proto,
-        src_ip, ntohs(f_key->src_port), dest_ip, ntohs(f_key->dest_port));
+        src_ip_str, ntohs(f_key->src_port), dest_ip_str, ntohs(f_key->dest_port));
 }
 
 void bpfw_log_nat(enum bpfw_log_level level, struct nat_entry *n_entry, __u8 family, const char *prefix, ...) {

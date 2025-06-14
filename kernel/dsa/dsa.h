@@ -21,11 +21,12 @@ SEC(DSA_TAG_SECTION)
 const struct dsa_tag dsa_tag[] = { DSA_TAG(gswip), DSA_TAG(mtk), DSA_TAG(qca) };
 
 SEC(DSA_SWITCH_SECTION)
-struct dsa_switch dsa_switch;
+struct dsa_switch dsa_switch = {};
 
 
 enum {
-	DSA_PROTO_GSWIP = 1,
+	DSA_PROTO_NONE = 0,
+	DSA_PROTO_GSWIP,
 	DSA_PROTO_MTK,
 	DSA_PROTO_QCA
 };

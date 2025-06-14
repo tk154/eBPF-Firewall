@@ -26,7 +26,7 @@ enum bpf_hook {
 };
 
 
-struct flow_key_value {
+struct flow {
     struct flow_key key;
     struct flow_value value;
 };

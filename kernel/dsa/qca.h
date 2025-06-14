@@ -30,18 +30,21 @@ struct qca_tag_xmit {
 
 
 __always_inline static bool qca_tag_rcv(struct packet_data *pkt, struct l2_header *l2) {
-    parse_ethhdr(struct qca_tag_rcv, hdr, pkt, l2);
-    l2->dsa_port = FIELD_GET(QCA_HDR_RECV_SOURCE_PORT, hdr->h_tag[1]);
+	struct qca_tag_rcv *qca;
+    parse_ethhdr(qca, pkt, l2);
+
+    l2->dsa_port = FIELD_GET(QCA_HDR_RECV_SOURCE_PORT, qca->h_tag[1]);
 
     return true;
 }
 
 __always_inline static bool qca_tag_xmit(struct packet_data *pkt, struct next_hop *next_h, __u8 dsa_port) {
-    push_ethhdr(struct qca_tag_xmit, hdr, pkt, next_h);
+	struct qca_tag_xmit *qca;
+    push_ethhdr(qca, pkt, next_h);
 
-	hdr->h_tag[0] = FIELD_PREP(QCA_HDR_XMIT_VERSION, QCA_HDR_VERSION);
-	hdr->h_tag[1] = QCA_HDR_XMIT_FROM_CPU;
-	hdr->h_tag[1] |= FIELD_PREP(QCA_HDR_XMIT_DP_BIT, BIT(dsa_port));
+	qca->h_tag[0]  = FIELD_PREP(QCA_HDR_XMIT_VERSION, QCA_HDR_VERSION);
+	qca->h_tag[1]  = QCA_HDR_XMIT_FROM_CPU;
+	qca->h_tag[1] |= FIELD_PREP(QCA_HDR_XMIT_DP_BIT, BIT(dsa_port));
 
     return true;
 }

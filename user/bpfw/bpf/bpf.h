@@ -10,11 +10,7 @@
 
 // Struct to keep BPF object and program pointers together
 struct bpf_handle;
-
-struct bpf_map {
-    const char *name;
-    int fd;
-};
+struct bpf_map;
 
 
 /**
@@ -86,7 +82,8 @@ void bpf_detach_program(struct bpf_handle* bpf, struct netlink_handle *netlink_h
 int bpf_iface_attach_program(struct bpf_handle *bpf, struct netlink_handle *nl, __u32 ifindex, const char *ifname);
 int bpf_iface_detach_program(struct bpf_handle *bpf, struct netlink_handle *nl, __u32 ifindex, const char *ifname);
 
-struct bpf_map bpf_get_map(struct bpf_handle* bpf, const char *map_name);
+struct bpf_map *bpf_get_map(struct bpf_handle* bpf, const char *map_name);
+void bpf_free_map(struct bpf_map *map);
 //void *bpf_get_section_data(struct bpf_handle *bpf, const char *sec_name, size_t *sec_size);
 int bpf_set_map_max_entries(struct bpf_handle *bpf, const char *map_name, __u32 new_max_entries);
 int bpf_check_dsa(struct bpf_handle *bpf, __u32 dsa_switch, const char *dsa_proto, struct dsa_tag **dsa_tag);

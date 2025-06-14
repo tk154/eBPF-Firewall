@@ -70,7 +70,7 @@ int print_proto(__u8 proto) {
     }
 }
 
-int print_ip(__u8 *ip, __u8 family, const char *prefix) {
+int print_ip(__be32 *ip, __u8 family, const char *prefix) {
     char ip_str[INET6_ADDRSTRLEN];
     inet_ntop(family, ip, ip_str, sizeof(ip_str));
 

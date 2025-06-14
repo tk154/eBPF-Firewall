@@ -4,7 +4,7 @@
 #include "common_kern.h"
 
 
-#define prev_proto(data) *((__be16*)data - 1)
+#define prev_proto(data) (*((__be16 *)(data) - 1))
 
 __always_inline static __be16 proto_eth2ppp(__be16 eth_proto) {
 	switch (eth_proto) {
@@ -26,7 +26,9 @@ __always_inline static bool tc_vlan_recheck_pointer(struct __sk_buff *skb, struc
 }
 
 __always_inline static bool pkt_vlan_push(struct packet_data *pkt, __u16 vlan_id, __be16 proto) {
-	check_header(struct vlanhdr, *vlan_h, pkt);
+	struct vlanhdr *vlan_h;
+	check_header(vlan_h, pkt);
+
 	vlan_h->tci = bpf_htons(vlan_id);
 	vlan_h->proto = proto;
 
@@ -100,15 +102,16 @@ __always_inline static bool adjust_l2_size(void *ctx, bool xdp, struct packet_da
  * @returns BPF_REDIRECT on success, BPF_DROP otherwise
  * **/
 __always_inline static bool set_eth_header(struct packet_data *pkt, struct next_hop *next_h) {
+	struct ethhdr *ethh;
+
 	if (next_h->dsa_port) {
 		if (!push_dsa_header(pkt, next_h))
 			return false;
 
 		bpfw_debug("DSA Port: %u", next_h->dsa_port & ~DSA_PORT_SET);
 	}
-	else {
-		push_ethhdr(struct ethhdr, ethh, pkt, next_h);
-	}
+	else
+		push_ethhdr(ethh, pkt, next_h);
 
 	bpfw_debug_mac("Dst MAC: ", next_h->dest_mac);
 
@@ -175,13 +178,15 @@ __always_inline static bool check_vlan_header(void *ctx, bool xdp, struct packet
 }
 
 __always_inline static bool check_pppoe_header(struct packet_data *pkt, struct l2_header *l2, __be16 next_hop_pppoe) {
+	struct pppoehdr *pppoe_h;
+
     if (l2->pppoe_id && !next_hop_pppoe) {
 		bpfw_debug("Remove PPPoE Header");
 
 		prev_proto(pkt->p) = l2->proto;
     }
     else if (l2->pppoe_id != next_hop_pppoe) {
-		check_header(struct pppoehdr, *pppoe_h, pkt);
+		check_header(pppoe_h, pkt);
 
 		if (!l2->pppoe_id && next_hop_pppoe) {
 			pppoe_h->vertype = 0x11;

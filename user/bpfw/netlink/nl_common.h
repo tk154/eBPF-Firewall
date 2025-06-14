@@ -35,7 +35,7 @@ struct attr_tb {
 };
 
 
-void mnl_attr_put_ip(struct nlmsghdr *nlh, __u16 type, __be32 *ip, __u8 family);
+void mnl_attr_put_ip(struct nlmsghdr *nlh, __u16 type, const void *ip, __u8 family);
 int parse_attr(const struct nlmsghdr *nlh, unsigned int offset, struct attr_tb *tb);
 int parse_nested_attr(const struct nlattr *attr, struct attr_tb *tb);
 

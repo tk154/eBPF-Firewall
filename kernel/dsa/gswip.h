@@ -38,20 +38,23 @@ struct gswip_tag_xmit {
 
 
 __always_inline static bool gswip_tag_rcv(struct packet_data *pkt, struct l2_header *l2) {
-    parse_ethhdr(struct gswip_tag_rcv, hdr, pkt, l2);
-    l2->dsa_port = (hdr->h_tag[7] & GSWIP_RX_SPPID_MASK) >> GSWIP_RX_SPPID_SHIFT;
+	struct gswip_tag_rcv *gswip;
+    parse_ethhdr(gswip, pkt, l2);
+
+    l2->dsa_port = (gswip->h_tag[7] & GSWIP_RX_SPPID_MASK) >> GSWIP_RX_SPPID_SHIFT;
 
     return true;
 }
 
 __always_inline static bool gswip_tag_xmit(struct packet_data *pkt, struct next_hop *next_h, __u8 dsa_port) {
-    push_ethhdr(struct gswip_tag_xmit, hdr, pkt, next_h);
+	struct gswip_tag_xmit *gswip;
+    push_ethhdr(gswip, pkt, next_h);
 
-	hdr->h_tag[0] = GSWIP_TX_SLPID_CPU;
-	hdr->h_tag[1] = GSWIP_TX_DPID_ELAN;
-	hdr->h_tag[2] = GSWIP_TX_PORT_MAP_EN | GSWIP_TX_PORT_MAP_SEL;
-	hdr->h_tag[3] = BIT(dsa_port + GSWIP_TX_PORT_MAP_SHIFT) & GSWIP_TX_PORT_MAP_MASK;
-	hdr->h_tag[3] |= GSWIP_TX_DPID_EN;
+	gswip->h_tag[0]  = GSWIP_TX_SLPID_CPU;
+	gswip->h_tag[1]  = GSWIP_TX_DPID_ELAN;
+	gswip->h_tag[2]  = GSWIP_TX_PORT_MAP_EN | GSWIP_TX_PORT_MAP_SEL;
+	gswip->h_tag[3]  = BIT(dsa_port + GSWIP_TX_PORT_MAP_SHIFT) & GSWIP_TX_PORT_MAP_MASK;
+	gswip->h_tag[3] |= GSWIP_TX_DPID_EN;
 
     return true;
 }

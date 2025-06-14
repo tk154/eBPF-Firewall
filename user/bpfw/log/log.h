@@ -48,8 +48,8 @@ void bpfw_log(enum bpfw_log_level level, const char* format, ...);
 void bpfw_log_errno(enum bpfw_log_level level, int error, const char *prefix, ...);
 
 void bpfw_log_ifindex(enum bpfw_log_level level, __u32 ifindex, int error, const char *prefix, ...);
-void bpfw_log_ip(enum bpfw_log_level level, __be32 *ip, __u8 family, int error, const char *prefix, ...);
-void bpfw_log_ip_on_ifindex(unsigned int log_level, __be32 *ip, __u8 family, __u32 ifindex, int error, const char *prefix, ...);
+void bpfw_log_ip(enum bpfw_log_level level, const void *ip, __u8 family, int error, const char *prefix, ...);
+void bpfw_log_ip_on_ifindex(unsigned int log_level, const void *ip, __u8 family, __u32 ifindex, int error, const char *prefix, ...);
 
 void bpfw_log_key(enum bpfw_log_level level, struct flow_key *f_key, const char *prefix, ...);
 void bpfw_log_action(enum bpfw_log_level level, __u8 action, const char *prefix, ...);

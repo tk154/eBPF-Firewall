@@ -1,8 +1,6 @@
 #ifndef BPFW_COMMON_KERN_H
 #define BPFW_COMMON_KERN_H
 
-//#include <stdbool.h>
-
 #include "../common.h"
 #include "logging.h"
 
@@ -22,27 +20,33 @@
 
 
 // Helper macro to make the out-of-bounds check on a packet header
-#define check_header(header_type, header_ptr, pkt) \
-    header_type header_ptr = pkt->p; \
-	pkt->p += sizeof(header_type); \
-    if (pkt->p > pkt->data_end) { \
-        bpfw_warn(#header_type" > data_end"); \
-        return false; \
-    }
+#define check_header(hdr, pkt) \
+    do { \
+        hdr = pkt->p; \
+        pkt->p += sizeof(*hdr); \
+        if (pkt->p > pkt->data_end) { \
+            bpfw_warn(#hdr" > data_end"); \
+            return false; \
+        } \
+    } while (0);
 
-#define parse_ethhdr(hdr_t, hdr_p, pkt, l2) \
-	check_header(hdr_t, *hdr_p, pkt) \
-	l2->src_mac = hdr_p->h_source; \
-	l2->proto = hdr_p->h_proto;
+#define parse_ethhdr(hdr, pkt, l2) \
+    do { \
+        check_header(hdr, pkt) \
+        l2->proto = hdr->h_proto; \
+        l2->src_mac = hdr->h_source; \
+    } while (0);
 
-#define push_ethhdr(hdr_t, hdr_p, pkt, next_h) \
-	check_header(hdr_t, *hdr_p, pkt) \
-	memcpy(hdr_p->h_source, next_h->src_mac,  ETH_ALEN); \
-	memcpy(hdr_p->h_dest,   next_h->dest_mac, ETH_ALEN);
+#define push_ethhdr(hdr, pkt, next) \
+    do { \
+        check_header(hdr, pkt) \
+        memcpy(hdr->h_dest, next->dest_mac, ETH_ALEN); \
+        memcpy(hdr->h_source, next->src_mac, ETH_ALEN); \
+    } while (0);
 
 
 // tcphdr from <linux/tcp.h> uses the host endianness, instead of the compiler endianness
-#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+/*#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
 struct iphdr_ver_ihl {
     __u8 ihl:4, version:4;
 };
@@ -60,17 +64,21 @@ struct tcphdr_flags {
 	__u8 cwr:1, ece:1, urg:1, ack:1, psh:1, rst:1, syn:1, fin:1;
 };
 #endif
-#define TCP_HEADER_FLAGS_OFFSET 13
+#define TCP_HEADER_FLAGS_OFFSET 13*/
 
+
+struct flow {
+	struct flow_key key;
+	struct flow_value *value;
+    void *map;
+};
 
 struct packet_data {
-    __u32 in_ifindex;
-    __u32 out_ifindex;
-
-    //bool in_dsa, out_dsa;
-
     void *data, *data_end;
     void *p;
+
+    __u32 in_ifindex;
+    __u32 out_ifindex;
 };
 
 struct l2_header {
@@ -95,8 +103,11 @@ struct l4_header {
 	__be16  *src_port, *dest_port;
 	__sum16 *cksum;
 
+    __u16 payload_len;
+
 	// TCP Header Flags
-	struct tcphdr_flags tcp_flags;
+	//struct tcphdr_flags tcp_flags;
+    __u8 tcp_flags;
 };
 
 struct packet_header {

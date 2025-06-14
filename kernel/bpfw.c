@@ -11,32 +11,37 @@
 #include "mangle.h"
 
 
+struct flow4_key {
+	FLOW_KEY_COMMON
+	struct flow4_ip ip;
+};
+
+struct flow6_key {
+	FLOW_KEY_COMMON
+	struct flow6_ip ip;
+};
+
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
-	__type(key, struct flow_key);
+	__type(key, struct flow4_key);
 	__type(value, struct flow_value);
 	__uint(max_entries, FLOW_MAP_DEFAULT_MAX_ENTRIES);
 	__uint(pinning, LIBBPF_PIN_BY_NAME);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
-} BPFW_FLOW_MAP SEC(".maps");
+} BPFW_IPV4_FLOW_MAP SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__type(key, struct flow6_key);
+	__type(value, struct flow_value);
+	__uint(max_entries, FLOW_MAP_DEFAULT_MAX_ENTRIES);
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+} BPFW_IPV6_FLOW_MAP SEC(".maps");
 
 SEC(USERSPACE_TIME_SECTION)
 struct user_time user;
 
-
-__always_inline static void ipcpy_fill_zeros(__be32 *dest, const __be32* src, __u8 family) {
-    switch (family) {
-        case AF_INET:
-			dest[0] = src[0];
-			dest[1] = dest[2] = dest[3] = 0;
-		break;
-
-        case AF_INET6:
-			dest[0] = src[0]; dest[1] = src[1];
-			dest[2] = src[2]; dest[3] = src[3];
-		break;
-    }
-}
 
 /**
  * Helper to swap the src and dest IP and the src and dest port of a flow key
@@ -44,46 +49,49 @@ __always_inline static void ipcpy_fill_zeros(__be32 *dest, const __be32* src, __
  * @param f_value Pointer to the flow value
  * **/
 __always_inline static void reverse_flow_key(struct flow_key *f_key, struct next_entry *next) {
+	__be32 *flow_dest = flow_ip_get_dest(&f_key->ip, f_key->family);
+	__be32 *flow_src  = flow_ip_get_src(&f_key->ip, f_key->family);
+
 	f_key->ifindex  = next->hop.ifindex;
 	f_key->dsa_port = next->hop.dsa_port;
 	f_key->vlan_id  = next->hop.vlan_id;
 	f_key->pppoe_id = next->hop.pppoe_id;
 
-	ipcpy(f_key->src_ip, next->nat.rewrite_flag & REWRITE_DEST_IP ?
-		next->nat.dest_ip : f_key->dest_ip, f_key->family);
-	ipcpy(f_key->dest_ip, next->nat.rewrite_flag & REWRITE_SRC_IP ?
-		next->nat.src_ip : f_key->src_ip, f_key->family);
-	
+	ipcpy(flow_src, next->nat.rewrite_flag & REWRITE_DEST_IP ?
+		next->nat.dest_ip : flow_dest, f_key->family);
+	ipcpy(flow_dest, next->nat.rewrite_flag & REWRITE_SRC_IP ?
+		next->nat.src_ip : flow_src, f_key->family);
+
 	f_key->src_port  = next->nat.rewrite_flag & REWRITE_DEST_PORT ?
 					   next->nat.dest_port : f_key->dest_port;
 	f_key->dest_port = next->nat.rewrite_flag & REWRITE_SRC_PORT ?
 					   next->nat.src_port : f_key->src_port;
 }
 
-__always_inline static bool tcp_finished(struct flow_key *f_key, struct flow_value *f_value, struct tcphdr_flags tcp_flags) {
-	if (f_key->proto != IPPROTO_TCP)
+__always_inline static bool tcp_finished(struct flow *flow, __u8 flags) {
+	if (flow->key.proto != IPPROTO_TCP)
 		return false;
 
-	if (tcp_flags.fin) {
+	if (TCP_FIN(flags)) {
 		// Mark the flow as finished
-		f_value->state = STATE_NONE;
-		bpfw_info_key("FIN", f_key);
+		flow->value->state = STATE_NONE;
+		bpfw_info_key("FIN", &flow->key);
 
 		return true;
 	}
 
-	if (tcp_flags.rst) {
+	if (TCP_RST(flags)) {
 		// Mark the flow as finished
-		f_value->state = STATE_NONE;
+		flow->value->state = STATE_NONE;
 
 		// Also mark the flow as finished for the reverse direction, if there is one
-		reverse_flow_key(f_key, &f_value->next);
+		reverse_flow_key(&flow->key, &flow->value->next);
 
-		f_value = bpf_map_lookup_elem(&BPFW_FLOW_MAP, f_key);
-		if (f_value)
-			f_value->state = STATE_NONE;
+		flow->value = bpf_map_lookup_elem(flow->map, &flow->key);
+		if (flow->value)
+			flow->value->state = STATE_NONE;
 
-		bpfw_info_key("RST", f_key);
+		bpfw_info_key("RST", &flow->key);
 
 		return true;
 	}
@@ -91,16 +99,30 @@ __always_inline static bool tcp_finished(struct flow_key *f_key, struct flow_val
 	return false;
 }
 
+__always_inline static void *get_flow_map(__u8 family) {
+	switch (family) {
+		case AF_INET:
+			return &BPFW_IPV4_FLOW_MAP;
+		case AF_INET6:
+			return &BPFW_IPV6_FLOW_MAP;
+		default:
+			return NULL;
+	}
+}
+
 __always_inline static void fill_flow_key(struct flow_key *f_key, __u32 ifindex, struct packet_header *header) {
+	__be32 *dest_ip = flow_ip_get_dest(&f_key->ip, header->l3.family);
+	__be32 *src_ip  = flow_ip_get_src(&f_key->ip, header->l3.family);
+
 	f_key->ifindex = ifindex;
 
 	f_key->dsa_port = header->l2.dsa_port;
 	f_key->vlan_id  = header->l2.vlan_id;
 	f_key->pppoe_id = header->l2.pppoe_id;
-	
+
 	f_key->family = header->l3.family;
-	ipcpy_fill_zeros(f_key->src_ip, header->l3.src_ip, header->l3.family);
-	ipcpy_fill_zeros(f_key->dest_ip, header->l3.dest_ip, header->l3.family);
+	ipcpy(src_ip, header->l3.src_ip, header->l3.family);
+	ipcpy(dest_ip, header->l3.dest_ip, header->l3.family);
 
 	f_key->proto = header->l3.proto;
 	f_key->src_port = *header->l4.src_port;
@@ -109,17 +131,19 @@ __always_inline static void fill_flow_key(struct flow_key *f_key, __u32 ifindex,
 	f_key->__pad = 0;
 }
 
-__always_inline static long create_new_flow_entry(struct flow_key *f_key, __u64 curr_time, void *src_mac) {
-	bpfw_info_key("NEW", f_key);
-
+__always_inline static long create_flow_entry(struct flow *flow, __u64 curr_time, void *src_mac) {
 	struct flow_value f_value;
+	long rc;
+
+	bpfw_info_key("NEW", &flow->key);
+
 	f_value.state = STATE_NEW_FLOW;
 	f_value.time = curr_time;
 
 	memcpy(f_value.src_mac, src_mac, ETH_ALEN);
 	memset(&f_value.next, 0, sizeof(f_value.next));
 
-	long rc = bpf_map_update_elem(&BPFW_FLOW_MAP, f_key, &f_value, BPF_NOEXIST);
+	rc = bpf_map_update_elem(flow->map, &flow->key, &f_value, BPF_NOEXIST);
 	if (rc != 0)
 		bpfw_warn("bpf_map_update_elem error: %d", rc);
 
@@ -134,8 +158,15 @@ __always_inline static long create_new_flow_entry(struct flow_key *f_key, __u64 
 **/
 __always_inline static __u8 bpfw_func(void *ctx, bool xdp, struct packet_data *pkt) {
 	__u64 curr_time = bpf_ktime_get_coarse_ns();
+	struct packet_header header;
+	struct flow flow;
+
 	if (curr_time - user.last_time >= user.timeout) {
-		bpfw_warn("Userspace program doesn't respond anymore.");
+		if (user.last_time && !user.warned_about_timeout) {
+			bpfw_warn("Userspace program doesn't respond anymore.");
+			user.warned_about_timeout = true;
+		}
+		
 		return ACTION_PASS;
 	}
 
@@ -146,7 +177,6 @@ __always_inline static __u8 bpfw_func(void *ctx, bool xdp, struct packet_data *p
 
 	bpfw_debug("---------- New Package ----------");
 
-	struct packet_header header;
 	if (!parse_l2_header(ctx, xdp, pkt, &header.l2))
 		return ACTION_PASS;
 
@@ -156,41 +186,42 @@ __always_inline static __u8 bpfw_func(void *ctx, bool xdp, struct packet_data *p
 	if (!parse_l4_header(pkt, header.l3.proto, &header.l4))
 		return ACTION_PASS;
 
+	flow.map = get_flow_map(header.l3.family);
+
 	// Fill the flow key
-	struct flow_key f_key;
-	fill_flow_key(&f_key, pkt->in_ifindex, &header);
+	fill_flow_key(&flow.key, pkt->in_ifindex, &header);
 
 	// Check if a flowtrack entry exists
-	struct flow_value* f_value = bpf_map_lookup_elem(&BPFW_FLOW_MAP, &f_key);
-	if (!f_value) {
+	flow.value = bpf_map_lookup_elem(flow.map, &flow.key);
+	if (!flow.value) {
 		// If there is none, create a new one
-		create_new_flow_entry(&f_key, curr_time, header.l2.src_mac);
+		create_flow_entry(&flow, curr_time, header.l2.src_mac);
 		return ACTION_PASS;
 	}
 
 	// Reset the timeout
-	f_value->time = curr_time;
+	flow.value->time = curr_time;
 
-	switch (f_value->state) {
+	switch (flow.value->state) {
 		case STATE_FORWARD:
 			// Pass the package to the network stack if 
 			// there is a FIN or RST or the TTL expired
-			if (tcp_finished(&f_key, f_value, header.l4.tcp_flags))
+			if (tcp_finished(&flow, header.l4.tcp_flags))
 				return ACTION_PASS;
 
-			if (header.l3.tot_len > f_value->next.hop.mtu) {
+			if (header.l3.tot_len > flow.value->next.hop.mtu) {
 				bpfw_debug("MTU exceeded (%u > %u)",
 					header.l3.tot_len, f_value->next.hop.mtu);
 		
 				return ACTION_PASS;
 			}
 
-			mangle_packet(&header.l3, &header.l4, &f_value->next);
+			mangle_packet(&header.l3, &header.l4, &flow.value->next);
 
-			if (!push_l2_header(ctx, xdp, pkt, &header.l2, &f_value->next.hop))
+			if (!push_l2_header(ctx, xdp, pkt, &header.l2, &flow.value->next.hop))
 				return ACTION_DROP;
 
-			pkt->out_ifindex = f_value->next.hop.ifindex;
+			pkt->out_ifindex = flow.value->next.hop.ifindex;
 			bpfw_debug("Redirect to ifindex %u", pkt->out_ifindex);
 
 			break;
@@ -204,7 +235,7 @@ __always_inline static __u8 bpfw_func(void *ctx, bool xdp, struct packet_data *p
 			bpfw_debug("Pass package");
 	}
 
-	return f_value->action;
+	return flow.value->action;
 }
 
 

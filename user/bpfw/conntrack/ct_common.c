@@ -48,7 +48,7 @@ const void* nfct_get_attr_ip(struct nf_conntrack *ct, const enum ct_ip_attr type
     }
 }
 
-void nfct_set_attr_ip(struct nf_conntrack *ct, const enum ct_ip_attr type, void* ip, __u8 family) {
+static void nfct_set_attr_ip(struct nf_conntrack *ct, const enum ct_ip_attr type, const void* ip, __u8 family) {
     switch (family) {
         case AF_INET:
             return nfct_set_attr(ct, ipv4_attr[type], ip);
@@ -150,7 +150,10 @@ static int nfct_get_cb(enum nf_conntrack_msg_type type, struct nf_conntrack *ct,
     return NFCT_CB_STOLEN;
 }
 
-int conntrack_do_lookup(struct conntrack_handle* conntrack_h, struct flow_key_value *flow) {
+int conntrack_do_lookup(struct conntrack_handle* conntrack_h, struct flow *flow) {
+    __be32 *dest_ip = flow_ip_get_dest(&flow->key.ip, flow->key.family);
+    __be32 *src_ip  = flow_ip_get_src(&flow->key.ip, flow->key.family);
+
     // Create a new conntrack entry object for a lookup
     struct nf_conntrack *ct = nfct_new();
     if (!ct) {
@@ -163,8 +166,8 @@ int conntrack_do_lookup(struct conntrack_handle* conntrack_h, struct flow_key_va
     // Set the attributes accordingly
     nfct_set_attr_u8 (ct, ATTR_L3PROTO,  flow->key.family);
     nfct_set_attr_u8 (ct, ATTR_L4PROTO,  flow->key.proto);
-    nfct_set_attr_ip (ct, ATTR_IP_SRC,   flow->key.src_ip, flow->key.family);
-    nfct_set_attr_ip (ct, ATTR_IP_DST,   flow->key.dest_ip, flow->key.family);
+    nfct_set_attr_ip (ct, ATTR_IP_SRC,   src_ip, flow->key.family);
+    nfct_set_attr_ip (ct, ATTR_IP_DST,   dest_ip, flow->key.family);
     nfct_set_attr_u16(ct, ATTR_PORT_SRC, flow->key.src_port);
     nfct_set_attr_u16(ct, ATTR_PORT_DST, flow->key.dest_port);
 

@@ -27,6 +27,7 @@ static void setup_signal_handler() {
     // Catch CTRL+C and SIGTERM with the handler to exit the main loop
     struct sigaction act;
     act.sa_handler = signal_handler;
+
     sigaction(SIGINT, &act, NULL);
     sigaction(SIGTERM, &act, NULL);
 }

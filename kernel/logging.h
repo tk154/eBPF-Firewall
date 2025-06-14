@@ -4,8 +4,6 @@
 #include <bpf/bpf_endian.h>
 #include <bpf/bpf_helpers.h>
 
-#include <netinet/in.h>
-
 
 #define BPFW_LOG_LEVEL_NONE     0 
 #define BPFW_LOG_LEVEL_ERROR    1
@@ -21,9 +19,13 @@
 #endif
 
 #if BPFW_LOG_LEVEL >= BPFW_LOG_LEVEL_WARN
-    #define bpfw_warn(format, ...) bpf_printk(format, ##__VA_ARGS__)
+    #define bpfw_warn(format, ...)      bpf_printk(format, ##__VA_ARGS__)
+    #define bpfw_warn_ipv4(prefix, ip)  bpf_log_ipv4(prefix, ip)
+    #define bpfw_warn_ipv6(prefix, ip)  bpf_log_ipv6(prefix, ip)
 #else
     #define bpfw_warn(format, ...)
+    #define bpfw_warn_ipv4(prefix, ip)
+    #define bpfw_warn_ipv6(prefix, ip)
 #endif
 
 #if BPFW_LOG_LEVEL >= BPFW_LOG_LEVEL_INFO
@@ -53,18 +55,25 @@
 #endif
 
 
-__always_inline static void bpf_log_ipv4(const char *prefix, void *ip_addr) {
-    __u8 *ip = ip_addr;
+__always_inline static void bpf_log_ipv4(const char *prefix, const void *ip_addr) {
+    const __u8 *ip = ip_addr;
 
     bpf_printk("%s%u.%u.%u.%u", prefix, ip[0], ip[1], ip[2], ip[3]);
 }
 
-__always_inline static void bpf_log_ipv6(const char *prefix, void *ip_addr) {
-    __u16 *ip = ip_addr;
+__always_inline static void bpf_log_ipv6(const char *prefix, const void *ip_addr) {
+    const __u16 *ip = ip_addr;
 
     bpf_printk("%s%x:%x:%x:%x:%x:%x:%x:%x", prefix,
         bpf_ntohs(ip[0]), bpf_ntohs(ip[1]), bpf_ntohs(ip[2]), bpf_ntohs(ip[3]), 
         bpf_ntohs(ip[4]), bpf_ntohs(ip[5]), bpf_ntohs(ip[6]), bpf_ntohs(ip[7]));
+}
+
+__always_inline static void bpf_log_ip(const char *prefix, const void *ip_addr, __u8 family) {
+    if (family == AF_INET)
+        bpf_log_ipv4(prefix, ip_addr);
+    else if (family == AF_INET6)
+        bpf_log_ipv6(prefix, ip_addr);
 }
 
 __always_inline static void bpf_log_mac(const char *prefix, void *mac_addr) {
@@ -82,13 +91,13 @@ __always_inline static void bpf_log_key(const char *header, struct flow_key *f_k
         bpf_printk("VLAN ID: %u", f_key->vlan_id);
 
     if (f_key->family == AF_INET) {
-        bpf_log_ipv4("Src IPv4: ", &f_key->src_ip);
-        bpf_log_ipv4("Dst IPv4: ", &f_key->dest_ip);
+        bpf_log_ipv4("Src IPv4: ", &f_key->ip.v4.src);
+        bpf_log_ipv4("Dst IPv4: ", &f_key->ip.v4.dest);
     }
-    /*else {
-        bpf_log_ipv6("Src IPv6: ", &f_key->src_ip);
-        bpf_log_ipv6("Dst IPv6: ", &f_key->dest_ip);
-    }*/
+    else {
+        bpf_log_ipv6("Src IPv6: ", &f_key->ip.v6.src);
+        bpf_log_ipv6("Dst IPv6: ", &f_key->ip.v6.dest);
+    }
 
     if (f_key->proto == IPPROTO_TCP) {
         bpf_printk("TCP Src Port: %u", bpf_ntohs(f_key->src_port));

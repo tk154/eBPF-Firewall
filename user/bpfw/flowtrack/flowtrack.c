@@ -15,6 +15,14 @@
 
 #include "../log/log.h"
 
+#define bpf_flows_for_each_entry(handle, map, key, value, block)    \
+    do {                                                            \
+        map = handle->flow4_map;                                   \
+        bpf_map_for_each_entry(map, key, value, block);             \
+        map = handle->flow6_map;                                   \
+        bpf_map_for_each_entry(map, key, value, block);             \
+    } while (0);
+
 
 struct flowtrack_handle {
     struct bpf_handle *bpf_h;
@@ -27,7 +35,7 @@ struct flowtrack_handle {
     struct flow_timeout flow_timeout;
     struct dsa_tag *dsa_tag;
 
-    struct bpf_map flow_map, user_time_map;
+    struct bpf_map *flow4_map, *flow6_map, *user_time_map;
     __u32 map_poll_sec;
 
     struct map *iface_hooks;
@@ -50,18 +58,19 @@ static int update_userspace_time(struct flowtrack_handle *flowtrack_h, __u64 cur
     unsigned int index = 0;
 
     struct user_time user = {
-        .timeout = 3 * flowtrack_h->map_poll_sec * (__u64)1e9, .last_time = curr_time
+        .timeout = (__u64)3e9 * flowtrack_h->map_poll_sec,
+        .last_time = curr_time,
+        .warned_about_timeout = false
     };
 
     // Update the BPF flow entry, break out on error
-    if (bpf_map_update_entry(&flowtrack_h->user_time_map, &index, &user) != BPFW_RC_OK)
+    if (bpf_map_update_entry(flowtrack_h->user_time_map, &index, &user) != BPFW_RC_OK)
         return BPFW_RC_ERROR;
 
     return BPFW_RC_OK;
 }
 
-
-static int calc_l2_diff(struct flowtrack_handle *flowtrack_h, struct flow_key_value *flow) {
+static int calc_l2_diff(struct flowtrack_handle *flowtrack_h, struct flow *flow) {
     struct dsa_tag *tag = flowtrack_h->dsa_tag;
     enum bpf_hook hook = flowtrack_h->hook;
     char ifname[IF_NAMESIZE];
@@ -89,12 +98,33 @@ static int calc_l2_diff(struct flowtrack_handle *flowtrack_h, struct flow_key_va
         bpfw_debug("TC cannot shrink L2 Header (L2 diff = %hhd).\n", diff);
         return EOPNOTSUPP;
     }
+    else if (diff)
+        bpfw_verbose("L2 diff = %hhd, ", diff);
 
     flow->value.next.hop.l2_diff = diff;
 
     return BPFW_RC_OK;
 }
 
+
+static void free_bpf_maps(struct flowtrack_handle *flowtrack_h) {
+    bpf_free_map(flowtrack_h->flow4_map);
+    bpf_free_map(flowtrack_h->flow6_map);
+    bpf_free_map(flowtrack_h->user_time_map);
+}
+
+static int get_bpf_maps(struct flowtrack_handle *flowtrack_h) {
+    flowtrack_h->flow4_map = bpf_get_map(flowtrack_h->bpf_h, IPV4_FLOW_MAP_NAME);
+    flowtrack_h->flow6_map = bpf_get_map(flowtrack_h->bpf_h, IPV6_FLOW_MAP_NAME);
+    flowtrack_h->user_time_map = bpf_get_map(flowtrack_h->bpf_h, USERSPACE_TIME_SECTION);
+    
+    if (!flowtrack_h->flow4_map || !flowtrack_h->flow6_map || !flowtrack_h->user_time_map) {
+        free_bpf_maps(flowtrack_h);
+        return BPFW_RC_ERROR;
+    }
+
+    return BPFW_RC_OK;
+}
 
 static int new_interface(__u32 ifindex, const char *ifname, void *data) {
     struct flowtrack_handle *flowtrack_h = data;
@@ -104,22 +134,23 @@ static int new_interface(__u32 ifindex, const char *ifname, void *data) {
 
 static int del_interface(__u32 ifindex, const char *ifname, void *data) {
     struct flowtrack_handle *flowtrack_h = data;
-    struct flow_key_value flow;
+    struct flow flow;
+    struct bpf_map *flow_map;
 
-    bpf_map_for_each_entry(&flowtrack_h->flow_map, &flow.key, &flow.value, {
+    bpf_flows_for_each_entry(flowtrack_h, flow_map, &flow.key, &flow.value, {
         if (flow.key.ifindex == ifindex || flow.value.next.hop.ifindex == ifindex)
-            if (bpf_map_delete_entry(&flowtrack_h->flow_map, &flow.key) != BPFW_RC_OK)
+            if (bpf_map_delete_entry(flow_map, &flow.key) != BPFW_RC_OK)
                 return BPFW_RC_ERROR;
     });
 }
 
 
-static void connection_flowtable_offload(struct flow_key_value *flow) {
+static void connection_flowtable_offload(struct flow *flow) {
     if (flow->value.state == STATE_NEW_FLOW)
         bpfw_debug_key("\nConnection is offloaded to flowtable. Cannot read TCP state.\n", &flow->key);
 }
 
-static int connection_not_established(struct flow_key_value *flow) {
+static int connection_not_established(struct flow *flow) {
     /* It could be possible that we have received the package here through the BPF map
     *  before it was processed by nf_conntrack, or it has been dropped
     */
@@ -133,7 +164,7 @@ static int connection_not_established(struct flow_key_value *flow) {
     return BPFW_RC_OK;
 }
 
-static int connection_established(struct flowtrack_handle *flowtrack_h, struct flow_key_value *flow, __u32 last_packet_sec_ago) {
+static int connection_established(struct flowtrack_handle *flowtrack_h, struct flow *flow, __u32 last_packet_sec_ago) {
     switch (flow->value.state) {
         case STATE_NONE:
             memset(&flow->value.next, 0, sizeof(flow->value.next));
@@ -177,7 +208,9 @@ static int connection_established(struct flowtrack_handle *flowtrack_h, struct f
 }
 
 
-static int handle_bpf_entry(struct flowtrack_handle *flowtrack_h, struct flow_key_value *flow, __u32 time_sec) {
+static int handle_bpf_entry(struct flowtrack_handle *flowtrack_h, struct bpf_map *flow_map,
+                            struct flow *flow, __u32 time_sec)
+{
     __u32 flow_time_sec, flow_timeout, last_packet_sec_ago;
     __u8 old_state;
     int rc;
@@ -189,7 +222,7 @@ static int handle_bpf_entry(struct flowtrack_handle *flowtrack_h, struct flow_ke
     last_packet_sec_ago = time_sec - flow_time_sec;
     if (last_packet_sec_ago >= flow_timeout)
         // Flow timeout occured, so delete it from the BPF map
-        return bpf_map_delete_entry(&flowtrack_h->flow_map, &flow->key);
+        return bpf_map_delete_entry(flow_map, &flow->key);
 
     old_state = flow->value.state;
     rc = conntrack_do_lookup(flowtrack_h->conntrack_h, flow);
@@ -215,11 +248,12 @@ static int handle_bpf_entry(struct flowtrack_handle *flowtrack_h, struct flow_ke
     if (rc != BPFW_RC_OK || old_state == flow->value.state)
         return rc;
 
-    return bpf_map_update_entry(&flowtrack_h->flow_map, &flow->key, &flow->value);
+    return bpf_map_update_entry(flow_map, &flow->key, &flow->value);
 }
 
 static int update_flows(struct flowtrack_handle* flowtrack_h) {
-    struct flow_key_value flow;
+    struct bpf_map *flow_map;
+    struct flow flow;
     __u32 time_sec;
     __u64 time_ns;
 
@@ -227,8 +261,8 @@ static int update_flows(struct flowtrack_handle* flowtrack_h) {
     time_sec = time_ns_to_sec(time_ns);
 
     // Iterate through all the flow entries
-    bpf_map_for_each_entry(&flowtrack_h->flow_map, &flow.key, &flow.value, {
-        if (handle_bpf_entry(flowtrack_h, &flow, time_sec) != BPFW_RC_OK)
+    bpf_flows_for_each_entry(flowtrack_h, flow_map, &flow.key, &flow.value, {
+        if (handle_bpf_entry(flowtrack_h, flow_map, &flow, time_sec) != BPFW_RC_OK)
             return BPFW_RC_ERROR;
     });
 
@@ -244,7 +278,7 @@ int flowtrack_loop(struct flowtrack_handle* flowtrack_h) {
 
         if (netlink_check_notifications(flowtrack_h->netlink_h,
                 flowtrack_h->link_cb, flowtrack_h) != BPFW_RC_OK)
-                    return BPFW_RC_ERROR;
+            return BPFW_RC_ERROR;
 
         if (update_flows(flowtrack_h) != BPFW_RC_OK)
             return BPFW_RC_ERROR;
@@ -299,9 +333,11 @@ struct flowtrack_handle* flowtrack_init(struct cmd_args *args) {
     if (args->dsa && bpf_check_dsa(flowtrack_h->bpf_h, dsa_switch, dsa_proto, &flowtrack_h->dsa_tag) != BPFW_RC_OK)
         goto bpf_destroy;
 
-    if (args->map.max_entries != FLOW_MAP_DEFAULT_MAX_ENTRIES && 
-        bpf_set_map_max_entries(flowtrack_h->bpf_h, FLOW_MAP_NAME, args->map.max_entries) != BPFW_RC_OK)
-            goto bpf_destroy;
+    if (args->map.max_entries != FLOW_MAP_DEFAULT_MAX_ENTRIES) {
+        if (bpf_set_map_max_entries(flowtrack_h->bpf_h, IPV4_FLOW_MAP_NAME, args->map.max_entries) != BPFW_RC_OK ||
+            bpf_set_map_max_entries(flowtrack_h->bpf_h, IPV6_FLOW_MAP_NAME, args->map.max_entries) != BPFW_RC_OK)
+                goto bpf_destroy;
+    }
 
     // Load the BPF object (including program and maps) into the kernel
     bpfw_info("Loading BPF program and attaching to network interfaces ...\n");
@@ -310,9 +346,7 @@ struct flowtrack_handle* flowtrack_init(struct cmd_args *args) {
     if (bpf_attach_program(flowtrack_h->bpf_h, flowtrack_h->netlink_h, args->auto_attach) != BPFW_RC_OK)
         goto bpf_destroy;
 
-    flowtrack_h->flow_map = bpf_get_map(flowtrack_h->bpf_h, FLOW_MAP_NAME);
-    flowtrack_h->user_time_map = bpf_get_map(flowtrack_h->bpf_h, USERSPACE_TIME_SECTION);
-    if (flowtrack_h->flow_map.fd < 0 || flowtrack_h->user_time_map.fd < 0)
+    if (get_bpf_maps(flowtrack_h) != BPFW_RC_OK)
         goto bpf_detach_program;
 
     return flowtrack_h;
@@ -339,6 +373,8 @@ free:
 }
 
 void flowtrack_destroy(struct flowtrack_handle* flowtrack_h, struct cmd_args *args) {
+    free_bpf_maps(flowtrack_h);
+
     // Detach the program from the specified interface names
     bpf_detach_program(flowtrack_h->bpf_h, flowtrack_h->netlink_h, args->auto_attach);
 

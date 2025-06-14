@@ -27,8 +27,8 @@ struct conntrack_handle* conntrack_init();
  * @param obj The BPF object containing the conntrack map
  * @returns On success 0, errno otherwise
  * **/
-int conntrack_do_lookup(struct conntrack_handle* conntrack_h, struct flow_key_value *flow);
-void conntrack_check_nat(struct conntrack_handle* conntrack_h, struct flow_key_value *flow);
+int conntrack_do_lookup(struct conntrack_handle* conntrack_h, struct flow *flow);
+void conntrack_check_nat(struct conntrack_handle* conntrack_h, struct flow *flow);
 int conntrack_update_timeout(struct conntrack_handle* conntrack_h);
 void conntrack_free_ct_entry(struct conntrack_handle* conntrack_h);
 

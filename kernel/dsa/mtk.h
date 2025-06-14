@@ -27,23 +27,27 @@ struct mtk_tag_xmit {
 
 
 __always_inline static bool mtk_tag_rcv(struct packet_data *pkt, struct l2_header *l2) {
-    parse_ethhdr(struct mtk_tag_rcv, hdr, pkt, l2);
-    l2->dsa_port = hdr->h_tag[1] & MTK_HDR_RECV_SOURCE_PORT_MASK;
+	struct mtk_tag_rcv *mtk;
+    parse_ethhdr(mtk, pkt, l2);
+
+    l2->dsa_port = mtk->h_tag[1] & MTK_HDR_RECV_SOURCE_PORT_MASK;
 
     return true;
 }
 
 __always_inline static bool mtk_tag_xmit(struct packet_data *pkt, struct next_hop *next_h, __u8 dsa_port) {
-    push_ethhdr(struct mtk_tag_xmit, hdr, pkt, next_h);
-	hdr->h_tag[1] = (1 << dsa_port) & MTK_HDR_XMIT_DP_BIT_MASK;
+	struct mtk_tag_xmit *mtk;
+    push_ethhdr(mtk, pkt, next_h);
+
+	mtk->h_tag[1] = (1 << dsa_port) & MTK_HDR_XMIT_DP_BIT_MASK;
 
 	if (!next_h->vlan_id) {
-		hdr->h_tag[0] = MTK_HDR_XMIT_UNTAGGED;
-		hdr->h_tag[2] = 0;
-		hdr->h_tag[3] = 0;
+		mtk->h_tag[0] = MTK_HDR_XMIT_UNTAGGED;
+		mtk->h_tag[2] = 0;
+		mtk->h_tag[3] = 0;
 	}
 	else
-		hdr->h_tag[0] = MTK_HDR_XMIT_TAGGED_TPID_8100;
+		mtk->h_tag[0] = MTK_HDR_XMIT_TAGGED_TPID_8100;
 
     return true;
 }

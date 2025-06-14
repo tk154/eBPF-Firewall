@@ -2,12 +2,12 @@ LIBC ?= musl
 ARCH ?= $(shell uname -m)
 SUFFIX ?= *
 
-TOOLCHAIN_DIR := $(lastword $(wildcard $(OPENWRT_DIR)/staging_dir/toolchain-$(ARCH)_$(SUFFIX)_gcc-*_$(LIBC)*))
-TARGET_DIR    := $(lastword $(wildcard $(OPENWRT_DIR)/staging_dir/target-$(ARCH)_$(SUFFIX)_$(LIBC)*))
+TOOLCHAIN_DIR := $(lastword $(wildcard $(OPENWRT)/staging_dir/toolchain-$(ARCH)_$(SUFFIX)_gcc-*_$(LIBC)*))
+TARGET_DIR    := $(lastword $(wildcard $(OPENWRT)/staging_dir/target-$(ARCH)_$(SUFFIX)_$(LIBC)*))
 CC			  := $(notdir   $(wildcard $(TOOLCHAIN_DIR)/bin/$(ARCH)*-openwrt-linux-musl*-gcc))
 
 ifndef TOOLCHAIN_DIR
-$(error "'$(OPENWRT_DIR)/staging_dir/toolchain-$(ARCH)_$(SUFFIX)' not found")
+$(error "'$(OPENWRT)/staging_dir/toolchain-$(ARCH)_$(SUFFIX)' not found")
 endif
 
 ifndef CC

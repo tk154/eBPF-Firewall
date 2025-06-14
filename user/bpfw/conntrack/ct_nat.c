@@ -36,18 +36,20 @@ static void csum_replace(__sum16 *csum, const __be16 *old, const __be16 *new, si
 
 
 static bool ct_flow_is_reverse(struct nf_conntrack *ct, struct flow_key *f_key) {
+    __be32 *dest_ip = flow_ip_get_dest(&f_key->ip, f_key->family);
+    __be32 *src_ip = flow_ip_get_src(&f_key->ip, f_key->family);
     __u8 family = f_key->family;
 
     return !(
-        ipeq(f_key->src_ip,  nfct_get_attr_ip(ct, ATTR_ORIG_IP_SRC, family), family) &&
-        ipeq(f_key->dest_ip, nfct_get_attr_ip(ct, ATTR_ORIG_IP_DST, family), family) &&
+        ipeq(src_ip,  nfct_get_attr_ip(ct, ATTR_ORIG_IP_SRC, family), family) &&
+        ipeq(dest_ip, nfct_get_attr_ip(ct, ATTR_ORIG_IP_DST, family), family) &&
         f_key->src_port  == nfct_get_attr_u16(ct, ATTR_ORIG_PORT_SRC) &&
         f_key->dest_port == nfct_get_attr_u16(ct, ATTR_ORIG_PORT_DST)
     );
 }
 
 
-void conntrack_check_nat(struct conntrack_handle *conntrack_h, struct flow_key_value *flow) {
+void conntrack_check_nat(struct conntrack_handle *conntrack_h, struct flow *flow) {
     struct nf_conntrack *ct = conntrack_h->ct;
 
     // Check if reverse
@@ -163,5 +165,5 @@ void conntrack_check_nat(struct conntrack_handle *conntrack_h, struct flow_key_v
         csum_replace(&flow->value.next.nat.l4_cksum_diff, &old_port, &new_port, 1);
     }
 
-    bpfw_verbose_nat("Nat:", &flow->value.next.nat, flow->key.family);
+    bpfw_verbose_nat("Nat: ", &flow->value.next.nat, flow->key.family);
 }
