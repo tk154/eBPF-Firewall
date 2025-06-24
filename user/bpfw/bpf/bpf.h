@@ -23,6 +23,8 @@ struct bpf_handle* bpf_init(const char* obj_path, struct map *iface_hooks, enum 
 void bpf_destroy(struct bpf_handle *bpf);
 //int bpf_load_program(struct bpf_handle* bpf);
 
+int bpf_init_rss(struct bpf_handle *bpf, const char *rss_prog_name);
+
 /**
  * Unload a BPF object including its map and program from the kernel
  * @param bpf A pointer to a valid bpf_handle struct. 

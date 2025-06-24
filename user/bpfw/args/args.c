@@ -182,6 +182,7 @@ static bool parse_cmd_args(int argc, char* argv[], struct cmd_args *args) {
         { "interval",    required_argument, 0, 'i' },
         { "log-level",   required_argument, 0, 'l' },
         { "max-flows",   required_argument, 0, 'm' },
+        { "rss",         required_argument, 0, 'r' },
         { "tcp-timeout", required_argument, 0, 't' },
         { "udp-timeout", required_argument, 0, 'u' },
         { 0,             0,                 0,  0  }
@@ -219,6 +220,10 @@ static bool parse_cmd_args(int argc, char* argv[], struct cmd_args *args) {
                 args->map.max_entries = parse_map_max_entries(optarg);
                 if (!args->map.max_entries)
                     return false;
+            break;
+
+            case 'r':
+                args->rss_prog_name = optarg;
             break;
 
             case 't':
@@ -276,6 +281,8 @@ bool check_cmd_args(int argc, char* argv[], struct cmd_args *args) {
 
     args->flow_timeout.tcp = DEFAULT_TCP_FLOW_TIMEOUT;
     args->flow_timeout.udp = DEFAULT_UDP_FLOW_TIMEOUT;
+
+    args->rss_prog_name = NULL;
 
     // Check if the arguments are provided correctly
     if (!parse_cmd_args(argc, argv, args)) {

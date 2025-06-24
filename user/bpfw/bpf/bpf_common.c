@@ -66,6 +66,13 @@ int bpf_check_dsa(struct bpf_handle *bpf, __u32 dsa_switch, const char *dsa_prot
 }
 
 
+static void bpf_object_close(struct bpf_object *obj) {
+    // Unpin the maps from /sys/fs/bpf
+    bpf_object__unpin_maps(obj, NULL);
+    bpf_object__close(obj);
+}
+
+
 struct bpf_handle* bpf_init(const char *obj_path, struct map *iface_hooks, enum bpf_hook hook) {
     struct bpf_handle *bpf;
 
@@ -82,6 +89,8 @@ struct bpf_handle* bpf_init(const char *obj_path, struct map *iface_hooks, enum 
     bpf->iface_hooks = iface_hooks;
     bpf->hook = hook;
 
+    bpf->rss_prog = NULL;
+
     // Try to open the BPF object file, return on error
     bpf->obj = bpf_object__open_file(obj_path, NULL);
     if (!bpf->obj) {
@@ -92,18 +101,83 @@ struct bpf_handle* bpf_init(const char *obj_path, struct map *iface_hooks, enum 
 
     return bpf;
 
+bpf_object_close:
+    bpf_object_close(bpf->obj);
 free:
     free(bpf);
 error:
     return NULL;
 }
 
+int bpf_init_rss(struct bpf_handle *bpf, const char *rss_prog_name) {
+    struct bpf_map *cpu_map, *cpu_count_section;
+    struct bpf_program *bpf_prog;
+    size_t section_size;
+    __u32 *cpu_count;
+    int num_cpus;
+
+    bpf->rss_prog = bpf_object__find_program_by_name(bpf->obj, rss_prog_name);
+    if (!bpf->rss_prog) {
+        bpfw_error("Error finding RSS program %s: %s (-%d).\n",
+            rss_prog_name, strerror(errno), errno);
+        return BPFW_RC_ERROR;
+    }
+
+    bpf_prog = bpf_object__find_program_by_name(bpf->obj, XDP_PROG_NAME);
+    if (!bpf_prog) {
+        bpfw_error("Error finding BPF program: %s (-%d).\n",
+            XDP_PROG_NAME, strerror(errno), errno);
+        return BPFW_RC_ERROR;
+    }
+
+    if (bpf_program__set_expected_attach_type(bpf_prog, BPF_XDP_CPUMAP) != 0) {
+        bpfw_error("Couldn't set expected attach type 'BPF_XDP_CPUMAP' for BPF program %s: %s (-%d).\n",
+            XDP_PROG_NAME, strerror(errno), errno);
+        return BPFW_RC_ERROR;
+    }
+
+    cpu_map = bpf_object__find_map_by_name(bpf->obj, BPFW_CPU_MAP_NAME);
+    if (!cpu_map) {
+        bpfw_error("Error: Couldn't find BPF map %s.\n",
+            BPFW_CPU_MAP_NAME);
+        return BPFW_RC_ERROR;
+    }
+
+    num_cpus = libbpf_num_possible_cpus();
+    if (num_cpus < 0) {
+        bpfw_error("Error getting number CPUs: %s (-%d).\n",
+            strerror(errno), errno);
+        return BPFW_RC_ERROR;
+    }
+
+    if (bpf_map__set_max_entries(cpu_map, num_cpus) != 0) {
+        bpfw_error("Error setting %s max entries: %s (-%d).\n",
+            BPFW_CPU_MAP_NAME, strerror(errno), errno);
+        return BPFW_RC_ERROR;
+    }
+
+    // Find the .rodata section
+    cpu_count_section = bpf_object__find_map_by_name(bpf->obj, BPFW_CPU_COUNT_SECTION);
+    if (!cpu_count_section) {
+        bpfw_error("Error: Couldn't find BPF section %s.\n",
+            BPFW_CPU_COUNT_SECTION);
+        return BPFW_RC_ERROR;
+    }
+
+    cpu_count = bpf_map__initial_value(cpu_count_section, &section_size);
+    if (!cpu_count || section_size != sizeof(*cpu_count)) {
+        bpfw_error("Error: Failed to get data from BPF section %s.\n",
+            BPFW_CPU_COUNT_SECTION);
+        return BPFW_RC_ERROR;
+    }
+
+    *cpu_count = num_cpus;
+
+    return BPFW_RC_OK;
+}
+
 void bpf_destroy(struct bpf_handle* bpf) {
-    // Unpin the maps from /sys/fs/bpf
-    bpf_object__unpin_maps(bpf->obj, NULL);
-    bpf_object__close(bpf->obj);
-
+    bpf_object_close(bpf->obj);
     map_delete(bpf->tc_opts);
-
     free(bpf);
 }

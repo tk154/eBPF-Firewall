@@ -7,6 +7,7 @@
 
 struct cmd_args {
     char *bpf_obj_path;
+    char *rss_prog_name;
 
     struct map *iface_hooks;
     enum bpf_hook hook;

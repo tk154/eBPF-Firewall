@@ -11,29 +11,42 @@
 #include <sys/socket.h>
 
 
-#define STRINGIFY(x) 				 	#x
-#define BPFW_NAME(x) 				 	STRINGIFY(x)  // Used to get the prog/map name as a string (used for user space programs)
+#define STRINGIFY(x) 				 		#x
+#define BPFW_NAME(x) 				 		STRINGIFY(x)  // Used to get the prog/map name as a string (used for user space programs)
 
-#define BPFW_XDP_PROG				 	bpfw_xdp
-#define BPFW_TC_PROG				 	bpfw_tc
+#define BPFW_XDP_PROG				 		bpfw_xdp
+#define BPFW_TC_PROG				 		bpfw_tc
 
-#define XDP_PROG_NAME				 	BPFW_NAME(BPFW_XDP_PROG)
-#define TC_PROG_NAME				 	BPFW_NAME(BPFW_TC_PROG)
+#define XDP_PROG_NAME				 		BPFW_NAME(BPFW_XDP_PROG)
+#define TC_PROG_NAME				 		BPFW_NAME(BPFW_TC_PROG)
 
-#define BPFW_IPV4_FLOW_MAP      	 	bpfw_ipv4_flows
-#define BPFW_IPV6_FLOW_MAP      	 	bpfw_ipv6_flows
-#define IPV4_FLOW_MAP_NAME 		  	 	BPFW_NAME(BPFW_IPV4_FLOW_MAP)
-#define IPV6_FLOW_MAP_NAME 		  	 	BPFW_NAME(BPFW_IPV6_FLOW_MAP)
+#define BPFW_IPV4_FLOW_MAP      	 		bpfw_ipv4_flows
+#define BPFW_IPV6_FLOW_MAP      	 		bpfw_ipv6_flows
+#define IPV4_FLOW_MAP_NAME 		  	 		BPFW_NAME(BPFW_IPV4_FLOW_MAP)
+#define IPV6_FLOW_MAP_NAME 		  	 		BPFW_NAME(BPFW_IPV6_FLOW_MAP)
 
-#define FLOW_MAP_DEFAULT_MAX_ENTRIES	1024
+#define FLOW_MAP_DEFAULT_MAX_ENTRIES		1024
 
-#define USERSPACE_TIME_SECTION 		 	".bss.time"
+#define BPFW_RSS_IPV4_FLOW_MAP				bpfw_rss_ipv4_flows
+#define BPFW_RSS_IPV6_FLOW_MAP				bpfw_rss_ipv6_flows
+#define BPFW_RSS_IPV4_FLOW_MAP_NAME 		BPFW_NAME(BPFW_RSS_IPV4_FLOW_MAP)
+#define BPFW_RSS_IPV6_FLOW_MAP_NAME 		BPFW_NAME(BPFW_RSS_IPV6_FLOW_MAP)
 
-#define DSA_TAG_SECTION			  	 	".rodata.dsa.tag"
-#define DSA_SWITCH_SECTION		  	 	".rodata.dsa.switch"
+#define RSS_FLOW_MAP_DEFAULT_MAX_ENTRIES	FLOW_MAP_DEFAULT_MAX_ENTRIES
 
-#define DSA_PROTO_MAX_LEN				8
-#define DSA_PORT_SET					(1U << 7)
+#define BPFW_CPU_MAP						bpfw_cpu_map
+#define BPFW_CPU_MAP_NAME					BPFW_NAME(BPFW_CPU_MAP)
+#define BPFW_CPU_COUNT_SECTION				".rodata.cpu_count"
+
+#define CPU_MAP_QUEUE_SIZE					16384
+
+#define USERSPACE_TIME_SECTION 		 		".bss.time"
+
+#define DSA_TAG_SECTION			  	 		".rodata.dsa.tag"
+#define DSA_SWITCH_SECTION		  	 		".rodata.dsa.switch"
+
+#define DSA_PROTO_MAX_LEN					8
+#define DSA_PORT_SET						(1U << 7)
 
 
 enum {
@@ -165,6 +178,17 @@ struct pppoehdr {
 };
 
 
+__always_inline static void ip4cpy(__be32 *dest, const __be32 *src) {
+	dest[0] = src[0];
+}
+
+__always_inline static void ip6cpy(__be32 *dest, const __be32 *src) {
+	dest[0] = src[0];
+	dest[1] = src[1];
+	dest[2] = src[2];
+	dest[3] = src[3];
+}
+
 __always_inline static void ipcpy(__be32 *dest, const __be32 *src, __u8 family) {
     /*switch (family) {
         case AF_INET6:
@@ -175,12 +199,19 @@ __always_inline static void ipcpy(__be32 *dest, const __be32 *src, __u8 family) 
             dest[0] = src[0];
     }*/
 
-	dest[0] = src[0];
+	/*dest[0] = src[0];
 
 	if (family == AF_INET6) {
 		dest[1] = src[1];
 		dest[2] = src[2];
 		dest[3] = src[3];
+	}*/
+
+	switch (family) {
+		case AF_INET:
+			return ip4cpy(dest, src);
+		case AF_INET6:
+			return ip6cpy(dest, src);
 	}
 }
 

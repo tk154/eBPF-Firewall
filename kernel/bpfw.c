@@ -10,6 +10,10 @@
 #include "push_header.h"
 #include "mangle.h"
 
+#ifndef NO_RSS
+#include "rss.h"
+#endif
+
 
 struct flow4_key {
 	FLOW_KEY_COMMON

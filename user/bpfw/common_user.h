@@ -7,6 +7,8 @@
 #include <net/if.h>
 
 
+#define DEFAULT_RSS_PROG_PATH       "./rss.o"
+
 enum {
     BPFW_RC_ERROR = -1,
     BPFW_RC_OK    =  0

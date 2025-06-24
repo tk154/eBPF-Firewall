@@ -46,10 +46,44 @@ static libbpf_print_fn_t libbpf_disable_messages() {
     return libbpf_set_print(NULL);
 }
 
-
 static int bpf_get_program_fd(struct bpf_object *obj, const char *prog_name) {
     struct bpf_program *prog = bpf_object__find_program_by_name(obj, prog_name);
-    return prog ? bpf_program__fd(prog) : -1;
+    if (!prog) {
+        bpfw_error("Couldn't find BPF program %s\n", prog_name);
+        return -1;
+    }
+
+    return bpf_program__fd(prog);
+}
+
+
+static int bpf_load_rss(struct bpf_handle *bpf) {
+    struct bpf_cpumap_val cpu_map_val;
+    struct bpf_map *cpu_map;
+    int cpu_map_fd, cpu_id;
+    __u32 num_cpus;
+
+    cpu_map = bpf_object__find_map_by_name(bpf->obj, BPFW_CPU_MAP_NAME);
+    if (!cpu_map) {
+        bpfw_error("Error: Couldn't find BPF map %s.\n", BPFW_CPU_MAP_NAME);
+        return BPFW_RC_ERROR;
+    }
+
+    cpu_map_fd = bpf_map__fd(cpu_map);
+    num_cpus = bpf_map__max_entries(cpu_map);
+
+    cpu_map_val.bpf_prog.fd = bpf->xdp_prog_fd;
+    cpu_map_val.qsize = CPU_MAP_QUEUE_SIZE;
+
+    for (cpu_id = 0; cpu_id < num_cpus; cpu_id++) {
+        if (bpf_map_update_elem(cpu_map_fd, &cpu_id, &cpu_map_val, BPF_ANY) != 0) {
+            bpfw_error("Error updating CPU map entry: %s (-%d).\n",
+                strerror(errno), errno);
+            return BPFW_RC_ERROR;
+        }
+    }
+
+    return BPFW_RC_OK;
 }
 
 static int bpf_load_object(struct bpf_handle *bpf) {
@@ -69,11 +103,15 @@ static int bpf_load_object(struct bpf_handle *bpf) {
         return BPFW_RC_ERROR;
     }
 
+    if (bpf->rss_prog && bpf_load_rss(bpf) != BPFW_RC_OK)
+        return BPFW_RC_ERROR;
+
     return BPFW_RC_OK;
 }
 
 
 static int bpf_attach_xdp_program(struct bpf_handle *bpf, __u32 ifindex, __u32 xdp_flag, bool try) {
+    int prog_fd = bpf->rss_prog ? bpf_program__fd(bpf->rss_prog) : bpf->xdp_prog_fd;
     const char *xdp_str = get_xdp_str(xdp_flag);
     libbpf_print_fn_t fn;
     int rc;
@@ -82,7 +120,7 @@ static int bpf_attach_xdp_program(struct bpf_handle *bpf, __u32 ifindex, __u32 x
         fn = libbpf_disable_messages();
 
     // Attach the program to the XDP hook
-    if (bpf_xdp_attach(ifindex, bpf->xdp_prog_fd, xdp_flag, NULL) != 0) {
+    if (bpf_xdp_attach(ifindex, prog_fd, xdp_flag, NULL) != 0) {
         if (try && (errno == EOPNOTSUPP || xdp_flag == XDP_FLAGS_HW_MODE && errno == EINVAL))
             rc = EOPNOTSUPP;
         else {
@@ -254,7 +292,7 @@ static int bpf_ifname_detach_program(struct bpf_handle* bpf, char* ifname, enum 
 
 
 static void bpf_auto_attach_error(struct bpf_handle *bpf, struct netlink_handle *netlink,
-                                 struct if_nameindex *ifaces, struct if_nameindex *iface) {
+                                  struct if_nameindex *ifaces, struct if_nameindex *iface) {
     enum bpf_hook hook;
 
     // If an error occured while attaching to one interface, detach all the already attached programs

@@ -17,9 +17,9 @@
 
 #define bpf_flows_for_each_entry(handle, map, key, value, block)    \
     do {                                                            \
-        map = handle->flow4_map;                                   \
+        map = handle->flow4_map;                                    \
         bpf_map_for_each_entry(map, key, value, block);             \
-        map = handle->flow6_map;                                   \
+        map = handle->flow6_map;                                    \
         bpf_map_for_each_entry(map, key, value, block);             \
     } while (0);
 
@@ -329,6 +329,9 @@ struct flowtrack_handle* flowtrack_init(struct cmd_args *args) {
     flowtrack_h->bpf_h = bpf_init(args->bpf_obj_path, args->iface_hooks, args->hook);
     if (!flowtrack_h->bpf_h)
         goto conntrack_destroy;
+
+    if (args->rss_prog_name && bpf_init_rss(flowtrack_h->bpf_h, args->rss_prog_name) != BPFW_RC_OK)
+        goto bpf_destroy;
 
     if (args->dsa && bpf_check_dsa(flowtrack_h->bpf_h, dsa_switch, dsa_proto, &flowtrack_h->dsa_tag) != BPFW_RC_OK)
         goto bpf_destroy;

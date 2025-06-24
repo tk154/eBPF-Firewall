@@ -6,18 +6,25 @@
 
 
 struct tc_opts {
-    __u32 handle, priority;
+    __u32 handle;
+    __u32 priority;
 };
 
 // Struct to keep BPF object and program pointers together
 struct bpf_handle {
-    struct bpf_object *obj;         // BPF object pointer
+    /* BPF object pointers */
+    struct bpf_object *obj;
+    struct bpf_program *rss_prog;
 
     struct map *iface_hooks;
     struct map *tc_opts;
     enum bpf_hook hook;
     
-    int xdp_prog_fd, tc_prog_fd;    // BPF program file descriptors
+    /* BPF program file descriptors */
+    int xdp_prog_fd;
+    int tc_prog_fd;
+    //int rss_prog_fd;
+
     bool obj_loaded;
 };
 
