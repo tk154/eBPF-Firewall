@@ -9,8 +9,7 @@ struct conntrack_handle;
 enum conntrack_conn_state {
     CT_CONN_NOT_FOUND,
     CT_CONN_NOT_ESTABLISHED,
-    CT_CONN_ESTABLISHED,
-    CT_CONN_FLOWTABLE_OFFLOAD
+    CT_CONN_ESTABLISHED
 };
 
 

@@ -145,11 +145,6 @@ static int del_interface(__u32 ifindex, const char *ifname, void *data) {
 }
 
 
-static void connection_flowtable_offload(struct flow *flow) {
-    if (flow->value.state == STATE_NEW_FLOW)
-        bpfw_debug_key("\nConnection is offloaded to flowtable. Cannot read TCP state.\n", &flow->key);
-}
-
 static int connection_not_established(struct flow *flow) {
     /* It could be possible that we have received the package here through the BPF map
     *  before it was processed by nf_conntrack, or it has been dropped
@@ -228,9 +223,6 @@ static int handle_bpf_entry(struct flowtrack_handle *flowtrack_h, struct bpf_map
     rc = conntrack_do_lookup(flowtrack_h->conntrack_h, flow);
 
     switch (rc) {
-        case CT_CONN_FLOWTABLE_OFFLOAD:
-            connection_flowtable_offload(flow);
-
         case CT_CONN_NOT_FOUND:
         case CT_CONN_NOT_ESTABLISHED:
             rc = connection_not_established(flow);
