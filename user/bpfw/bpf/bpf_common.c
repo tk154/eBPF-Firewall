@@ -73,37 +73,40 @@ static void bpf_object_close(struct bpf_object *obj) {
 }
 
 
-struct bpf_handle* bpf_init(const char *obj_path, struct map *iface_hooks, enum bpf_hook hook) {
+struct bpf_handle* bpf_init(const char *obj_path, enum bpf_hook hook) {
     struct bpf_handle *bpf;
 
-    bpf = malloc(sizeof(*bpf));
+    bpf = (struct bpf_handle *)malloc(sizeof(*bpf));
     if (!bpf) {
         bpfw_error("Error allocating BPF handle: %s (-%d).\n",
             strerror(errno), errno);
         goto error;
     }
 
+    bpf->ifaces = map_create(sizeof(__u32), sizeof(struct bpf_interface));
+    if (!bpf->ifaces) {
+        bpfw_error("Error allocating BPF interfaces map: %s (-%d).\n",
+            strerror(errno), errno);
+        goto free_bpf;
+    }
+
     bpf->obj_loaded = false;
-    bpf->tc_opts = map_create(sizeof(__u32), sizeof(struct tc_opts));
-
-    bpf->iface_hooks = iface_hooks;
-    bpf->hook = hook;
-
     bpf->rss_prog = NULL;
+    bpf->hook = hook;
 
     // Try to open the BPF object file, return on error
     bpf->obj = bpf_object__open_file(obj_path, NULL);
     if (!bpf->obj) {
         bpfw_error("Error opening BPF object file %s: %s (-%d).\n",
             obj_path, strerror(errno), errno);
-        goto free;
+        goto free_map;
     }
 
     return bpf;
 
-bpf_object_close:
-    bpf_object_close(bpf->obj);
-free:
+free_map:
+    map_delete(bpf->ifaces);
+free_bpf:
     free(bpf);
 error:
     return NULL;
@@ -178,6 +181,15 @@ int bpf_init_rss(struct bpf_handle *bpf, const char *rss_prog_name) {
 
 void bpf_destroy(struct bpf_handle* bpf) {
     bpf_object_close(bpf->obj);
-    map_delete(bpf->tc_opts);
+    map_delete(bpf->ifaces);
     free(bpf);
+}
+
+enum bpf_hook bpf_ifindex_get_hook(struct bpf_handle *bpf, __u32 ifindex) {
+    struct bpf_interface bpf_iface;
+
+    if (map_lookup_entry(bpf->ifaces, &ifindex, &bpf_iface) != 0)
+        return 0;
+
+    return bpf_iface.hook;
 }

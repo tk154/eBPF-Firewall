@@ -72,12 +72,15 @@ static int update_userspace_time(struct flowtrack_handle *flowtrack_h, __u64 cur
 
 static int calc_l2_diff(struct flowtrack_handle *flowtrack_h, struct flow *flow) {
     struct dsa_tag *tag = flowtrack_h->dsa_tag;
-    enum bpf_hook hook = flowtrack_h->hook;
     char ifname[IF_NAMESIZE];
+    enum bpf_hook hook;
     __s8 diff = 0;
 
-    if_indextoname(flow->key.ifindex, ifname);
-    map_lookup_entry(flowtrack_h->iface_hooks, ifname, &hook);
+    hook = bpf_ifindex_get_hook(flowtrack_h->bpf_h, flow->key.ifindex);
+    if (!hook) {
+        bpfw_error_ifindex("BUG: Couldn't find BPF hook for ", flow->key.ifindex, 0);
+        return BPFW_RC_ERROR;
+    }
 
     if (flow->key.dsa_port)
         diff -= tag->rx_size;
@@ -128,20 +131,25 @@ static int get_bpf_maps(struct flowtrack_handle *flowtrack_h) {
 
 static int new_interface(__u32 ifindex, const char *ifname, void *data) {
     struct flowtrack_handle *flowtrack_h = data;
+    enum bpf_hook hook = BPF_HOOK_AUTO;
 
-    return bpf_iface_attach_program(flowtrack_h->bpf_h, flowtrack_h->netlink_h, ifindex, ifname);
+    map_lookup_entry(flowtrack_h->iface_hooks, ifname, &hook);
+
+    return bpf_iface_attach_program(flowtrack_h->bpf_h, flowtrack_h->netlink_h, ifindex, hook);
 }
 
 static int del_interface(__u32 ifindex, const char *ifname, void *data) {
     struct flowtrack_handle *flowtrack_h = data;
-    struct flow flow;
     struct bpf_map *flow_map;
+    struct flow flow;
 
     bpf_flows_for_each_entry(flowtrack_h, flow_map, &flow.key, &flow.value, {
         if (flow.key.ifindex == ifindex || flow.value.next.hop.ifindex == ifindex)
             if (bpf_map_delete_entry(flow_map, &flow.key) != BPFW_RC_OK)
                 return BPFW_RC_ERROR;
     });
+
+    return BPFW_RC_OK;
 }
 
 
@@ -270,13 +278,13 @@ int flowtrack_loop(struct flowtrack_handle* flowtrack_h) {
 
         if (netlink_check_notifications(flowtrack_h->netlink_h,
                 flowtrack_h->link_cb, flowtrack_h) != BPFW_RC_OK)
-            return BPFW_RC_ERROR;
+            break;
 
         if (update_flows(flowtrack_h) != BPFW_RC_OK)
-            return BPFW_RC_ERROR;
+            break;
     }
 
-    return BPFW_RC_OK;
+    return BPFW_RC_ERROR;
 }
 
 
@@ -318,7 +326,7 @@ struct flowtrack_handle* flowtrack_init(struct cmd_args *args) {
 
     bpfw_info("Opening BPF object ...\n");
 
-    flowtrack_h->bpf_h = bpf_init(args->bpf_obj_path, args->iface_hooks, args->hook);
+    flowtrack_h->bpf_h = bpf_init(args->bpf_obj_path, args->hook);
     if (!flowtrack_h->bpf_h)
         goto conntrack_destroy;
 
@@ -338,17 +346,21 @@ struct flowtrack_handle* flowtrack_init(struct cmd_args *args) {
     bpfw_info("Loading BPF program and attaching to network interfaces ...\n");
 
     // Attach the program to the specified interface names
-    if (bpf_attach_program(flowtrack_h->bpf_h, flowtrack_h->netlink_h, args->auto_attach) != BPFW_RC_OK)
+    if (bpf_attach_program(flowtrack_h->bpf_h, flowtrack_h->netlink_h,
+                           flowtrack_h->iface_hooks, args->auto_attach) != BPFW_RC_OK)
         goto bpf_destroy;
 
     if (get_bpf_maps(flowtrack_h) != BPFW_RC_OK)
+        goto bpf_detach_program;
+
+    if (update_userspace_time(flowtrack_h, time_get_coarse_ns()) != BPFW_RC_OK)
         goto bpf_detach_program;
 
     return flowtrack_h;
 
 bpf_detach_program:
     // Detach the program from the specified interface names
-    bpf_detach_program(flowtrack_h->bpf_h, flowtrack_h->netlink_h, args->auto_attach);
+    bpf_detach_program(flowtrack_h->bpf_h, args->auto_attach ? NULL : args->iface_hooks);
 
 bpf_destroy:
     // Unload the BPF object from the kernel
@@ -371,7 +383,7 @@ void flowtrack_destroy(struct flowtrack_handle* flowtrack_h, struct cmd_args *ar
     free_bpf_maps(flowtrack_h);
 
     // Detach the program from the specified interface names
-    bpf_detach_program(flowtrack_h->bpf_h, flowtrack_h->netlink_h, args->auto_attach);
+    bpf_detach_program(flowtrack_h->bpf_h, args->auto_attach ? NULL : args->iface_hooks);
 
     // Unload the BPF object from the kernel
     bpf_destroy(flowtrack_h->bpf_h);

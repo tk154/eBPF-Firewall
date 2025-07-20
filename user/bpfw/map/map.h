@@ -12,6 +12,7 @@ void map_delete(struct map *map);
 int map_insert_entry(struct map *map, const void *key, const void *data);
 int map_delete_entry(struct map *map, const void *key);
 
+int map_find_entry(struct map *map, const void *key);
 int map_lookup_entry(struct map *map, const void *key, void *data);
 
 int map_first_entry(struct map *map, void *key, void *value);

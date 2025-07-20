@@ -19,7 +19,7 @@ struct map {
 };
 
 
-static struct map_entry *map_find_entry(struct map *map, const void *key, struct map_entry **last_entry) {
+static struct map_entry *__map_find_entry(struct map *map, const void *key, struct map_entry **last_entry) {
     struct map_entry *curr = map->head, *last = NULL;
 
     while (curr) {
@@ -65,7 +65,7 @@ void map_delete(struct map *map) {
 int map_insert_entry(struct map *map, const void *key, const void *value) {
     struct map_entry *entry, *last;
 
-    entry = map_find_entry(map, key, &last);
+    entry = __map_find_entry(map, key, &last);
     if (entry)
         return -EEXIST;
 
@@ -80,8 +80,7 @@ int map_insert_entry(struct map *map, const void *key, const void *value) {
 
     if (last)
         last->next = entry;
-
-    if (!map->head)
+    else
         map->head = entry;
 
     return 0;
@@ -90,14 +89,13 @@ int map_insert_entry(struct map *map, const void *key, const void *value) {
 int map_delete_entry(struct map *map, const void *key) {
     struct map_entry *entry, *last;
 
-    entry = map_find_entry(map, key, &last);
+    entry = __map_find_entry(map, key, &last);
     if (!entry)
         return -ENOENT;
 
     if (last)
         last->next = entry->next;
-
-    if (entry == map->head)
+    else
         map->head = entry->next;
 
     free(entry);
@@ -105,10 +103,20 @@ int map_delete_entry(struct map *map, const void *key) {
 }
 
 
+int map_find_entry(struct map *map, const void *key) {
+    struct map_entry *entry, *last;
+
+    entry = __map_find_entry(map, key, &last);
+    if (!entry)
+        return -ENOENT;
+
+    return 0;
+}
+
 int map_lookup_entry(struct map *map, const void *key, void *value) {
     struct map_entry *entry, *last;
 
-    entry = map_find_entry(map, key, &last);
+    entry = __map_find_entry(map, key, &last);
     if (!entry)
         return -ENOENT;
 
@@ -130,7 +138,7 @@ int map_first_entry(struct map *map, void *key, void *value) {
 int map_next_entry(struct map *map, void *key, void *value) {
     struct map_entry *entry, *last, *next;
 
-    entry = map_find_entry(map, key, &last);
+    entry = __map_find_entry(map, key, &last);
     if (!entry)
         return -ENOENT;
 
@@ -147,7 +155,7 @@ int map_next_entry(struct map *map, void *key, void *value) {
 int map_prev_entry(struct map *map, void *key, void *value) {
     struct map_entry *entry, *last;
 
-    entry = map_find_entry(map, key, &last);
+    entry = __map_find_entry(map, key, &last);
     if (!entry)
         return -ENOENT;
 

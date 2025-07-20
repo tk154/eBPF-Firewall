@@ -270,7 +270,6 @@ static bool parse_cmd_args(int argc, char* argv[], struct cmd_args *args) {
 }
 
 bool check_cmd_args(int argc, char* argv[], struct cmd_args *args) {
-    args->iface_hooks = map_create(IF_NAMESIZE, sizeof(enum bpf_hook));
     args->hook = BPF_HOOK_AUTO;
 
     args->auto_attach = false;
@@ -283,6 +282,13 @@ bool check_cmd_args(int argc, char* argv[], struct cmd_args *args) {
     args->flow_timeout.udp = DEFAULT_UDP_FLOW_TIMEOUT;
 
     args->rss_prog_name = NULL;
+
+    args->iface_hooks = map_create(IF_NAMESIZE, sizeof(enum bpf_hook));
+    if (!args->iface_hooks) {
+        bpfw_error("Error allocating interface hooks map: %s (-%d).\n",
+            strerror(errno), errno);
+        return false;
+    }
 
     // Check if the arguments are provided correctly
     if (!parse_cmd_args(argc, argv, args)) {
