@@ -1,4 +1,4 @@
-ifdef OPENWRT_DIR
+ifdef OPENWRT
 include ../OpenWrt.mk
 endif
 

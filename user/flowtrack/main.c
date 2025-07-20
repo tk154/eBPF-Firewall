@@ -101,6 +101,9 @@ int print_action(__u8 action) {
 
 
 void print_base(struct flow_key_value *flow, __u64 curr_ns) {
+    __be32 *dest_ip = flow_ip_get_dest(&flow->key.ip, flow->key.family);
+    __be32 *src_ip = flow_ip_get_src(&flow->key.ip, flow->key.family);
+
     print_ifname(flow->key.ifindex);
 
     if (flow->key.dsa_port)
@@ -115,8 +118,8 @@ void print_base(struct flow_key_value *flow, __u64 curr_ns) {
     print_idle(flow->value.time, curr_ns);
     print_proto(flow->key.proto);
 
-    print_ip(flow->key.src_ip, flow->key.family, "src");
-    print_ip(flow->key.dest_ip, flow->key.family, "dst");
+    print_ip(src_ip, flow->key.family, "src");
+    print_ip(dest_ip, flow->key.family, "dst");
     print_port(flow->key.src_port, "sport");
     print_port(flow->key.dest_port, "dport");
 
@@ -160,16 +163,16 @@ int print_endline() {
     return putchar('\n');
 }
 
-int print_flows(struct cmd_args *args) {
+bool __print_flows(struct cmd_args *args, const char *flow_map_name) {
     char flow_map_path[32];
-    snprintf(flow_map_path, sizeof(flow_map_path), "/sys/fs/bpf/%s", FLOW_MAP_NAME);
+    snprintf(flow_map_path, sizeof(flow_map_path), "/sys/fs/bpf/%s", flow_map_name);
 
     int flow_map_fd = bpf_obj_get(flow_map_path);
     if (flow_map_fd < 0) {
         fprintf(stderr, "Error opening BPF object %s: %s (-%d).\n",
             flow_map_path, strerror(errno), errno);
 
-        return EXIT_FAILURE;
+        return false;
     }
 
     __u64 curr_ns = time_get_coarse_ns();
@@ -182,7 +185,7 @@ int print_flows(struct cmd_args *args) {
             fprintf(stderr, "Error looking up flow entry: %s (-%d).\n",
                 strerror(errno), errno);
 
-            return EXIT_FAILURE;
+            return false;
         }
 
         if (args->action_only   && flow.value.state == ACTION_NONE ||
@@ -207,10 +210,22 @@ get_next_key:
         fprintf(stderr, "Error retrieving flow key: %s (-%d).\n",
             strerror(errno), errno);
         
-        return EXIT_FAILURE;
+        return false;
     }
 
-    return EXIT_SUCCESS;
+    return true;
+}
+
+bool print_ipv4_flows(struct cmd_args *args) {
+    return __print_flows(args, IPV4_FLOW_MAP_NAME);
+}
+
+bool print_ipv6_flows(struct cmd_args *args) {
+    return __print_flows(args, IPV6_FLOW_MAP_NAME);
+}
+
+bool print_flows(struct cmd_args *args) {
+    return print_ipv4_flows(args) && print_ipv6_flows(args);
 }
 
 
@@ -238,5 +253,5 @@ int main(int argc, char* argv[]) {
     struct cmd_args args = {};
     check_cmd_args(argc, argv, &args);
 
-    return print_flows(&args);
+    return print_flows(&args) ? EXIT_SUCCESS : EXIT_FAILURE;
 }
