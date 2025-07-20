@@ -289,6 +289,7 @@ static int get_link(struct netlink_handle* nl_h, __u32 ifindex, struct flow *flo
 
 static int get_route(struct netlink_handle* nl_h, struct flow* flow, __be32 *dest_ip) {
     __be32 *flow_dest_ip = flow_ip_get_dest(&flow->key.ip, flow->key.family);
+    __be32 *flow_src_ip = flow_ip_get_src(&flow->key.ip, flow->key.family);
     const struct nlattr *rta[RTA_MAX + 1] = {};
     DECLARE_ATTR_TB(rta);
 
@@ -301,16 +302,17 @@ static int get_route(struct netlink_handle* nl_h, struct flow* flow, __be32 *des
     rtm->rtm_src_len = rtm->rtm_dst_len = flow->key.family == AF_INET ? 32 : 128;
 
     // Add attributes
-    //mnl_attr_put_u32(nlh, RTA_IIF, flow->value.next.iif);
-    //mnl_attr_put_u8 (nlh, RTA_IP_PROTO, flow->key.proto);
+    mnl_attr_put_u32(nlh, RTA_IIF, flow->key.ifindex);
 
-    //mnl_attr_put_ip (nlh, RTA_SRC, flow->key.src_ip, flow->key.family);
-    mnl_attr_put_ip (nlh, RTA_DST, flow->value.next.nat.rewrite_flag & REWRITE_DEST_IP ?
-                                   flow->value.next.nat.dest_ip : flow_dest_ip, flow->key.family);
+    mnl_attr_put_ip(nlh, RTA_SRC, flow_src_ip, flow->key.family);
+    mnl_attr_put_ip(nlh, RTA_DST, flow->value.next.nat.rewrite_flag & REWRITE_DEST_IP ?
+                                  flow->value.next.nat.dest_ip : flow_dest_ip, flow->key.family);
 
-    /*mnl_attr_put_u16(nlh, RTA_SPORT, flow->key.src_port);
+    /* FIB rules */
+    mnl_attr_put_u8 (nlh, RTA_IP_PROTO, flow->key.proto);
+    mnl_attr_put_u16(nlh, RTA_SPORT, flow->key.src_port);
     mnl_attr_put_u16(nlh, RTA_DPORT, flow->value.next.nat.rewrite_flag & REWRITE_DEST_PORT ?
-                                     flow->value.next.nat.dest_port : flow->key.dest_port);*/
+                                     flow->value.next.nat.dest_port : flow->key.dest_port);
 
     // Send request and receive response
     int rc = send_request(nl_h);

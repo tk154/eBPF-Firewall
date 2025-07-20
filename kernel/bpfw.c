@@ -181,13 +181,7 @@ __always_inline static __u8 bpfw_func(void *ctx, bool xdp, struct packet_data *p
 
 	bpfw_debug("---------- New Package ----------");
 
-	if (!parse_l2_header(ctx, xdp, pkt, &header.l2))
-		return ACTION_PASS;
-
-	if (!parse_l3_header(pkt, header.l2.proto, &header.l3))
-		return ACTION_PASS;
-
-	if (!parse_l4_header(pkt, header.l3.proto, &header.l4))
+	if (!parse_header(ctx, xdp, pkt, &header))
 		return ACTION_PASS;
 
 	flow.map = get_flow_map(header.l3.family);
@@ -215,7 +209,7 @@ __always_inline static __u8 bpfw_func(void *ctx, bool xdp, struct packet_data *p
 
 			if (header.l3.tot_len > flow.value->next.hop.mtu) {
 				bpfw_debug("MTU exceeded (%u > %u)",
-					header.l3.tot_len, f_value->next.hop.mtu);
+					header.l3.tot_len, flow.value->next.hop.mtu);
 		
 				return ACTION_PASS;
 			}

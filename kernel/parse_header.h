@@ -18,7 +18,9 @@
 #define IP_MF			0x2000	/* "More Fragments" */
 #define IP_OFFSET		0x1FFF	/* "Fragment Offset" */
 #define IP_VERSION(ip)	(*(__u8 *)(ip) >> 4)
+#define IP_IHL(ip)		(*(__u8 *)(ip) & 0xF)
 
+// tcphdr from <linux/tcp.h> uses the host endianness, instead of the compiler endianness
 #define TCP_FLAGS(tcp)	(*((__u8 *)(tcp) + 13))
 #define TCP_FIN(flags)	((flags) & BIT(0))
 #define TCP_RST(flags)	((flags) & BIT(2))
@@ -141,20 +143,28 @@ __always_inline static bool parse_l2_header(void *ctx, bool xdp, struct packet_d
 __always_inline static bool parse_ipv4_header(struct packet_data *pkt, struct l3_header *l3) {
 	// Parse the IPv4 header, will drop the package if out-of-bounds
 	struct iphdr *iph;
+	__u8 ver, ihl;
+
 	check_header(iph, pkt);
 
 	bpfw_debug_ipv4("Src IPv4: ", &iph->saddr);
 	bpfw_debug_ipv4("Dst IPv4: ", &iph->daddr);
 
-	/*__u8 ihl = ((struct iphdr_ver_ihl*)iph)->ihl;
+	ver = IP_VERSION(iph);
+	ihl = IP_IHL(iph);
 
-	// ip options
-	if (ihl * 4 != sizeof(*iph)) {
+	if (ver != IPVERSION) {
+		bpfw_debug("Invalid IPv4 version %u", ver);
+		return false;
+	}
+
+	// IP options
+	if (ihl != sizeof(*iph) >> 2) {
 		bpfw_debug("IHL words (%u) doesn't equal IPv4 Header size.", ihl);
 		return false;
-	}*/
+	}
 
-	/* ip fragmented traffic */
+	/* IP fragmented traffic */
 	if (iph->frag_off & bpf_htons(IP_MF | IP_OFFSET)) {
 		bpfw_debug("IPv4 Packet is fragmented.");
 		return false;
@@ -272,6 +282,12 @@ __always_inline static bool parse_l4_header(struct packet_data *pkt, __be16 prot
 			bpfw_debug("IP Protocol: %u", proto);
 			return false;
 	}
+}
+
+__always_inline static bool parse_header(void *ctx, bool xdp, struct packet_data *pkt, struct packet_header *header) {
+	return parse_l2_header(ctx, xdp, pkt, &header->l2) &&
+		parse_l3_header(pkt, header->l2.proto, &header->l3) &&
+		parse_l4_header(pkt, header->l3.proto, &header->l4);
 }
 
 

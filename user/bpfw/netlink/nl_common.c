@@ -479,8 +479,8 @@ static int notification_cb(const struct nlmsghdr *nlh, void *data) {
 
 int netlink_check_notifications(struct netlink_handle *nl_h, struct netlink_cb link_cb, void *data) {
     struct not_cb_data cb = { .nl_h = nl_h, .link_cb = link_cb, .data = data };
-
     ssize_t nbytes;
+
     while ((nbytes = mnl_socket_recvfrom(nl_h->not.sock, nl_h->not.buf, nl_h->not.buf_size)) > 0) {
         int rc = mnl_cb_run(nl_h->not.buf, nbytes, 0, 0, notification_cb, &cb);
         if (rc == MNL_CB_ERROR) {

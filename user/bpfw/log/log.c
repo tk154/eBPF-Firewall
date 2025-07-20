@@ -211,11 +211,8 @@ void bpfw_log_action(enum bpfw_log_level level, __u8 action, const char *prefix,
             break;
 
         case ACTION_PASS:
-            fputs("Pass\n", log_file);
-            break;
-
         case ACTION_NONE:
-            fputs("\"Pass\"\n", log_file);
+            fputs("Pass\n", log_file);
             break;
 
         default:

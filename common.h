@@ -190,23 +190,6 @@ __always_inline static void ip6cpy(__be32 *dest, const __be32 *src) {
 }
 
 __always_inline static void ipcpy(__be32 *dest, const __be32 *src, __u8 family) {
-    /*switch (family) {
-        case AF_INET6:
-            dest[3] = src[3];
-			dest[2] = src[2];
-			dest[1] = src[1];
-        case AF_INET:
-            dest[0] = src[0];
-    }*/
-
-	/*dest[0] = src[0];
-
-	if (family == AF_INET6) {
-		dest[1] = src[1];
-		dest[2] = src[2];
-		dest[3] = src[3];
-	}*/
-
 	switch (family) {
 		case AF_INET:
 			return ip4cpy(dest, src);
@@ -217,14 +200,6 @@ __always_inline static void ipcpy(__be32 *dest, const __be32 *src, __u8 family) 
 
 __always_inline static __be32 *flow_ip_get_src(union flow_ip *flow_ip, __u8 family) {
 	return family == AF_INET ? flow_ip->v4.src : flow_ip->v6.src;
-	/*switch (family) {
-		case AF_INET:
-			return flow_ip->v4.src;
-		case AF_INET6:
-			return flow_ip->v6.src;
-		default:
-			return NULL;
-	}*/
 }
 
 __always_inline static __be32 *flow_ip_get_dest(union flow_ip *flow_ip, __u8 family) {

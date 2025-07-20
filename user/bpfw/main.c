@@ -46,12 +46,8 @@ int main(int argc, char* argv[]) {
 
     bpfw_info("Successfully loaded BPF program. Press CTRL+C to unload.\n");
 
-    if (flowtrack_loop(flowtrack_h) != BPFW_RC_OK)
-        goto flowtrack_destroy;
+    flowtrack_loop(flowtrack_h);
 
-    return EXIT_SUCCESS;
-
-flowtrack_destroy:
     flowtrack_destroy(flowtrack_h, &args);
 
 free_cmd_args:

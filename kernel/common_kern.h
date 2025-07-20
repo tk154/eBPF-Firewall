@@ -45,28 +45,6 @@
     } while (0);
 
 
-// tcphdr from <linux/tcp.h> uses the host endianness, instead of the compiler endianness
-/*#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-struct iphdr_ver_ihl {
-    __u8 ihl:4, version:4;
-};
-
-struct tcphdr_flags {
-	__u8 fin:1, syn:1, rst:1, psh:1, ack:1, urg:1, ece:1, cwr:1;
-};
-
-#elif __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
-struct iphdr_ver_ihl {
-    __u8 version:4, ihl:4;
-};
-
-struct tcphdr_flags {
-	__u8 cwr:1, ece:1, urg:1, ack:1, psh:1, rst:1, syn:1, fin:1;
-};
-#endif
-#define TCP_HEADER_FLAGS_OFFSET 13*/
-
-
 struct flow {
 	struct flow_key key;
 	struct flow_value *value;
@@ -82,7 +60,7 @@ struct packet_data {
 };
 
 struct l2_header {
-    __u8   *src_mac;
+    __u8  *src_mac;
     __u16  vlan_id;
     __be16 pppoe_id;
     __u16  payload_len;
@@ -106,7 +84,6 @@ struct l4_header {
     __u16 payload_len;
 
 	// TCP Header Flags
-	//struct tcphdr_flags tcp_flags;
     __u8 tcp_flags;
 };
 
